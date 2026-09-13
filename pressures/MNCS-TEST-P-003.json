@@ -1,0 +1,20 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-003",
+  "title": "Compiler diagnostics are structured only at the external CLI boundary",
+  "commons_pressure_id": "MNCS-TOOLING-E920D54703E3",
+  "target_layer": "compiler/tooling",
+  "observed_need": "Compile-fail and diagnostic tests must match diagnostic identity and preserve source spans without scraping human prose.",
+  "current_language_behavior": "mncs validate emits JSON diagnostics, but there is no stable in-process diagnostic API for an external MNCS test program and no typed test-facing diagnostic value.",
+  "why_insufficient": "The adapter can preserve compiler JSON and match code prefixes, but native diagnostic assertions cannot yet inspect diagnostics directly.",
+  "minimal_reproducer": "tests/fixtures/compile_fail.mncs plus tools/mncs_test.py: compile_entry parses stdout JSON and checks diagnostic_codes.",
+  "desired_direction": "A versioned diagnostic value/protocol exposing code, severity, source span, related diagnostics, and rendered forms to native tooling.",
+  "severity": "major",
+  "disposition": "worked_around",
+  "workaround": "The host adapter consumes only the current structured validate JSON and stores the full diagnostic array as an artifact; it does not match formatted stderr.",
+  "status": "open",
+  "relevant_files": ["tools/mncs_test.py", "schemas/test-result.schema.json", "tests/fixtures/compile_fail.mncs"],
+  "relevant_tests": ["tests/test_runner.py::test_expected_compile_failure"],
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470"],
+  "commons_observations": ["MNCS-TOOLING-E920D54703E3--OBS-9BB91C7F9694"]
+}

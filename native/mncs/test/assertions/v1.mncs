@@ -1,0 +1,135 @@
+mncs 0.16;
+
+// mncs.test.assertions.v1 — the semantic core of mncs-test assertions.
+//
+// Assertions are ordinary MNCS values.  They do not print, throw, inspect
+// host state, or decide a process exit code.  A test program constructs an
+// Assertion, turns it into a TestResult, and a native suite folds those
+// results into a summary.  The external adapter only transports the
+// resulting logical values and supervises the compiler process.
+//
+// Numeric codes are intentionally carried beside the finite values.  The
+// current execution ABI preserves a finite value's discriminant and
+// identity, but does not yet expose the source variant spelling at the
+// process boundary.  The codes make this first consumer protocol explicit
+// and stable while retaining the typed MNCS value internally.
+module mncs.test.assertions.v1;
+
+enum Verdict { PASS, FAIL, SKIP, UNSUPPORTED }
+enum FailureKind { NoFailure, Assertion, Setup, Compile, Runtime, Timeout, Unsupported, Infrastructure }
+
+record Assertion {
+    passed: bool,
+    expected: i64,
+    actual: i64,
+    code: u64
+}
+
+record TestResult {
+    verdict: Verdict,
+    verdict_code: u64,
+    failure_kind: FailureKind,
+    failure_code: u64,
+    assertions: u64,
+    failures: u64,
+    expected: i64,
+    actual: i64,
+    assertion_code: u64
+}
+
+fn equals_i64(expected: i64, actual: i64, code: u64) -> (result: Assertion) {
+    return Assertion { passed: expected == actual, expected: expected, actual: actual, code: code };
+}
+
+fn equals_bool(expected: bool, actual: bool, code: u64) -> (result: Assertion) {
+    return Assertion {
+        passed: expected == actual,
+        expected: select(expected, 1, 0),
+        actual: select(actual, 1, 0),
+        code: code
+    };
+}
+
+// Element-wise equality for a bounded byte sequence.  This is a semantic
+// assertion helper, not a host-side byte comparison.  The caller chooses an
+// exact sequence bound, so the compiler retains the element type and length.
+fn equals_bytes<N: Nat>(expected: [byte; N], actual: [byte; N], code: u64) -> (result: Assertion) {
+    iterate i over expected carrying same: bool = true {
+        next same = same && expected[i] == actual[i];
+    }
+    return Assertion {
+        passed: same,
+        expected: 1,
+        actual: select(same, 1, 0),
+        code: code
+    };
+}
+
+fn from_assertion(assertion: Assertion) -> (result: TestResult) {
+    if assertion.passed {
+        return TestResult {
+            verdict: Verdict.PASS,
+            verdict_code: 0,
+            failure_kind: FailureKind.NoFailure,
+            failure_code: 0,
+            assertions: 1,
+            failures: 0,
+            expected: assertion.expected,
+            actual: assertion.actual,
+            assertion_code: assertion.code
+        };
+    }
+    return TestResult {
+        verdict: Verdict.FAIL,
+        verdict_code: 1,
+        failure_kind: FailureKind.Assertion,
+        failure_code: assertion.code,
+        assertions: 1,
+        failures: 1,
+        expected: assertion.expected,
+        actual: assertion.actual,
+        assertion_code: assertion.code
+    };
+}
+
+fn pass() -> (result: TestResult) {
+    return TestResult {
+        verdict: Verdict.PASS,
+        verdict_code: 0,
+        failure_kind: FailureKind.NoFailure,
+        failure_code: 0,
+        assertions: 0,
+        failures: 0,
+        expected: 0,
+        actual: 0,
+        assertion_code: 0
+    };
+}
+
+fn skip(code: u64) -> (result: TestResult) {
+    return TestResult {
+        verdict: Verdict.SKIP,
+        verdict_code: 2,
+        failure_kind: FailureKind.NoFailure,
+        failure_code: code,
+        assertions: 0,
+        failures: 0,
+        expected: 0,
+        actual: 0,
+        assertion_code: 0
+    };
+}
+
+fn unsupported(code: u64) -> (result: TestResult) {
+    return TestResult {
+        verdict: Verdict.UNSUPPORTED,
+        verdict_code: 3,
+        failure_kind: FailureKind.Unsupported,
+        failure_code: code,
+        assertions: 0,
+        failures: 0,
+        expected: 0,
+        actual: 0,
+        assertion_code: 0
+    };
+}

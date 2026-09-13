@@ -1,0 +1,20 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-005",
+  "title": "Test declarations and callbacks are represented as manifest names",
+  "commons_pressure_id": "MNCS-LANG-770B42F56E6C",
+  "target_layer": "language semantics",
+  "observed_need": "Declare named tests, suites, fixtures, parameterized cases, and test metadata without a parallel host registry.",
+  "current_language_behavior": "The current profile has ordinary functions, bounded sequences, and imports, but no first-class test declaration or first-class handler/closure value for dynamic registration.",
+  "why_insufficient": "The manifest must name functions and the native suite must build a static sequence; setup/teardown and dynamic parameterized registration cannot yet be idiomatic values.",
+  "minimal_reproducer": "mncs-test.toml lists entry = 'test_arithmetic'; tests/self_suite.mncs calls test_arithmetic() explicitly in summarize<6>([...]).",
+  "desired_direction": "A native test declaration/metadata vocabulary and first-class callable/fixture abstraction that remains bounded, typed, and statically inspectable.",
+  "severity": "major",
+  "disposition": "contained",
+  "workaround": "Manifest identities and static MNCS calls make the boundary explicit; no host callback registry is synthesized.",
+  "status": "open",
+  "relevant_files": ["native/mncs/test/assertions/v1.mncs", "native/mncs/test/suite/v1.mncs", "tests/self_suite.mncs", "mncs-test.toml"],
+  "relevant_tests": ["tests/test_runner.py::test_self_suite"],
+  "relevant_commits": ["mncs-test:b170470"],
+  "commons_observations": ["MNCS-LANG-770B42F56E6C--OBS-3FA64B8381FC"]
+}

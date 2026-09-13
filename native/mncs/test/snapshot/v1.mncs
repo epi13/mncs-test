@@ -1,0 +1,28 @@
+mncs 0.16;
+
+// mncs.test.snapshot.v1 — a deterministic witness model.
+//
+// Snapshot publication is intentionally not automatic.  A caller computes
+// a bounded witness from MNCS values and the host adapter compares the
+// returned witness with a checked-in golden document.  The witness records
+// length and a simple weighted checksum; stronger content digests can be
+// composed with mncs.std.sha256.v1 when a suite has the required bounded
+// byte representation.
+module mncs.test.snapshot.v1;
+
+record Witness {
+    length: u64,
+    checksum: u64
+}
+
+fn bytes(view: [byte; up_to 64]) -> (result: Witness) {
+    iterate i over view carrying checksum: u64 = 0 {
+        let live: bool = i < view.len;
+        next checksum = checksum +% select(live, (i +% 1) *% view[i] as u64, 0);
+    }
+    return Witness { length: view.len, checksum: checksum };
+}
+
+fn same(left: Witness, right: Witness) -> (result: bool) {
+    return left.length == right.length && left.checksum == right.checksum;
+}

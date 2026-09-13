@@ -1,0 +1,20 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-006",
+  "title": "Machine-readable result transport still requires host JSON",
+  "commons_pressure_id": "MNCS-TOOLING-146FB6F4BBC6",
+  "target_layer": "stdlib/tooling",
+  "observed_need": "Expose a stable result document to mncs-actions and future Forge without losing typed native values or structured diagnostics.",
+  "current_language_behavior": "MNCS values are bounded and typed, but the external request/result ABI uses host-owned JSON serialization and MNCS has no open-vocabulary string/text value for arbitrary protocol fields.",
+  "why_insufficient": "The native semantic record can be returned, but the action-facing check-result wrapper, paths, and diagnostic text cannot yet be authored and serialized entirely by MNCS.",
+  "minimal_reproducer": "tools/mncs_test.py emits mncs.test-result/1 and mncs.check-result/1 after receiving the typed record from mncs execute.",
+  "desired_direction": "A versioned native serialization/protocol library for bounded structured results, with explicit text/bytes policy and lossless adapter projections.",
+  "severity": "major",
+  "disposition": "worked_around",
+  "workaround": "Python JSON is a transport adapter only; native assertions and suite verdicts remain typed MNCS records and the raw native execution output is preserved.",
+  "status": "open",
+  "relevant_files": ["tools/mncs_test.py", "schemas/test-result.schema.json", "docs/architecture.md"],
+  "relevant_tests": ["tests/test_runner.py::test_structured_check_result"],
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-actions:95df975"],
+  "commons_observations": ["MNCS-TOOLING-146FB6F4BBC6--OBS-4F19097B5A90"]
+}

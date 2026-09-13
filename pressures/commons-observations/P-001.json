@@ -1,0 +1,30 @@
+{
+  "repository": "mncs-test",
+  "observedAt": "2026-09-12T00:00:00Z",
+  "sourceRef": {
+    "repository": "mncs-test",
+    "branch": "campaign/native-framework-2026-09",
+    "commit": "pending-delivery",
+    "path": "pressures/MNCS-TEST-P-001.json",
+    "workingTree": true
+  },
+  "agent": "Luna Max",
+  "runId": "mncs-test-native-framework-2026-09",
+  "languageProfile": "0.16",
+  "compiler": {
+    "component": "mncs-language",
+    "revision": "campaign/ravel-witness-2026-09",
+    "validation": "native modules and self-suite validated with current mncs CLI"
+  },
+  "summary": "mncs-test requires a host process boundary to launch mncs, capture stdout/stderr, and enforce an operating-system timeout.",
+  "reproduction": {
+    "status": "PASS",
+    "instructions": "Run mncs-test/tools/mncs_test.py and inspect run_process; the self-suite preserves commands, stdout, stderr, and request artifacts."
+  },
+  "evidence": [
+    {"id": "mncs-test-self-suite", "kind": "native-execution", "ref": "tests/self_suite.mncs", "status": "PASS", "summary": "Native suite executes through the current external mncs CLI."},
+    {"id": "mncs-test-action-pass", "kind": "action-integration", "ref": "mncs-actions/actions/mncs-test/test.sh", "status": "PASS", "summary": "Action path captures the provider result and packages evidence."}
+  ],
+  "workaround": {"active": true, "description": "Python stdlib subprocess.run is a narrow process/capture/timeout adapter; it does not implement test semantics.", "fallbackLanguage": "python", "removed": false},
+  "metadata": {"localPressureId": "MNCS-TEST-P-001", "targetLayer": "runtime/tooling", "disposition": "worked_around"}
+}

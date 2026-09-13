@@ -1,0 +1,20 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-002",
+  "title": "Default recursive test discovery is not a native filesystem operation",
+  "commons_pressure_id": "MNCS-TOOLING-C5FD211E05C1",
+  "target_layer": "tooling/filesystem",
+  "observed_need": "Find independent manifests across a repository while keeping discovery deterministic and inspectable.",
+  "current_language_behavior": "MNCS does not currently expose portable recursive directory enumeration to an external consumer.",
+  "why_insufficient": "A magical host-side recursive scan would hide package boundaries and make test selection depend on filesystem order.",
+  "minimal_reproducer": "tools/mncs_test.py: discover_manifests(root, recursive=True) uses sorted os.walk/rglob only when explicitly requested.",
+  "desired_direction": "A package/module-aware native discovery contract, or a bounded standard-library directory enumeration API with stable ordering and capability grants.",
+  "severity": "major",
+  "disposition": "contained",
+  "workaround": "The normal run path requires an explicit root manifest and direct tests/*.toml entries; recursive discovery is opt-in and sorted.",
+  "status": "open",
+  "relevant_files": ["tools/mncs_test.py", "schemas/test-manifest.schema.json", "docs/architecture.md"],
+  "relevant_tests": ["tests/test_runner.py::test_discovery_is_deterministic"],
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470"],
+  "commons_observations": ["MNCS-TOOLING-C5FD211E05C1--OBS-8AF8511663BD"]
+}

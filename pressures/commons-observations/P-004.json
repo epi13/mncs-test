@@ -1,0 +1,14 @@
+{
+  "repository": "mncs-test",
+  "observedAt": "2026-09-12T00:00:00Z",
+  "sourceRef": {"repository": "mncs-test", "branch": "campaign/native-framework-2026-09", "commit": "pending-delivery", "path": "pressures/MNCS-TEST-P-004.json", "workingTree": true},
+  "agent": "Luna Max",
+  "runId": "mncs-test-native-framework-2026-09",
+  "languageProfile": "0.16",
+  "compiler": {"component": "mncs-language", "revision": "campaign/ravel-witness-2026-09", "validation": "self-suite command artifact count inspected"},
+  "summary": "The current external ABI requires one mncs process for the suite and one fresh process for each declared runtime entry.",
+  "reproduction": {"status": "PASS", "instructions": "Run the self-suite and inspect .mncs/mncs-test-artifacts/commands for suite.json plus one command document per runtime entry."},
+  "evidence": [{"id": "mncs-test-command-artifacts", "kind": "provenance", "ref": "tests/test_runner.py", "status": "PASS", "summary": "Every request boundary is preserved as an artifact."}],
+  "workaround": {"active": true, "description": "The adapter uses explicit one-shot requests and retains deterministic command/response evidence; no native session semantics are faked.", "fallbackLanguage": "python", "removed": false},
+  "metadata": {"localPressureId": "MNCS-TEST-P-004", "targetLayer": "runtime/tooling", "disposition": "worked_around"}
+}

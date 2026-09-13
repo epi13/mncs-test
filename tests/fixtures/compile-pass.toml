@@ -1,0 +1,13 @@
+schema_version = "mncs.test-manifest/1"
+name = "compile-pass-fixture"
+source = "../self_suite.mncs"
+module = "tests.self_suite"
+profile = "0.16"
+timeout_seconds = 30
+libraries = ["../../native"]
+
+[[tests]]
+id = "self-suite-compiles"
+entry = "suite"
+kind = "compile-pass"
+tags = ["positive", "compiler"]
