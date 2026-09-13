@@ -1,0 +1,14 @@
+schema_version = "mncs.test-manifest/1"
+name = "compile-fail-fixture"
+source = "compile_fail.mncs"
+module = "tests.fixtures.compile_fail"
+profile = "0.16"
+timeout_seconds = 30
+libraries = ["../../native"]
+
+[[tests]]
+id = "invalid-return"
+entry = "invalid_return"
+kind = "compile-fail"
+diagnostic_codes = ["MNE"]
+tags = ["negative", "compiler"]

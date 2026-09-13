@@ -1,0 +1,14 @@
+mncs 0.16;
+
+module tests.fixtures.failing_suite;
+
+use mncs.test.assertions.v1;
+use mncs.test.suite.v1;
+
+fn failing_assertion() -> (result: TestResult) {
+    return from_assertion(equals_i64(7, 6, 9001));
+}
+
+fn suite() -> (result: SuiteSummary) {
+    return summarize<1>([failing_assertion()]);
+}

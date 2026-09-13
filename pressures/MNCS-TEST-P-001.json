@@ -1,0 +1,20 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-001",
+  "title": "Native test execution cannot supervise a child process",
+  "commons_pressure_id": "MNCS-TOOLING-B665F138D324",
+  "target_layer": "runtime/tooling",
+  "observed_need": "Run the current MNCS compiler/runtime, enforce a wall-clock timeout, capture stdout/stderr, and preserve the child exit status.",
+  "current_language_behavior": "MNCS has no process-spawn, subprocess-capture, environment, signal, or wall-clock timeout primitive at the external-consumer boundary.",
+  "why_insufficient": "A native test framework cannot yet launch and supervise the compiler it is meant to consume without a host process adapter.",
+  "minimal_reproducer": "tools/mncs_test.py: run_process([mncs, 'execute', source, request], timeout=timeout_seconds)",
+  "desired_direction": "A bounded, capability-controlled runtime/tooling process-session API with explicit stdout/stderr, exit status, timeout, cancellation, and provenance semantics.",
+  "severity": "critical",
+  "disposition": "worked_around",
+  "workaround": "Python stdlib subprocess.run is used only to launch the external mncs executable, capture streams, and enforce the timeout; it does not evaluate tests.",
+  "status": "open",
+  "relevant_files": ["tools/mncs_test.py", "docs/bootstrap.md", "docs/architecture.md"],
+  "relevant_tests": ["tests/test_runner.py::test_self_suite", "tests/test_runner.py::test_timeout_classification"],
+  "relevant_commits": ["pending-delivery"],
+  "commons_observations": ["MNCS-TOOLING-B665F138D324--OBS-2B9A8FA41F8F"]
+}

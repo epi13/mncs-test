@@ -1,0 +1,8 @@
+mncs 0.16;
+
+module tests.fixtures.runtime_failure;
+
+fn trapped() -> (result: i64) {
+    fail isolated;
+    return 0;
+}

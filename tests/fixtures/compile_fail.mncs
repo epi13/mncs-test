@@ -1,0 +1,8 @@
+mncs 0.16;
+
+module tests.fixtures.compile_fail;
+
+fn invalid_return() -> (result: i64) {
+    let value: i64 = true;
+    return value;
+}

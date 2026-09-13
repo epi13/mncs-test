@@ -1,0 +1,41 @@
+mncs 0.16;
+
+// mncs.test.generative.v1 — deterministic bounded property-test substrate.
+//
+// The generator is deliberately a pure MNCS value stream.  It shares the
+// MMIX LCG constants used by mncs-language's conformance tooling, records
+// every seed/case index, and exposes a simple shrink direction.  The
+// external adapter supplies no generated values and evaluates no property;
+// it only launches the compiled property entrypoint with an explicit seed.
+module mncs.test.generative.v1;
+
+record PropertyCase {
+    seed: u64,
+    case_index: u64,
+    value: u64
+}
+
+fn advance_random(state: u64) -> (result: u64) {
+    return state *% 6364136223846793005 +% 1442695040888963407;
+}
+
+fn draw_case(seed: u64, case_index: u64) -> (result: PropertyCase) {
+    let offset: u64 = case_index *% 2862933555777941757 +% 3037000493;
+    let drawn: u64 = advance_random(seed +% offset);
+    return PropertyCase { seed: seed, case_index: case_index, value: drawn };
+}
+
+fn shrink(value: u64) -> (result: u64) {
+    return value / 2;
+}
+
+fn within(value: u64, bound: u64) -> (result: u64) {
+    if bound == 0 {
+        return 0;
+    }
+    return value % bound;
+}
+
+fn replay(seed: u64, case_index: u64, bound: u64) -> (result: u64) {
+    return within(draw_case(seed, case_index).value, bound);
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/epi13/mncs-test/blob/main/schemas/test-result.schema.json",
+  "title": "MNCS Test Result",
+  "description": "Stable machine-readable result protocol emitted by mncs-test.",
+  "type": "object",
+  "required": ["schema_version", "protocol_version", "id", "provider", "verdict", "classification", "exit_code", "run_id", "scope", "summary", "tests", "provenance", "artifacts", "reproduction"],
+  "properties": {
+    "schema_version": {"const": "mncs.test-result/1"},
+    "protocol_version": {"const": 1},
+    "id": {"const": "mncs-test"},
+    "provider": {"const": "mncs-test"},
+    "verdict": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
+    "classification": {"enum": ["success", "test_failure", "runtime_failure", "setup_failure", "infrastructure_failure", "compile_failure", "timeout", "unsupported", "invalid_invocation"]},
+    "failure_class": {"type": "string", "minLength": 1},
+    "exit_code": {"type": "integer", "minimum": 0, "maximum": 255},
+    "run_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "scope": {"type": "object"},
+    "summary": {"$ref": "#/$defs/summary"},
+    "tests": {"type": "array", "items": {"$ref": "#/$defs/test"}},
+    "suite": {"type": ["object", "null"]},
+    "native_suite_summary": {"anyOf": [{"$ref": "#/$defs/summary"}, {"type": "null"}]},
+    "provenance": {"type": "object"},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "reproduction": {"type": "object", "required": ["command", "run_id"]},
+    "failure": {"type": "object"}
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["total", "passed", "failed", "skipped", "unsupported", "authority"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "passed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0},
+        "unsupported": {"type": "integer", "minimum": 0},
+        "assertion_failures": {"type": "integer", "minimum": 0},
+        "setup_failures": {"type": "integer", "minimum": 0},
+        "compile_failures": {"type": "integer", "minimum": 0},
+        "runtime_failures": {"type": "integer", "minimum": 0},
+        "timeout_failures": {"type": "integer", "minimum": 0},
+        "infrastructure_failures": {"type": "integer", "minimum": 0},
+        "assertion_count": {"type": "integer", "minimum": 0},
+        "failure_count": {"type": "integer", "minimum": 0},
+        "authority": {"enum": ["native_suite", "manifest_compile_or_adapter_projection", "adapter"]}
+      },
+      "additionalProperties": true
+    },
+    "test": {
+      "type": "object",
+      "required": ["id", "entry", "kind", "source", "verdict", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "entry": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "verdict": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
+        "status": {"type": "string", "minLength": 1},
+        "location": {"type": "object"},
+        "failure": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["path", "kind", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))(?!.*\\\\)"},
+        "kind": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

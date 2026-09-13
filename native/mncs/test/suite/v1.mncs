@@ -1,0 +1,99 @@
+mncs 0.16;
+
+// mncs.test.suite.v1 — deterministic native aggregation.
+//
+// A suite is a bounded sequence of TestResult values.  Aggregation is kept
+// in MNCS so the semantic verdict is not reimplemented by Python, shell, or
+// a CI action.  The host adapter may check that its transport projection
+// agrees with this returned record, but it never recomputes the verdict from
+// individual assertions.
+module mncs.test.suite.v1;
+
+use mncs.test.assertions.v1;
+
+record SuiteSummary {
+    verdict: Verdict,
+    verdict_code: u64,
+    total: u64,
+    passed: u64,
+    failed: u64,
+    skipped: u64,
+    unsupported: u64,
+    assertion_failures: u64,
+    setup_failures: u64,
+    compile_failures: u64,
+    runtime_failures: u64,
+    timeout_failures: u64,
+    infrastructure_failures: u64,
+    assertion_count: u64,
+    failure_count: u64
+}
+
+fn empty() -> (result: SuiteSummary) {
+    return SuiteSummary {
+        verdict: Verdict.PASS,
+        verdict_code: 0,
+        total: 0,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        unsupported: 0,
+        assertion_failures: 0,
+        setup_failures: 0,
+        compile_failures: 0,
+        runtime_failures: 0,
+        timeout_failures: 0,
+        infrastructure_failures: 0,
+        assertion_count: 0,
+        failure_count: 0
+    };
+}
+
+fn verdict_for(summary: SuiteSummary) -> (result: SuiteSummary) {
+    if summary.failed > 0 {
+        return SuiteSummary { ..summary, verdict: Verdict.FAIL, verdict_code: 1 };
+    }
+    if summary.unsupported > 0 {
+        return SuiteSummary { ..summary, verdict: Verdict.UNSUPPORTED, verdict_code: 3 };
+    }
+    return SuiteSummary { ..summary, verdict: Verdict.PASS, verdict_code: 0 };
+}
+
+fn observe(summary: SuiteSummary, test: TestResult) -> (result: SuiteSummary) {
+    let counted: SuiteSummary = SuiteSummary {
+        ..summary,
+        total: summary.total +% 1,
+        assertion_count: summary.assertion_count +% test.assertions,
+        failure_count: summary.failure_count +% test.failures
+    };
+    return match test.verdict {
+        PASS => verdict_for(SuiteSummary { ..counted, passed: counted.passed +% 1 }),
+        FAIL => observe_failure(counted, test.failure_kind, test),
+        SKIP => verdict_for(SuiteSummary { ..counted, skipped: counted.skipped +% 1 }),
+        UNSUPPORTED => verdict_for(SuiteSummary { ..counted, unsupported: counted.unsupported +% 1 })
+    };
+}
+
+fn observe_failure(summary: SuiteSummary, kind: FailureKind, test: TestResult) -> (result: SuiteSummary) {
+    let failed: SuiteSummary = SuiteSummary { ..summary, failed: summary.failed +% 1 };
+    return match kind {
+        FailureKind.NoFailure => verdict_for(failed),
+        FailureKind.Assertion => verdict_for(SuiteSummary { ..failed, assertion_failures: failed.assertion_failures +% 1 }),
+        FailureKind.Setup => verdict_for(SuiteSummary { ..failed, setup_failures: failed.setup_failures +% 1 }),
+        FailureKind.Compile => verdict_for(SuiteSummary { ..failed, compile_failures: failed.compile_failures +% 1 }),
+        FailureKind.Runtime => verdict_for(SuiteSummary { ..failed, runtime_failures: failed.runtime_failures +% 1 }),
+        FailureKind.Timeout => verdict_for(SuiteSummary { ..failed, timeout_failures: failed.timeout_failures +% 1 }),
+        FailureKind.Unsupported => verdict_for(SuiteSummary { ..failed, unsupported: failed.unsupported +% 1 }),
+        FailureKind.Infrastructure => verdict_for(SuiteSummary { ..failed, infrastructure_failures: failed.infrastructure_failures +% 1 })
+    };
+}
+
+// Generic bounded folding is the intended suite API.  A suite source calls
+// `summarize<N>` with its statically declared result sequence, so dynamic
+// registration is not hidden in the runner.
+fn summarize<N: Nat>(tests: [TestResult; N]) -> (result: SuiteSummary) {
+    iterate i over tests carrying summary: SuiteSummary = empty() {
+        next summary = observe(summary, tests[i]);
+    }
+    return summary;
+}

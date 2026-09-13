@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# The only shell in mncs-test is a transparent executable launcher.  It does
+# not discover tests, evaluate assertions, or transform semantic results.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/../tools/mncs_test.py" "$@"

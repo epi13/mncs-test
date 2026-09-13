@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/epi13/mncs-test/blob/main/schemas/test-manifest.schema.json",
+  "title": "MNCS Test Manifest",
+  "description": "The JSON shape equivalent of an mncs.test-manifest/1 TOML manifest.",
+  "type": "object",
+  "required": ["schema_version", "name", "source", "module", "tests"],
+  "properties": {
+    "schema_version": {"const": "mncs.test-manifest/1"},
+    "name": {"type": "string", "minLength": 1},
+    "source": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(^|/)\\.\\.(/|$))(?!.*\\\\)"},
+    "module": {"type": "string", "minLength": 1},
+    "suite": {"type": ["string", "null"]},
+    "profile": {"type": "string", "minLength": 1},
+    "step_budget": {"type": "integer", "minimum": 1},
+    "timeout_seconds": {"type": "integer", "minimum": 1},
+    "libraries": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "tests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/test"}
+    }
+  },
+  "$defs": {
+    "test": {
+      "type": "object",
+      "required": ["id", "entry", "kind"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "entry": {"type": "string", "minLength": 1},
+        "kind": {
+          "enum": ["unit", "specification", "integration", "property", "snapshot", "regression", "compile-pass", "compile-fail", "diagnostic", "runtime-failure", "skip", "unsupported"]
+        },
+        "tags": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "arguments": {"type": "array"},
+        "type_arguments": {"type": "array"},
+        "diagnostic_codes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_-]*"}},
+        "expected_status": {"enum": ["returned", "runtime_failure", "unsupported", "budget_exhausted", "invalid_request"]},
+        "step_budget": {"type": "integer", "minimum": 0},
+        "timeout_seconds": {"type": "integer", "minimum": 0},
+        "seed": {"type": "integer", "minimum": 0},
+        "case_index": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

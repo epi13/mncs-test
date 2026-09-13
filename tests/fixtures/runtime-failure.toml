@@ -1,0 +1,15 @@
+schema_version = "mncs.test-manifest/1"
+name = "runtime-failure-fixture"
+source = "runtime_failure.mncs"
+module = "tests.fixtures.runtime_failure"
+profile = "0.16"
+step_budget = 1000
+timeout_seconds = 30
+libraries = ["../../native"]
+
+[[tests]]
+id = "expected-trap"
+entry = "trapped"
+kind = "runtime-failure"
+expected_status = "runtime_failure"
+tags = ["negative", "runtime"]

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/epi13/mncs-test/blob/main/schemas/test-discovery.schema.json",
+  "title": "MNCS Test Discovery",
+  "type": "object",
+  "required": ["schema_version", "root", "manifests", "errors"],
+  "properties": {
+    "schema_version": {"const": "mncs.test-discovery/1"},
+    "root": {"type": "string"},
+    "manifests": {"type": "array", "items": {"type": "object"}},
+    "errors": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

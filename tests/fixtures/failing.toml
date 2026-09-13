@@ -1,0 +1,15 @@
+schema_version = "mncs.test-manifest/1"
+name = "failing-fixture"
+source = "failing_suite.mncs"
+module = "tests.fixtures.failing_suite"
+suite = "suite"
+profile = "0.16"
+step_budget = 10000
+timeout_seconds = 30
+libraries = ["../../native"]
+
+[[tests]]
+id = "failing-assertion"
+entry = "failing_assertion"
+kind = "unit"
+tags = ["negative", "assertion"]
