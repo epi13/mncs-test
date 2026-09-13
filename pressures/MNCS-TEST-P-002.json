@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["tools/mncs_test.py", "schemas/test-manifest.schema.json", "docs/architecture.md"],
   "relevant_tests": ["tests/test_runner.py::test_discovery_is_deterministic", "tests/test_runner.py::test_compiler_inventory_discovery"],
-  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470"],
-  "commons_observations": ["MNCS-TOOLING-C5FD211E05C1--OBS-8AF8511663BD"]
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-test:e396217", "mncs-language:ea5e594"],
+  "commons_observations": ["MNCS-TOOLING-C5FD211E05C1--OBS-8AF8511663BD", "MNCS-TOOLING-C5FD211E05C1--OBS-2FB89EEB487C"]
 }

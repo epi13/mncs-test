@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["tools/mncs_test.py", "schemas/test-result.schema.json", "docs/architecture.md"],
   "relevant_tests": ["tests/test_runner.py::test_self_suite", "tests/test_runner.py::test_expected_compile_failure"],
-  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-actions:95df975"],
-  "commons_observations": ["MNCS-TOOLING-146FB6F4BBC6--OBS-4F19097B5A90"]
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-actions:95df975", "mncs-test:e396217", "mncs-language:ea5e594", "mncs-actions:7701127"],
+  "commons_observations": ["MNCS-TOOLING-146FB6F4BBC6--OBS-4F19097B5A90", "MNCS-TOOLING-146FB6F4BBC6--OBS-8EE189B6A49E"]
 }

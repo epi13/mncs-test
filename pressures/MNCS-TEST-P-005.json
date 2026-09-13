@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["native/mncs/test/assertions/v1.mncs", "native/mncs/test/suite/v1.mncs", "tests/self_suite.mncs", "mncs-test.toml"],
   "relevant_tests": ["tests/test_runner.py::test_self_suite", "tests/test_runner.py::test_compiler_inventory_discovery"],
-  "relevant_commits": ["mncs-test:b170470"],
-  "commons_observations": ["MNCS-LANG-770B42F56E6C--OBS-3FA64B8381FC"]
+  "relevant_commits": ["mncs-test:b170470", "mncs-test:e396217", "mncs-language:ea5e594"],
+  "commons_observations": ["MNCS-LANG-770B42F56E6C--OBS-3FA64B8381FC", "MNCS-LANG-770B42F56E6C--OBS-BB06009097B5"]
 }
