@@ -158,6 +158,27 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(document["tests"][0]["diagnostics"])
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_compile_pass(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-compile-pass-") as directory:
+            result = Path(directory) / "result.json"
+            completed = self.invoke(
+                "run",
+                "--manifest",
+                "tests/fixtures/compile-pass.toml",
+                *self.live_args(),
+                "--result",
+                str(result),
+                "--check-result",
+                str(Path(directory) / "check.json"),
+                "--artifacts",
+                str(Path(directory) / "artifacts"),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            document = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(document["verdict"], "PASS")
+            self.assertEqual(document["tests"][0]["status"], "passed")
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_expected_runtime_failure(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-runtime-") as directory:
             result = Path(directory) / "result.json"
