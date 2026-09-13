@@ -14,12 +14,12 @@ The current campaign records:
 
 | Local ID | Commons record | Owning layer | Disposition |
 | --- | --- | --- | --- |
-| `MNCS-TEST-P-001` | `MNCS-TOOLING-B665F138D324` | runtime/tooling | narrow process adapter |
-| `MNCS-TEST-P-002` | `MNCS-TOOLING-C5FD211E05C1` | tooling/filesystem | explicit manifests |
-| `MNCS-TEST-P-003` | `MNCS-TOOLING-E920D54703E3` | compiler/tooling | structured CLI adapter |
-| `MNCS-TEST-P-004` | `MNCS-LANG-52A5E0C72A39` | runtime/tooling | one request per process |
-| `MNCS-TEST-P-005` | `MNCS-LANG-770B42F56E6C` | language semantics | manifest + static sequence |
-| `MNCS-TEST-P-006` | `MNCS-TOOLING-146FB6F4BBC6` | stdlib/tooling | JSON transport adapter |
+| `MNCS-TEST-P-001` | `MNCS-TOOLING-B665F138D324` | runtime/tooling | compiler launch + explicit fallback adapter |
+| `MNCS-TEST-P-002` | `MNCS-TOOLING-C5FD211E05C1` | tooling/filesystem | explicit project manifests; compiler-owned runtime discovery |
+| `MNCS-TEST-P-003` | `MNCS-TOOLING-E920D54703E3` | compiler/tooling | structured CLI diagnostic adapter |
+| `MNCS-TEST-P-004` | `MNCS-LANG-52A5E0C72A39` | runtime/tooling | retained embed session; fallback remains |
+| `MNCS-TEST-P-005` | `MNCS-LANG-770B42F56E6C` | language semantics | first-class static declarations; advanced callbacks remain constrained |
+| `MNCS-TEST-P-006` | `MNCS-TOOLING-146FB6F4BBC6` | stdlib/tooling | narrow typed-to-JSON transport adapter |
 
 When a pressure is repaired, update both this record and its Commons state,
 add a regression/conformance witness, and remove the workaround before

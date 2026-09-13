@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """The narrow transport adapter for the native MNCS test framework.
 
-The semantic core lives in ``native/mncs/test``.  This module is deliberately
-limited to the boundaries MNCS does not currently expose to an external
-consumer: TOML/file discovery, process supervision, bounded request/response
-transport, and preservation of raw artifacts.  It never invents assertions,
-generates property values, or recomputes a native suite verdict.
+The semantic core lives in ``native/mncs/test`` and the declaration/inventory
+authority lives in the MNCS compiler.  This module is deliberately limited to
+TOML/file discovery, process supervision, bounded request/response transport,
+retained embed-session transport, and preservation of raw artifacts.  It never
+invents assertions, generates property values, or recomputes a native verdict.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Iterable
@@ -29,7 +30,9 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
-RUNNER_VERSION = "0.1.0"
+INVENTORY_SCHEMA = "mncs.test-inventory/1"
+EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
+RUNNER_VERSION = "0.2.0"
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -62,7 +65,6 @@ TEST_KINDS = {
     "unsupported",
 }
 DIAGNOSTIC_CODE = re.compile(r"^[A-Z][A-Z0-9_-]*")
-FUNCTION_PATTERN = re.compile(r"\bfn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 class ManifestError(ValueError):
@@ -142,19 +144,30 @@ def relative_path(path: Path, base: Path) -> str:
         return path.as_posix()
 
 
-def function_location(source: str, entry: str, source_path: Path) -> dict[str, Any]:
-    for match in FUNCTION_PATTERN.finditer(source):
-        if match.group("name") == entry:
-            line = source.count("\n", 0, match.start()) + 1
-            previous = source.rfind("\n", 0, match.start())
-            column = match.start() - previous
-            return {
-                "file": source_path.as_posix(),
-                "line": line,
-                "column": column,
-                "symbol": entry,
-            }
-    return {"file": source_path.as_posix(), "symbol": entry}
+def compiler_location(test: dict[str, Any], source_path: Path) -> dict[str, Any]:
+    """Return source navigation supplied by the compiler inventory.
+
+    Legacy manifest entries intentionally have only a symbol fallback.  The
+    normal first-class path never derives a location by regex or by reparsing
+    MNCS source in Python.
+    """
+
+    span = test.get("source_span")
+    if isinstance(span, dict):
+        location = {
+            "file": source_path.as_posix(),
+            "symbol": test.get("entry"),
+            "authority": "mncs-compiler-test-inventory",
+        }
+        for field in ("start", "end", "line", "column"):
+            if field in span:
+                location[field] = span[field]
+        return location
+    return {
+        "file": source_path.as_posix(),
+        "symbol": test.get("entry"),
+        "authority": "manifest-compatibility",
+    }
 
 
 def record_fields(value: Any) -> dict[str, Any] | None:
@@ -209,6 +222,8 @@ def diagnostic_list(value: Any) -> list[dict[str, Any]]:
         return [item for item in value if isinstance(item, dict)]
     if isinstance(value, dict):
         errors = value.get("errors")
+        if not isinstance(errors, list):
+            errors = value.get("diagnostics")
         if isinstance(errors, list):
             return [item for item in errors if isinstance(item, dict)]
     return []
@@ -320,7 +335,7 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
             raise ManifestError(f"manifest field {field!r} must be a non-empty string")
     if "suite" in raw and raw["suite"] is not None and not isinstance(raw["suite"], str):
         raise ManifestError("suite must be a string when present")
-    profile = raw.get("profile", "0.16")
+    profile = raw.get("profile", "0.17")
     if not isinstance(profile, str) or not profile:
         raise ManifestError("profile must be a non-empty string")
     for field in ("step_budget", "timeout_seconds"):
@@ -329,9 +344,9 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
     libraries = raw.get("libraries", [])
     if not isinstance(libraries, list) or not all(isinstance(item, str) and item for item in libraries):
         raise ManifestError("libraries must be an array of non-empty strings")
-    tests = raw.get("tests")
-    if not isinstance(tests, list) or not tests:
-        raise ManifestError("tests must be a non-empty array")
+    tests = raw.get("tests", [])
+    if not isinstance(tests, list):
+        raise ManifestError("tests must be an array when present")
     seen: set[str] = set()
     normalized_tests: list[dict[str, Any]] = []
     for index, item in enumerate(tests):
@@ -405,6 +420,104 @@ def read_source(path: Path) -> str:
         raise AdapterError(f"cannot read source {path}: {error}") from error
 
 
+def compiler_inventory(
+    *,
+    source_path: Path,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: int,
+    artifacts: ArtifactStore,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Ask the authoritative compiler for the source test inventory."""
+
+    process = run_process(
+        [mncs, "test-inventory", str(source_path)],
+        cwd=cwd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+        artifacts=artifacts,
+        artifact_key="compiler-test-inventory",
+    )
+    decoded = parse_json_output(process["stdout"])
+    if process.get("transport_error") or process["timed_out"] or process.get("returncode") != 0:
+        return None, {"process": process, "document": decoded}
+    if not isinstance(decoded, dict) or decoded.get("schema_version") != INVENTORY_SCHEMA:
+        return None, {"process": process, "document": decoded}
+    inventory = decoded.get("inventory")
+    if decoded.get("valid") is not True or not isinstance(inventory, dict):
+        return None, {"process": process, "document": decoded}
+    return inventory, {"process": process, "document": decoded}
+
+
+def normalize_inventory_tests(
+    inventory: dict[str, Any], manifest: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Convert compiler inventory entries to runner selection records.
+
+    The conversion adds runner-local tags/kind only.  It does not create a
+    second declaration registry or infer names from source text.
+    """
+
+    if inventory.get("schema_version") != INVENTORY_SCHEMA:
+        raise ManifestError(f"compiler emitted an unsupported inventory schema: {inventory.get('schema_version')!r}")
+    if inventory.get("module") != manifest["module"]:
+        raise ManifestError(
+            "manifest module does not match compiler inventory: "
+            f"{manifest['module']!r} != {inventory.get('module')!r}"
+        )
+    if inventory.get("source_profile") != manifest["profile"]:
+        raise ManifestError(
+            "manifest profile does not match compiler inventory: "
+            f"{manifest['profile']!r} != {inventory.get('source_profile')!r}"
+        )
+    entries = inventory.get("tests")
+    if not isinstance(entries, list):
+        raise ManifestError("compiler inventory tests must be an array")
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ManifestError(f"compiler inventory tests[{index}] must be an object")
+        required = ("test_case_identity", "declaration_identity", "function_identity", "name")
+        if not all(isinstance(entry.get(field), str) and entry[field] for field in required):
+            raise ManifestError(f"compiler inventory tests[{index}] is missing a canonical identity")
+        test_id = entry["test_case_identity"]
+        name = entry["name"]
+        if test_id in seen_ids or name in seen_names:
+            raise ManifestError(f"compiler inventory contains a duplicate test identity/name: {name!r}")
+        seen_ids.add(test_id)
+        seen_names.add(name)
+        tags = ["first-class", "mncs"]
+        normalized.append(
+            {
+                "id": test_id,
+                "entry": name,
+                "kind": "unit",
+                "tags": tags,
+                "arguments": [],
+                "declaration_identity": entry["declaration_identity"],
+                "test_case_identity": test_id,
+                "function_identity": entry["function_identity"],
+                "module": entry.get("module", manifest["module"]),
+                "qualified_name": entry.get("qualified_name", name),
+                "profile": entry.get("profile", inventory.get("source_profile", manifest["profile"])),
+                "source_span": entry.get("source_span"),
+                "generic_params": entry.get("generic_params", []),
+                "semantic_fingerprint": entry.get("semantic_fingerprint"),
+                "subject_identity": entry.get("subject_identity", inventory.get("subject_identity")),
+                "subject_fingerprint": entry.get("subject_fingerprint", inventory.get("subject_fingerprint")),
+                "inputs": entry.get("inputs", []),
+                "outputs": entry.get("outputs", []),
+                "effects": entry.get("effects", []),
+                "capabilities": entry.get("capabilities", []),
+                "first_class": True,
+            }
+        )
+    return normalized
+
+
 class ArtifactStore:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -423,6 +536,18 @@ class ArtifactStore:
         item = {"path": path.relative_to(self.root).as_posix(), "kind": kind, "sha256": digest}
         self.items.append(item)
         return item["path"]
+
+    def record_existing(self, path: Path, kind: str) -> str:
+        """Record a compiler-created file without changing its bytes."""
+
+        try:
+            relative = path.resolve().relative_to(self.root).as_posix()
+            payload = path.read_bytes()
+        except (OSError, ValueError) as error:
+            raise AdapterError(f"unable to record compiler artifact {path}: {error}") from error
+        item = {"path": relative, "kind": kind, "sha256": sha256_bytes(payload)}
+        self.items.append(item)
+        return relative
 
 
 def command_environment(library_paths: list[Path], inherited: dict[str, str] | None = None) -> dict[str, str]:
@@ -494,6 +619,178 @@ def run_process(
     }
 
 
+def safe_artifact_key(value: str) -> str:
+    return "".join(character if character.isalnum() or character in "._-" else "_" for character in value)
+
+
+class EmbedSession:
+    """Small ctypes adapter for the stable mncs-embed C ABI."""
+
+    def __init__(self, library_path: Path, artifact_bytes: bytes):
+        import ctypes
+
+        self._ctypes = ctypes
+        self.library_path = library_path
+        self.library = ctypes.CDLL(str(library_path))
+        uchar_p = ctypes.POINTER(ctypes.c_ubyte)
+        self.library.mncs_session_open.argtypes = [uchar_p, ctypes.c_size_t]
+        self.library.mncs_session_open.restype = ctypes.c_void_p
+        self.library.mncs_session_close.argtypes = [ctypes.c_void_p]
+        self.library.mncs_session_close.restype = None
+        self.library.mncs_session_info.argtypes = [ctypes.c_void_p]
+        self.library.mncs_session_info.restype = ctypes.c_void_p
+        self.library.mncs_session_call_batch.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self.library.mncs_session_call_batch.restype = ctypes.c_void_p
+        self.library.mncs_response_text.argtypes = [ctypes.c_void_p]
+        self.library.mncs_response_text.restype = ctypes.c_char_p
+        self.library.mncs_response_free.argtypes = [ctypes.c_void_p]
+        self.library.mncs_response_free.restype = None
+        self.library.mncs_last_error.argtypes = []
+        self.library.mncs_last_error.restype = ctypes.c_char_p
+        self.artifact_bytes = artifact_bytes
+        buffer = (ctypes.c_ubyte * len(artifact_bytes)).from_buffer_copy(artifact_bytes)
+        self._artifact_buffer = buffer
+        self.handle = self.library.mncs_session_open(buffer, len(artifact_bytes))
+        if not self.handle:
+            raise AdapterError(self.last_error())
+
+    def last_error(self) -> str:
+        value = self.library.mncs_last_error()
+        return value.decode("utf-8", errors="replace") if value else "unknown embed error"
+
+    def _response(self, handle: Any) -> Any:
+        if not handle:
+            raise AdapterError(self.last_error())
+        try:
+            payload = self.library.mncs_response_text(handle)
+            if not payload:
+                raise AdapterError("mncs-embed returned an empty response")
+            return json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterError(f"mncs-embed returned invalid JSON: {error}") from error
+        finally:
+            self.library.mncs_response_free(handle)
+
+    def info(self) -> dict[str, Any]:
+        return self._response(self.library.mncs_session_info(self.handle))
+
+    def call_batch(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        encoded = compact_json(requests).encode("utf-8")
+        response = self.library.mncs_session_call_batch(self.handle, encoded)
+        value = self._response(response)
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            raise AdapterError("mncs-embed batch response is not an array of call outputs")
+        return value
+
+    def close(self) -> None:
+        if self.handle:
+            self.library.mncs_session_close(self.handle)
+            self.handle = None
+
+    def __enter__(self) -> "EmbedSession":
+        return self
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        self.close()
+
+
+def embed_library_candidates(mncs: str, requested: str | None) -> list[Path]:
+    candidates: list[Path] = []
+    if requested:
+        candidates.append(resolve_path(requested, Path.cwd()))
+    environment = os.environ.get("MNCS_EMBED_LIBRARY")
+    if environment:
+        candidates.append(Path(environment).resolve())
+    binary = Path(mncs)
+    if binary.is_file():
+        for name in ("libmncs_embed.so", "libmncs_embed.dylib", "mncs_embed.dll"):
+            candidates.append(binary.resolve().parent / name)
+    unique: list[Path] = []
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def compile_embed_artifact(
+    *,
+    source_path: Path,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: int,
+    artifacts: ArtifactStore,
+    embed_library: str | None,
+) -> tuple[EmbedSession | None, dict[str, Any]]:
+    """Compile once and open a retained session when the embed library exists."""
+
+    output_dir = artifacts.root / "compiler"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    process = run_process(
+        [
+            mncs,
+            "compile",
+            str(source_path),
+            "--emit",
+            "backend",
+            "--target",
+            "research-bytecode",
+            "--include-tests",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=cwd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+        artifacts=artifacts,
+        artifact_key="compiler-first-class-artifact",
+    )
+    detail: dict[str, Any] = {
+        "mode": "embed-unavailable",
+        "compile": {
+            "returncode": process.get("returncode"),
+            "timed_out": process.get("timed_out", False),
+            "stdout_artifact": process.get("stdout_artifact"),
+            "stderr_artifact": process.get("stderr_artifact"),
+            "command_artifact": process.get("command_artifact"),
+        },
+    }
+    if process.get("transport_error") or process.get("timed_out") or process.get("returncode") != 0:
+        detail["reason"] = "compiler could not produce a reusable backend artifact"
+        return None, detail
+    backend_path = output_dir / "backend.json"
+    if not backend_path.is_file():
+        detail["reason"] = "compiler reported success without backend.json"
+        return None, detail
+    try:
+        backend_bytes = backend_path.read_bytes()
+        backend = json.loads(backend_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        detail["reason"] = f"backend artifact is not readable JSON: {error}"
+        return None, detail
+    detail["backend_artifact"] = artifacts.record_existing(backend_path, "backend-artifact")
+    if isinstance(backend, dict):
+        detail["artifact_identity"] = backend.get("identity")
+        detail["artifact_kind"] = backend.get("artifact_kind")
+    candidates = embed_library_candidates(mncs, embed_library)
+    detail["library_candidates"] = [str(candidate) for candidate in candidates]
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            session = EmbedSession(candidate, backend_bytes)
+        except (AdapterError, OSError) as error:
+            detail["reason"] = f"embed session refused backend artifact: {error}"
+            continue
+        detail["mode"] = "retained-embed-batch"
+        detail["library"] = str(candidate)
+        detail["session"] = session.info()
+        return session, detail
+    detail.setdefault("reason", "mncs-embed library was not found")
+    return None, detail
+
+
 def expected_status_for(test: dict[str, Any]) -> str | None:
     if test.get("expected_status") is not None:
         return str(test["expected_status"])
@@ -502,17 +799,39 @@ def expected_status_for(test: dict[str, Any]) -> str | None:
     return None
 
 
-def base_test_result(test: dict[str, Any], source_path: Path, source_text: str) -> dict[str, Any]:
-    return {
+def base_test_result(test: dict[str, Any], source_path: Path, source_text: str = "") -> dict[str, Any]:
+    del source_text  # source locations come from the compiler inventory.
+    result = {
         "id": test["id"],
         "entry": test["entry"],
         "kind": test["kind"],
         "tags": list(test.get("tags", [])),
         "source": source_path.as_posix(),
-        "location": function_location(source_text, test["entry"], source_path),
+        "location": compiler_location(test, source_path),
         "verdict": "PASS",
         "status": "pending",
     }
+    if isinstance(test.get("source_span"), dict):
+        result["source_span"] = dict(test["source_span"])
+    semantic = {
+        key: test[key]
+        for key in (
+            "declaration_identity",
+            "test_case_identity",
+            "function_identity",
+            "module",
+            "qualified_name",
+            "profile",
+            "generic_params",
+            "semantic_fingerprint",
+            "subject_identity",
+            "subject_fingerprint",
+        )
+        if key in test
+    }
+    if semantic:
+        result["semantic"] = semantic
+    return result
 
 
 def result_failure(
@@ -526,6 +845,152 @@ def result_failure(
     test_result["status"] = "failed"
     test_result["failure"] = {"class": failure_class, "message": message, **details}
     return test_result
+
+
+def execution_result_from_decoded(
+    *,
+    test: dict[str, Any],
+    source_path: Path,
+    source_text: str,
+    decoded: Any,
+    step_budget: int,
+    suite: bool = False,
+    transport: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project one structured MNCS observation into the runner envelope."""
+
+    test_result = base_test_result(test, source_path, source_text)
+    if transport:
+        test_result["transport"] = transport
+    if not isinstance(decoded, dict):
+        diagnostics = diagnostic_list(decoded)
+        return result_failure(
+            test_result,
+            failure_class="infrastructure_failure",
+            message="MNCS did not emit a structured execution result",
+            diagnostics=diagnostics,
+        )
+    status = decoded.get("status")
+    test_result["execution_status"] = status
+    test_result["execution"] = {
+        key: decoded.get(key)
+        for key in (
+            "schema_version",
+            "target",
+            "program_identity",
+            "program_fingerprint",
+            "function_identity",
+            "artifact_identity",
+            "artifact_sha256",
+            "backend",
+            "reused_session",
+            "steps",
+            "failure",
+            "failure_reason",
+            "effects",
+            "returned",
+        )
+        if key in decoded
+    }
+    if status not in EXECUTION_STATUSES:
+        return result_failure(
+            test_result,
+            failure_class="infrastructure_failure",
+            message="MNCS emitted an unknown execution status",
+            observed_status=status,
+        )
+    expected_status = expected_status_for(test)
+    if status == "returned":
+        native = native_test_result(decoded)
+        if suite:
+            native = native_suite_summary(decoded)
+        if native is None:
+            return result_failure(
+                test_result,
+                failure_class="malformed_test_result",
+                message="returned value is not the declared native test result shape",
+            )
+        test_result["native_result"] = native
+        if suite:
+            test_result["status"] = "passed" if native["verdict"] == "PASS" else "returned"
+            test_result["verdict"] = {
+                "PASS": "PASS",
+                "FAIL": "FAIL",
+                "UNKNOWN": "UNKNOWN",
+            }[native["verdict"]]
+            return test_result
+        verdict = native["verdict"]
+        if verdict == "PASS":
+            test_result["status"] = "passed"
+            test_result["verdict"] = "PASS"
+        elif verdict == "SKIP":
+            test_result["status"] = "skipped"
+            test_result["verdict"] = "PASS"
+        elif verdict == "UNSUPPORTED":
+            test_result["status"] = "unsupported"
+            test_result["verdict"] = "UNKNOWN"
+            test_result["failure"] = {
+                "class": "unsupported",
+                "message": "native test reported an unsupported capability",
+                "code": native.get("failure_code"),
+            }
+        else:
+            return result_failure(
+                test_result,
+                failure_class=native.get("failure_kind", "assertion"),
+                message="native assertion failed",
+                expected=native.get("expected"),
+                actual=native.get("actual"),
+                assertion_code=native.get("assertion_code"),
+                native_result=native,
+            )
+        if expected_status and expected_status != status:
+            return result_failure(
+                test_result,
+                failure_class="expectation_mismatch",
+                message=f"expected execution status {expected_status}, got {status}",
+                expected_status=expected_status,
+                observed_status=status,
+            )
+        return test_result
+    if expected_status == status:
+        test_result["status"] = "expected_failure"
+        test_result["verdict"] = "PASS"
+        test_result["expected_failure"] = True
+        test_result["failure"] = {
+            "class": status,
+            "message": f"expected MNCS execution status {status}",
+            "expected": True,
+        }
+        return test_result
+    if status == "unsupported":
+        test_result["verdict"] = "UNKNOWN"
+        test_result["status"] = "unsupported"
+        test_result["failure"] = {
+            "class": "unsupported",
+            "message": "MNCS reported an unsupported capability",
+        }
+        return test_result
+    if status == "budget_exhausted":
+        return result_failure(
+            test_result,
+            failure_class="timeout",
+            message="MNCS exhausted the declared step budget",
+            step_budget=step_budget,
+        )
+    if status == "runtime_failure":
+        return result_failure(
+            test_result,
+            failure_class="runtime_failure",
+            message="MNCS test entrypoint terminated with a runtime failure",
+            execution_failure=decoded.get("failure") or decoded.get("failure_reason"),
+        )
+    return result_failure(
+        test_result,
+        failure_class="malformed_test_declaration",
+        message="MNCS rejected the execution request",
+        execution_failure=decoded.get("failure") or decoded.get("failure_reason"),
+    )
 
 
 def execute_entry(
@@ -725,6 +1190,86 @@ def execute_entry(
     )
 
 
+def execute_batch(
+    *,
+    tests: list[dict[str, Any]],
+    source_path: Path,
+    source_text: str,
+    module: str,
+    session: EmbedSession,
+    default_step_budget: int,
+    artifacts: ArtifactStore,
+    transport: dict[str, Any],
+) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+    request_artifacts: list[str] = []
+    for index, test in enumerate(tests):
+        step_budget = int(test.get("step_budget", default_step_budget))
+        request: dict[str, Any] = {
+            "schema_version": "0.1",
+            "target": {"module": module, "function": test["entry"]},
+            "arguments": test.get("arguments", []),
+            "step_budget": step_budget,
+        }
+        if "type_arguments" in test:
+            request["type_arguments"] = test["type_arguments"]
+        requests.append(
+            {
+                "module": module,
+                "function": test["entry"],
+                "args": test.get("arguments", []),
+                "step_budget": step_budget,
+                **({"type_arguments": test["type_arguments"]} if "type_arguments" in test else {}),
+            }
+        )
+        request_path = artifacts.root / "requests" / f"batch-{index:03d}-{safe_artifact_key(test['id'])}.json"
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        request_path.write_bytes(json_bytes(request))
+        request_artifact = {
+            "path": request_path.relative_to(artifacts.root).as_posix(),
+            "kind": "execution-request",
+            "sha256": sha256_file(request_path),
+        }
+        artifacts.items.append(request_artifact)
+        request_artifacts.append(request_artifact["path"])
+    try:
+        decoded = session.call_batch(requests)
+    except AdapterError as error:
+        return [
+            result_failure(
+                base_test_result(test, source_path, source_text),
+                failure_class="infrastructure_failure",
+                message="retained MNCS session could not execute the test batch",
+                error=str(error),
+                transport=transport,
+            )
+            for test in tests
+        ]
+    results: list[dict[str, Any]] = []
+    for index, test in enumerate(tests):
+        if index >= len(decoded):
+            result = result_failure(
+                base_test_result(test, source_path, source_text),
+                failure_class="infrastructure_failure",
+                message="retained MNCS session returned fewer observations than requested",
+                requested=len(tests),
+                observed=len(decoded),
+            )
+        else:
+            result = execution_result_from_decoded(
+                test=test,
+                source_path=source_path,
+                source_text=source_text,
+                decoded=decoded[index],
+                step_budget=int(test.get("step_budget", default_step_budget)),
+                transport=transport,
+            )
+        result["request"] = requests[index]
+        result["request_artifact"] = request_artifacts[index]
+        results.append(result)
+    return results
+
+
 def compile_entry(
     *,
     test: dict[str, Any],
@@ -907,7 +1452,7 @@ def manifest_provenance(manifest: dict[str, Any], source_text: str, mncs: str, l
         "runner": {
             "name": "mncs-test",
             "version": RUNNER_VERSION,
-            "adapter": "python-stdlib-process-transport",
+            "adapter": "python-stdlib-transport-plus-mncs-embed-boundary",
             "source_sha256": sha256_file(Path(__file__)),
         },
         "language_profile": manifest["profile"],
@@ -931,9 +1476,12 @@ def make_result(
     test_results: list[dict[str, Any]],
     suite_result: dict[str, Any] | None,
     suite_summary: dict[str, Any] | None,
+    test_inventory: dict[str, Any] | None,
+    execution: dict[str, Any] | None,
     classification: str,
     failure_class: str,
     message: str | None,
+    failure_details: dict[str, Any] | None,
     allow_unsupported: bool,
 ) -> dict[str, Any]:
     source_path = Path(manifest["source_path"])
@@ -959,7 +1507,11 @@ def make_result(
         summary["authority"] = "native_suite"
     else:
         summary = summarize_tests(test_results)
-        summary["authority"] = "manifest_compile_or_adapter_projection"
+        summary["authority"] = (
+            "compiler_inventory_native_observation_projection"
+            if test_inventory is not None
+            else "manifest_compile_or_adapter_projection"
+        )
     if classification == "success":
         verdict = "PASS"
     elif classification == "unsupported":
@@ -973,8 +1525,47 @@ def make_result(
         "compiler": provenance["compiler"],
         "profile": manifest["profile"],
         "tests": [item["id"] for item in test_results],
+        "subject_identity": (test_inventory or {}).get("subject_identity"),
+        "subject_fingerprint": (test_inventory or {}).get("subject_fingerprint"),
+        "execution": {
+            key: (execution or {}).get(key)
+            for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
+        },
     }
     run_id = sha256_bytes(compact_json(identity_material).encode())
+    experiment_identity = f"mncs:language:experiment:test:{run_id}"
+    experiment_run_identity = f"mncs:language:experiment-run:{run_id}"
+    for index, item in enumerate(test_results):
+        semantic = item.get("semantic")
+        if not isinstance(semantic, dict) or not semantic.get("test_case_identity"):
+            continue
+        execution_digest = sha256_bytes(
+            compact_json(
+                {
+                    "run": experiment_run_identity,
+                    "index": index,
+                    "test_case": semantic["test_case_identity"],
+                }
+            ).encode()
+        )
+        observation_digest = sha256_bytes(
+            compact_json(
+                {
+                    "execution": execution_digest,
+                    "status": item.get("execution_status", item.get("status")),
+                    "verdict": item.get("verdict"),
+                }
+            ).encode()
+        )
+        item["execution_identity"] = f"{experiment_run_identity}:execution:{execution_digest}"
+        item["observation_identity"] = f"{experiment_run_identity}:observation:{observation_digest}"
+        item["oracle_evaluation"] = {
+            "identity": f"{experiment_run_identity}:oracle:{observation_digest}",
+            "test_case_identity": semantic["test_case_identity"],
+            "verdict": item.get("verdict"),
+            "status": item.get("execution_status", item.get("status")),
+            "interpretation": "bounded oracle evaluation; not a universal proof",
+        }
     native_suite_payload = None
     if suite_summary is not None:
         native_suite_payload = {**suite_summary, "authority": "native_suite"}
@@ -994,11 +1585,72 @@ def make_result(
             "source": relative_path(source_path, cwd),
             "module": manifest["module"],
             "suite": manifest.get("suite"),
+            "discovery": "compiler-inventory" if test_inventory is not None else "manifest",
         },
         "summary": summary,
         "tests": test_results,
         "suite": suite_result,
         "native_suite_summary": native_suite_payload,
+        "execution": execution,
+        "test_inventory": (
+            {
+                "schema_version": test_inventory.get("schema_version"),
+                "source_artifact_identity": test_inventory.get("source_artifact_identity"),
+                "source_profile": test_inventory.get("source_profile"),
+                "subject_identity": test_inventory.get("subject_identity"),
+                "subject_fingerprint": test_inventory.get("subject_fingerprint"),
+                "test_count": len(test_inventory.get("tests", [])),
+            }
+            if test_inventory is not None
+            else None
+        ),
+        "experiment": {
+            "schema_version": EXPERIMENT_PROJECTION_SCHEMA,
+            "identity": experiment_identity,
+            "run_identity": experiment_run_identity,
+            "definition": {
+                "kind": "test",
+                "source_artifact_identity": (test_inventory or {}).get("source_artifact_identity"),
+                "subject_identity": (test_inventory or {}).get("subject_identity"),
+                "subject_fingerprint": (test_inventory or {}).get("subject_fingerprint"),
+                "test_cases": [
+                    {
+                        key: item.get("semantic", {}).get(key, item.get(key))
+                        for key in (
+                            "declaration_identity",
+                            "test_case_identity",
+                            "function_identity",
+                            "qualified_name",
+                            "source_span",
+                            "semantic_fingerprint",
+                        )
+                        if item.get("semantic", {}).get(key, item.get(key)) is not None
+                    }
+                    for item in test_results
+                    if item.get("semantic", {}).get("test_case_identity")
+                ],
+                "interpretation": "bounded_language_observation_not_universal_equivalence_or_conformance",
+            },
+            "execution": execution,
+            "observations": [
+                {
+                    "identity": item.get("observation_identity"),
+                    "execution_identity": item.get("execution_identity"),
+                    "test_case_identity": item.get("semantic", {}).get("test_case_identity"),
+                    "status": item.get("execution_status", item.get("status")),
+                    "verdict": item.get("verdict"),
+                    "observation_kind": "test_execution",
+                }
+                for item in test_results
+                if item.get("semantic", {}).get("test_case_identity")
+            ],
+            "oracle_evaluations": [
+                item["oracle_evaluation"]
+                for item in test_results
+                if isinstance(item.get("oracle_evaluation"), dict)
+            ],
+            "inference": "finite passing observations are bounded evidence, not universal proof",
+        },
         "provenance": provenance,
         "artifacts": artifacts.items,
         "reproduction": {
@@ -1012,7 +1664,7 @@ def make_result(
         },
     }
     if message:
-        result["failure"] = {"class": failure_class, "message": message}
+        result["failure"] = {"class": failure_class, "message": message, **(failure_details or {})}
     return result
 
 
@@ -1032,6 +1684,15 @@ def minimal_result(*, classification: str, message: str, cwd: Path) -> dict[str,
         "tests": [],
         "suite": None,
         "native_suite_summary": None,
+        "test_inventory": None,
+        "experiment": {
+            "schema_version": EXPERIMENT_PROJECTION_SCHEMA,
+            "identity": None,
+            "definition": None,
+            "execution": None,
+            "observations": [],
+            "inference": "no executable experiment was produced",
+        },
         "provenance": {"runner": {"name": "mncs-test", "version": RUNNER_VERSION}},
         "artifacts": [],
         "reproduction": {"command": "mncs-test validate-manifest --manifest <manifest>"},
@@ -1049,7 +1710,7 @@ def check_result(result: dict[str, Any], result_digest: str) -> dict[str, Any]:
         "provider": result["provider"],
         "verdict": result["verdict"],
         "scope": result.get("scope", {}).get("manifest", "mncs-test"),
-        "claim": "MNCS-native tests were executed under the declared manifest and profile",
+        "claim": "MNCS-native tests were executed under the compiler-owned inventory or declared compatibility fixture",
         "summary": f"{result['classification']}: {result.get('summary', {}).get('passed', 0)} passed, {result.get('summary', {}).get('failed', 0)} failed, {result.get('summary', {}).get('skipped', 0)} skipped",
         "contract_revision": RESULT_SCHEMA,
         "producer_revision": f"sha256:{result.get('provenance', {}).get('runner', {}).get('source_sha256', '')}",
@@ -1099,6 +1760,20 @@ def print_result(result: dict[str, Any], output_format: str) -> None:
     print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
 
 
+def select_tests(tests: list[dict[str, Any]], filters: list[str]) -> list[dict[str, Any]]:
+    if not filters:
+        return tests
+    selected = []
+    for test in tests:
+        haystack = " ".join(
+            str(test.get(field, ""))
+            for field in ("id", "entry", "qualified_name", "declaration_identity", "test_case_identity")
+        )
+        if any(pattern in haystack for pattern in filters):
+            selected.append(test)
+    return selected
+
+
 def run_manifest(args: argparse.Namespace) -> int:
     cwd = Path.cwd().resolve()
     result_path, check_path, artifact_root = result_paths(args, cwd)
@@ -1125,7 +1800,109 @@ def run_manifest(args: argparse.Namespace) -> int:
         suite_result: dict[str, Any] | None = None
         suite_summary: dict[str, Any] | None = None
         test_results: list[dict[str, Any]] = []
-        if manifest.get("suite"):
+        test_inventory: dict[str, Any] | None = None
+        execution: dict[str, Any] | None = None
+        inventory_failure: dict[str, Any] | None = None
+        configured_tests = list(manifest["tests"])
+
+        # A normal runtime manifest names a source/module and policy only.
+        # The compiler is the sole authority for first-class test declarations.
+        if not configured_tests and not manifest.get("suite"):
+            test_inventory, inventory_transport = compiler_inventory(
+                source_path=Path(manifest["source_path"]),
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                artifacts=artifacts,
+            )
+            if test_inventory is not None:
+                configured_tests = normalize_inventory_tests(test_inventory, manifest)
+                configured_tests = select_tests(configured_tests, args.filter or [])
+                execution = {
+                    "mode": "compiler-inventory-awaiting-execution",
+                    "inventory_artifact": inventory_transport["process"]["stdout_artifact"],
+                    "selected_test_count": len(configured_tests),
+                    "total_test_count": len(test_inventory.get("tests", [])),
+                }
+            else:
+                process = inventory_transport.get("process", {})
+                document = inventory_transport.get("document")
+                diagnostics = diagnostic_list(document)
+                if process.get("timed_out"):
+                    inventory_failure = {
+                        "class": "timeout",
+                        "message": "compiler test inventory exceeded the declared timeout",
+                        "details": {"timeout_seconds": args.timeout_seconds or manifest["timeout_seconds"]},
+                    }
+                elif diagnostics:
+                    inventory_failure = {
+                        "class": "compile_failure",
+                        "message": "compiler could not produce a valid first-class test inventory",
+                        "details": {
+                            "diagnostics": diagnostics,
+                            "inventory_document": document,
+                        },
+                    }
+                else:
+                    inventory_failure = {
+                        "class": "infrastructure_failure",
+                        "message": "compiler did not emit a structured first-class test inventory",
+                        "details": {"inventory_document": document},
+                    }
+        else:
+            configured_tests = select_tests(configured_tests, args.filter or [])
+
+        manifest_for_run = dict(manifest)
+        manifest_for_run["tests"] = configured_tests
+
+        if test_inventory is not None and not inventory_failure:
+            if not configured_tests:
+                execution = {
+                    **(execution or {}),
+                    "mode": "compiler-inventory-empty-selection",
+                    "batch_size": 0,
+                }
+            else:
+                session, execution_detail = compile_embed_artifact(
+                    source_path=Path(manifest["source_path"]),
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                    artifacts=artifacts,
+                    embed_library=args.embed_library,
+                )
+                execution = {**(execution or {}), **execution_detail}
+                execution["selected_test_count"] = len(configured_tests)
+                execution["batch_size"] = len(configured_tests) if session else 0
+                if session is not None:
+                    try:
+                        transport = {
+                            "mode": "retained-embed-batch",
+                            "library": execution.get("library"),
+                            "artifact_identity": execution.get("artifact_identity"),
+                            "artifact_sha256": (execution.get("session") or {}).get("artifact_sha256"),
+                            "batch_size": len(configured_tests),
+                        }
+                        test_results = execute_batch(
+                            tests=configured_tests,
+                            source_path=Path(manifest["source_path"]),
+                            source_text=source_text,
+                            module=manifest["module"],
+                            session=session,
+                            default_step_budget=args.step_budget or manifest["step_budget"],
+                            artifacts=artifacts,
+                            transport=transport,
+                        )
+                    finally:
+                        session.close()
+                else:
+                    execution["mode"] = "subprocess-per-test-fallback"
+                    execution["batch_size"] = 0
+                    execution["fallback_reason"] = execution.get("reason")
+
+        if test_inventory is None and not inventory_failure and manifest.get("suite"):
             suite_test = {
                 "id": "__suite__",
                 "entry": manifest["suite"],
@@ -1159,53 +1936,64 @@ def run_manifest(args: argparse.Namespace) -> int:
                         failure_class="infrastructure_failure",
                         message="suite entry did not produce a native summary",
                     )
-                    for test in manifest["tests"]
+                    for test in configured_tests
                 ]
-        for index, test in enumerate(manifest["tests"]):
-            if suite_result and suite_result.get("failure") and suite_result.get("status") == "failed":
-                break
-            if test["kind"] == "skip":
-                test_result = base_test_result(test, Path(manifest["source_path"]), source_text)
-                test_result["status"] = "skipped"
-                test_result["verdict"] = "PASS"
-            elif test["kind"] == "unsupported":
-                test_result = base_test_result(test, Path(manifest["source_path"]), source_text)
-                test_result["status"] = "unsupported"
-                test_result["verdict"] = "UNKNOWN"
-                test_result["failure"] = {
-                    "class": "unsupported",
-                    "message": "manifest marks this capability as unsupported",
-                }
-            elif test["kind"] in {"compile-pass", "compile-fail", "diagnostic"}:
-                test_result = compile_entry(
-                    test=test,
-                    source_path=Path(manifest["source_path"]),
-                    source_text=source_text,
-                    mncs=mncs,
-                    cwd=cwd,
-                    environment=environment,
-                    default_timeout=args.timeout_seconds or manifest["timeout_seconds"],
-                    artifacts=artifacts,
-                    artifact_key=f"test-{index:03d}-{test['id']}",
-                )
-            else:
-                test_result = execute_entry(
-                    test=test,
-                    source_path=Path(manifest["source_path"]),
-                    source_text=source_text,
-                    module=manifest["module"],
-                    mncs=mncs,
-                    cwd=cwd,
-                    environment=environment,
-                    default_step_budget=args.step_budget or manifest["step_budget"],
-                    default_timeout=args.timeout_seconds or manifest["timeout_seconds"],
-                    artifacts=artifacts,
-                    artifact_key=f"test-{index:03d}-{test['id']}",
-                )
-            test_results.append(test_result)
+        use_individual_processes = (
+            test_inventory is None
+            or (execution or {}).get("mode") == "subprocess-per-test-fallback"
+        )
+        if use_individual_processes and not inventory_failure:
+            for index, test in enumerate(configured_tests):
+                if suite_result and suite_result.get("failure") and suite_result.get("status") == "failed":
+                    break
+                if test["kind"] == "skip":
+                    test_result = base_test_result(test, Path(manifest["source_path"]), source_text)
+                    test_result["status"] = "skipped"
+                    test_result["verdict"] = "PASS"
+                elif test["kind"] == "unsupported":
+                    test_result = base_test_result(test, Path(manifest["source_path"]), source_text)
+                    test_result["status"] = "unsupported"
+                    test_result["verdict"] = "UNKNOWN"
+                    test_result["failure"] = {
+                        "class": "unsupported",
+                        "message": "manifest marks this capability as unsupported",
+                    }
+                elif test["kind"] in {"compile-pass", "compile-fail", "diagnostic"}:
+                    test_result = compile_entry(
+                        test=test,
+                        source_path=Path(manifest["source_path"]),
+                        source_text=source_text,
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                        default_timeout=args.timeout_seconds or manifest["timeout_seconds"],
+                        artifacts=artifacts,
+                        artifact_key=safe_artifact_key(f"test-{index:03d}-{test['id']}"),
+                    )
+                else:
+                    test_result = execute_entry(
+                        test=test,
+                        source_path=Path(manifest["source_path"]),
+                        source_text=source_text,
+                        module=manifest["module"],
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                        default_step_budget=args.step_budget or manifest["step_budget"],
+                        default_timeout=args.timeout_seconds or manifest["timeout_seconds"],
+                        artifacts=artifacts,
+                        artifact_key=safe_artifact_key(f"test-{index:03d}-{test['id']}"),
+                    )
+                test_results.append(test_result)
         classification = "success"
         failure_class = "none"
         message: str | None = None
+        failure_details: dict[str, Any] | None = None
+        if inventory_failure:
+            failure_class = inventory_failure["class"]
+            classification = classification_for_failure(failure_class)
+            message = inventory_failure["message"]
+            failure_details = inventory_failure.get("details")
         if suite_result and suite_result.get("failure"):
             failure = suite_result["failure"]
             failure_class = str(failure.get("class", "infrastructure_failure"))
@@ -1249,7 +2037,7 @@ def run_manifest(args: argparse.Namespace) -> int:
                     message = str(item.get("failure", {}).get("message", "unsupported capability"))
                     break
         result = make_result(
-            manifest=manifest,
+            manifest=manifest_for_run,
             source_text=source_text,
             mncs=mncs,
             cwd=cwd,
@@ -1258,9 +2046,12 @@ def run_manifest(args: argparse.Namespace) -> int:
             test_results=test_results,
             suite_result=suite_result,
             suite_summary=suite_summary,
+            test_inventory=test_inventory,
+            execution=execution,
             classification=classification,
             failure_class=failure_class,
             message=message,
+            failure_details=failure_details,
             allow_unsupported=args.allow_unsupported,
         )
     except ManifestError as error:
@@ -1292,27 +2083,68 @@ def discover_manifests(root: Path, recursive: bool) -> list[Path]:
 
 def discover_command(args: argparse.Namespace) -> int:
     root = resolve_path(args.root, Path.cwd())
+    mncs = resolve_mncs(args.mncs, Path.cwd())
     manifests = []
     errors = []
     for path in discover_manifests(root, args.recursive):
         try:
             manifest = load_manifest(path)
-            manifests.append(
-                {
-                    "path": relative_path(path, Path.cwd()),
-                    "name": manifest["name"],
-                    "source": relative_path(Path(manifest["source_path"]), Path.cwd()),
-                    "module": manifest["module"],
-                    "suite": manifest.get("suite"),
-                    "tests": [
-                        {"id": item["id"], "entry": item["entry"], "kind": item["kind"], "tags": item.get("tags", [])}
-                        for item in manifest["tests"]
-                    ],
+            document = {
+                "path": relative_path(path, Path.cwd()),
+                "name": manifest["name"],
+                "source": relative_path(Path(manifest["source_path"]), Path.cwd()),
+                "module": manifest["module"],
+                "suite": manifest.get("suite"),
+                "discovery": "manifest-compatibility" if manifest["tests"] or manifest.get("suite") else "compiler-inventory",
+                "tests": [
+                    {"id": item["id"], "entry": item["entry"], "kind": item["kind"], "tags": item.get("tags", [])}
+                    for item in manifest["tests"]
+                ],
+            }
+            if args.inventory and not manifest["tests"] and not manifest.get("suite"):
+                libraries = list(manifest["library_paths"])
+                for raw_path in args.library:
+                    for component in raw_path.split(os.pathsep):
+                        if component:
+                            libraries.append(resolve_path(component, Path.cwd(), must_exist=True))
+                with tempfile.TemporaryDirectory(prefix="mncs-test-discover-") as directory:
+                    inventory, transport = compiler_inventory(
+                        source_path=Path(manifest["source_path"]),
+                        mncs=mncs,
+                        cwd=Path.cwd(),
+                        environment=command_environment(libraries),
+                        timeout_seconds=manifest["timeout_seconds"],
+                        artifacts=ArtifactStore(Path(directory)),
+                    )
+                if inventory is None:
+                    errors.append(
+                        {
+                            "path": relative_path(path, Path.cwd()),
+                            "error": "compiler inventory unavailable",
+                            "diagnostics": diagnostic_list(transport.get("document")),
+                        }
+                    )
+                    continue
+                document["inventory"] = {
+                    "schema_version": inventory.get("schema_version"),
+                    "subject_identity": inventory.get("subject_identity"),
+                    "subject_fingerprint": inventory.get("subject_fingerprint"),
                 }
-            )
+                document["tests"] = [
+                    {
+                        "id": item.get("test_case_identity"),
+                        "entry": item.get("name"),
+                        "kind": "unit",
+                        "tags": ["first-class", "mncs"],
+                        "declaration_identity": item.get("declaration_identity"),
+                        "source_span": item.get("source_span"),
+                    }
+                    for item in inventory.get("tests", [])
+                ]
+            manifests.append(document)
         except ManifestError as error:
             errors.append({"path": relative_path(path, Path.cwd()), "error": str(error)})
-    output = {"schema_version": DISCOVERY_SCHEMA, "root": str(root), "manifests": manifests, "errors": errors}
+    output = {"schema_version": DISCOVERY_SCHEMA, "root": str(root), "authority": "mncs-compiler", "manifests": manifests, "errors": errors}
     if args.format == "text":
         for manifest in manifests:
             print(f"{manifest['path']}: {manifest['name']} ({len(manifest['tests'])} tests)")
@@ -1363,10 +2195,12 @@ def replay_command(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="mncs-test", description="Native MNCS testing, verification, and conformance")
     commands = root.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="run one explicit MNCS test manifest")
+    run = commands.add_parser("run", help="run one MNCS test manifest and compiler-discovered tests")
     run.add_argument("--manifest", default="mncs-test.toml")
     run.add_argument("--mncs", default="mncs")
     run.add_argument("--library", action="append", default=[], help="additional MNCS library root; may be repeated")
+    run.add_argument("--embed-library", help="explicit mncs-embed shared library; otherwise discover beside mncs")
+    run.add_argument("--filter", action="append", default=[], help="select tests containing this identity/name fragment; may be repeated")
     run.add_argument("--result", default=".mncs/mncs-test-result.json")
     run.add_argument("--check-result", default=".mncs/mncs-test-check.json")
     run.add_argument("--artifacts", default=".mncs/mncs-test-artifacts")
@@ -1376,9 +2210,12 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-unsupported", action="store_true")
     run.set_defaults(handler=run_manifest)
 
-    discover = commands.add_parser("discover", help="inspect explicit manifests without executing them")
+    discover = commands.add_parser("discover", help="inspect manifests and optionally compiler-owned test inventories")
     discover.add_argument("--root", default=".")
     discover.add_argument("--recursive", action="store_true", help="include nested mncs-test.toml files")
+    discover.add_argument("--inventory", action="store_true", help="query the compiler for each runtime inventory")
+    discover.add_argument("--mncs", default="mncs")
+    discover.add_argument("--library", action="append", default=[])
     discover.add_argument("--format", choices=("json", "text"), default="json")
     discover.set_defaults(handler=discover_command)
 

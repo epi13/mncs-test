@@ -43,7 +43,7 @@
         "infrastructure_failures": {"type": "integer", "minimum": 0},
         "assertion_count": {"type": "integer", "minimum": 0},
         "failure_count": {"type": "integer", "minimum": 0},
-        "authority": {"enum": ["native_suite", "manifest_compile_or_adapter_projection", "adapter"]}
+        "authority": {"enum": ["native_suite", "compiler_inventory_native_observation_projection", "manifest_compile_or_adapter_projection", "adapter"]}
       },
       "additionalProperties": true
     },

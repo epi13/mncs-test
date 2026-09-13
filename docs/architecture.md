@@ -3,13 +3,13 @@
 ## Layering
 
 ```text
-MNCS source test functions
-        ↓ typed TestResult / SuiteSummary
-native/mncs/test modules
-        ↓ current MNCS compiler/runtime
-mncs-test transport adapter
-        ↓ check-result/1 + evidence artifacts
-mncs-actions and future Forge orchestration
+MNCS `test` declaration (Profile 0.17)
+        ↓ AST/model identity + compiler test inventory
+mncs-test selects TestCase identities
+        ↓ one compiled artifact + retained Session batch
+TestExecution → Observation → native OracleEvaluation
+        ↓ mncs.test-result/1 + RFC 0034 projection
+mncs-actions transports mncs.check-result/1
 ```
 
 The native layer owns assertion meaning, failure categories, deterministic
@@ -18,19 +18,19 @@ deliberately made from ordinary MNCS enums, records, functions, sequences,
 bounded iteration, and arithmetic. There is no hidden registration table in
 Python and no host-side assertion callback.
 
-The adapter owns four boundaries that the current external-consumer profile
-does not expose as native values:
+The adapter owns four platform boundaries that are not test semantics:
 
 1. TOML and controlled manifest/file discovery;
-2. starting the `mncs` executable and enforcing an OS process timeout;
+2. starting the `mncs` executable, locating `mncs-embed`, and enforcing an OS
+   process timeout;
 3. JSON/TOML transport to the current CLI and projection into the family
    `check-result/1` contract; and
 4. byte-for-byte capture, hashing, and publication of raw artifacts.
 
 The adapter receives a native result, validates its shape, and carries it
-forward. A suite's returned verdict is authoritative; the adapter only checks
-that the result can be transported and that its summary is consistent with
-the declared test list.
+forward. A first-class test's returned verdict is the native oracle evaluation;
+the adapter does not fold assertions or recompute it. Legacy suite summaries
+remain authoritative for compatibility manifests.
 
 ## Manifest and discovery
 
@@ -40,20 +40,28 @@ opt-in (`discover --recursive`) and is not used by `run` implicitly. This
 keeps discovery deterministic and inspectable while the language/package
 system develops a stronger native module discovery contract.
 
-Each manifest names one MNCS source/module and may name one native suite
-entrypoint. Entries are ordered, have stable IDs, and declare one of the
-supported test kinds. Compile-pass, compile-fail, and diagnostic entries use
-the compiler's structured validation result. Runtime entries use the MNCS
-execution request ABI. `property` entries carry seed/case metadata but do not
-ask Python to generate or check cases: the MNCS program does that.
+Each normal runtime manifest names one MNCS source/module and policy. It does
+not register individual first-class tests. The compiler's inventory is
+authoritative for names, ordering, source spans, signatures, effects,
+capabilities, and identities. A manifest may still name a suite or explicit
+entries during the compatibility window, and external compile-pass,
+compile-fail, diagnostic, profile-refusal, and malformed-source experiments
+remain explicit because their input is not an executable first-class test.
+
+The compiler inventory is module-scoped by policy: imported-module tests are
+not silently included in the root module's inventory. A package tool can
+enumerate its explicit module targets without asking Python to recursively
+scan source text.
 
 ## Execution sequence
 
-For a manifest with a suite, the adapter first invokes the suite entrypoint,
-then invokes each declared runtime entrypoint individually to preserve useful
-per-test diagnostics. The suite result remains the semantic authority. This
-currently recompiles the source at each process boundary; the duplicate work
-is intentional evidence for the in-process/batch invocation pressure.
+For a first-class runtime manifest, the adapter asks `mncs test-inventory`,
+compiles once with `--include-tests`, opens one verified `mncs-embed` Session,
+and sends the selected calls through `mncs_session_call_batch`. Each returned
+value remains a distinct execution observation. If the embed library is not
+available, the result records an explicit subprocess-per-test fallback. A
+legacy manifest with a suite retains its compatibility behavior and native
+suite authority.
 
 Compile-only entries invoke `mncs validate`. A compile-fail or diagnostic
 entry is passing only when the compiler rejects the source and every declared
@@ -63,7 +71,8 @@ not string matching against human compiler prose.
 The result has two layers:
 
 - `mncs.test-result/1` carries detailed test outcomes, native results,
-  classifications, diagnostics, identities, artifacts, and reproduction;
+  classifications, diagnostics, declaration/test-case/subject/execution/
+  observation identities, artifacts, and reproduction;
 - `mncs.check-result/1` is a small action/Forge-facing envelope with the
   top-level verdict, claim, digest, unresolved list, and a reference to the
   detailed result.
@@ -75,7 +84,25 @@ native assertion/expectation failures; `compile_failure`, `runtime_failure`,
 `timeout`, `infrastructure_failure`, and `invalid_invocation` remain explicit
 classifications. Unsupported capability is `UNKNOWN` and has a dedicated
 exit code. Expected compile rejection and expected runtime failure are
-passing test outcomes, with their evidence preserved.
+passing test outcomes, with their evidence preserved. Finite passing evidence
+is never promoted to universal proof.
+
+## RFC 0034 identity mapping
+
+The first-class path keeps the RFC 0034 epistemic layers visible:
+
+```text
+compiler `test` declaration → TestCase definition
+                         → retained-session TestExecution
+                         → Observation
+                         → native OracleEvaluation
+                         → bounded empirical result projection
+```
+
+The declaration identity names the source slot, while the body-sensitive
+test-case identity names the executable case. The production subject identity
+and fingerprint are carried separately. A test edit therefore changes test
+and experiment evidence without silently changing the production subject.
 
 ## Reproducibility
 

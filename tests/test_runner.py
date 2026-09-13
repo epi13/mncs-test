@@ -11,8 +11,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "tools" / "mncs_test.py"
-LANGUAGE = REPO.parent / "mncs-language"
+LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", REPO.parent / "mncs-language"))
 MNCS = Path(os.environ.get("MNCS", LANGUAGE / "target" / "debug" / "mncs"))
+EMBED_LIBRARY = Path(
+    os.environ.get("MNCS_EMBED_LIBRARY", LANGUAGE / "target" / "debug" / "libmncs_embed.so")
+)
 LIVE = MNCS.is_file() and os.access(MNCS, os.X_OK)
 
 sys.path.insert(0, str(REPO / "tools"))
@@ -29,8 +32,11 @@ class RunnerTests(unittest.TestCase):
             check=False,
         )
 
-    def live_args(self) -> tuple[str, str]:
-        return ("--mncs", str(MNCS), "--library", str(LANGUAGE / "library"))
+    def live_args(self) -> tuple[str, ...]:
+        arguments = ("--mncs", str(MNCS), "--library", str(LANGUAGE / "library"))
+        if EMBED_LIBRARY.is_file():
+            arguments += ("--embed-library", str(EMBED_LIBRARY))
+        return arguments
 
     def test_discovery_is_deterministic(self):
         first = self.invoke("discover")
@@ -41,13 +47,35 @@ class RunnerTests(unittest.TestCase):
         document = json.loads(first.stdout)
         self.assertEqual(document["schema_version"], "mncs.test-discovery/1")
         self.assertEqual([item["name"] for item in document["manifests"]], ["mncs-test-self"])
+        self.assertEqual(document["manifests"][0]["discovery"], "compiler-inventory")
+        self.assertEqual(document["manifests"][0]["tests"], [])
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_compiler_inventory_discovery(self):
+        completed = self.invoke(
+            "discover",
+            "--inventory",
+            "--mncs",
+            str(MNCS),
+            "--library",
+            str(LANGUAGE / "library"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        document = json.loads(completed.stdout)
+        manifest = document["manifests"][0]
+        self.assertEqual(manifest["inventory"]["schema_version"], "mncs.test-inventory/1")
+        self.assertEqual(
+            [item["entry"] for item in manifest["tests"]],
+            ["arithmetic", "boolean", "property_replay", "skipped", "snapshot_witness", "task_lifecycle"],
+        )
+        self.assertTrue(all(item["source_span"]["start"] < item["source_span"]["end"] for item in manifest["tests"]))
 
     def test_validate_manifest(self):
         completed = self.invoke("validate-manifest", "--manifest", "mncs-test.toml")
         self.assertEqual(completed.returncode, 0, completed.stderr)
         document = json.loads(completed.stdout)
         self.assertTrue(document["valid"])
-        self.assertEqual(document["tests"], 6)
+        self.assertEqual(document["tests"], 0)
 
     def test_replay_is_non_executing(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-replay-") as directory:
@@ -106,10 +134,47 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["summary"]["total"], 6)
             self.assertEqual(document["summary"]["passed"], 5)
             self.assertEqual(document["summary"]["skipped"], 1)
-            self.assertEqual(document["summary"]["authority"], "native_suite")
+            self.assertEqual(
+                document["summary"]["authority"],
+                "compiler_inventory_native_observation_projection",
+            )
+            self.assertEqual(document["execution"]["mode"], "retained-embed-batch")
+            self.assertEqual(document["test_inventory"]["test_count"], 6)
+            self.assertEqual(len(document["experiment"]["definition"]["test_cases"]), 6)
+            self.assertEqual(len(document["experiment"]["observations"]), 6)
+            self.assertTrue(
+                all("first-class" in item["tags"] for item in document["tests"])
+            )
+            self.assertTrue(all(item["location"]["authority"] == "mncs-compiler-test-inventory" for item in document["tests"]))
             self.assertEqual(json.loads(check.read_text(encoding="utf-8"))["verdict"], "PASS")
             self.assertTrue(list((artifacts / "requests").glob("*.json")))
             self.assertTrue(list((artifacts / "stdout").glob("*.out")))
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_filter_selects_inventory_without_mutating_authority(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-filter-") as directory:
+            result = Path(directory) / "result.json"
+            completed = self.invoke(
+                "run",
+                "--manifest",
+                "mncs-test.toml",
+                *self.live_args(),
+                "--filter",
+                "arithmetic",
+                "--result",
+                str(result),
+                "--check-result",
+                str(Path(directory) / "check.json"),
+                "--artifacts",
+                str(Path(directory) / "artifacts"),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            document = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(document["test_inventory"]["test_count"], 6)
+            self.assertEqual(document["execution"]["selected_test_count"], 1)
+            self.assertEqual(document["execution"]["batch_size"], 1)
+            self.assertEqual([item["entry"] for item in document["tests"]], ["arithmetic"])
+            self.assertEqual(len(document["experiment"]["observations"]), 1)
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_failing_assertion_is_not_hidden(self):

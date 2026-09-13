@@ -2,46 +2,7 @@ schema_version = "mncs.test-manifest/1"
 name = "mncs-test-self"
 source = "tests/self_suite.mncs"
 module = "tests.self_suite"
-suite = "suite"
-profile = "0.16"
+profile = "0.17"
 step_budget = 200000
 timeout_seconds = 60
 libraries = ["native"]
-
-[[tests]]
-id = "arithmetic"
-entry = "test_arithmetic"
-kind = "unit"
-tags = ["self", "assertion"]
-
-[[tests]]
-id = "boolean"
-entry = "test_boolean"
-kind = "unit"
-tags = ["self", "assertion"]
-
-[[tests]]
-id = "task-lifecycle"
-entry = "test_task_lifecycle"
-kind = "integration"
-tags = ["self", "stdlib"]
-
-[[tests]]
-id = "deterministic-replay"
-entry = "test_property_replay"
-kind = "property"
-tags = ["self", "property", "deterministic"]
-seed = 42
-case_index = 7
-
-[[tests]]
-id = "snapshot-witness"
-entry = "test_snapshot_witness"
-kind = "snapshot"
-tags = ["self", "snapshot"]
-
-[[tests]]
-id = "documented-skip"
-entry = "test_skipped"
-kind = "skip"
-tags = ["self", "skip"]

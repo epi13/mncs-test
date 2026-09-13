@@ -1,52 +1,52 @@
 # Writing native tests
 
-Use the current MNCS profile and import the framework records from the
-repository's library root.
+Use Profile 0.17 and import the framework records from the repository's
+library root. The declaration itself is the test registration; do not add an
+ordinary `fn test_*`, a suite aggregation, or one manifest entry per runtime
+test.
 
 ```mncs
-mncs 0.16;
+mncs 0.17;
 module examples.addition_tests;
 
 use mncs.test.assertions.v1;
 
-fn addition_is_stable() -> (result: TestResult) {
+test addition_is_stable() -> (result: TestResult) {
     return from_assertion(equals_i64(12, 5 +% 7, 4101));
 }
 ```
 
-Add the function to a manifest. If a suite is useful, keep the aggregation in
-MNCS too:
-
-```mncs
-use mncs.test.suite.v1;
-
-fn suite() -> (result: SuiteSummary) {
-    return summarize<1>([addition_is_stable()]);
-}
-```
-
-The manifest entrypoint gives the function a durable identity:
+The minimal manifest names the source/module and policy only:
 
 ```toml
 schema_version = "mncs.test-manifest/1"
 name = "addition"
 source = "addition_tests.mncs"
 module = "examples.addition_tests"
-suite = "suite"
-profile = "0.16"
+profile = "0.17"
 libraries = ["native"]
-
-[[tests]]
-id = "addition-is-stable"
-entry = "addition_is_stable"
-kind = "unit"
-tags = ["arithmetic"]
 ```
 
-Use `equals_i64`, `equals_bool`, and bounded byte witnesses for the currently
-available value vocabulary. A failing assertion carries expected, actual, and
-assertion code in the native record; the adapter adds source location and
-captured runtime provenance.
+Run and filter through the canonical provider:
+
+```bash
+mncs-test discover --inventory --mncs /path/to/mncs
+mncs-test run --manifest mncs-test.toml --mncs /path/to/mncs \
+  --filter addition
+```
+
+The compiler inventory supplies the stable declaration/test-case identities,
+source span, signature, effects, capabilities, and production subject
+identity. `mncs-test` adds selection, execution, result formatting, and
+evidence transport. Use `equals_i64`, `equals_bool`, and bounded byte
+witnesses for the currently available value vocabulary. A failing assertion
+carries expected, actual, and assertion code in the native record; the
+adapter adds source location and captured runtime provenance.
+
+Test declarations obey ordinary effect and capability closure rules. Being a
+test grants no ambient authority. Imported-module tests are not implicitly
+selected by a root inventory; make each test-bearing module an explicit
+runner target when that policy is desired.
 
 For compile conformance, use `kind = "compile-pass"`, `"compile-fail"`, or
 `"diagnostic"`. Compile-fail entries can list diagnostic code prefixes:
@@ -58,6 +58,13 @@ entry = "invalid_return"
 kind = "compile-fail"
 diagnostic_codes = ["MNE"]
 ```
+
+Compile-pass, compile-fail, diagnostic, malformed-source, and profile-refusal
+cases remain external manifest-addressable experiments because their source
+is intentionally invalid or is not an executable test declaration. They are
+still represented as bounded RFC 0034 observations and use structured
+diagnostic fields (code, stage, severity, and span), not human-readable prose
+matching.
 
 For an expected runtime trap, use `kind = "runtime-failure"` and
 `expected_status = "runtime_failure"`. This documents intent and prevents an

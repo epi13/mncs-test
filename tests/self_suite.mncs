@@ -1,50 +1,38 @@
-mncs 0.16;
+mncs 0.17;
 
-// The first executable mncs-test suite.  Every test is an ordinary MNCS
-// function returning a typed TestResult; the manifest supplies stable human
-// identities and the suite folds those values in MNCS.
+// The canonical mncs-test self-suite.  Test identity comes from the MNCS
+// compiler's first-class declaration inventory; the runner supplies no
+// per-entry registration table.
 module tests.self_suite;
 
 use mncs.test.assertions.v1;
-use mncs.test.suite.v1;
 use mncs.test.generative.v1;
 use mncs.test.snapshot.v1;
 use mncs.std.task.v1;
 
-fn test_arithmetic() -> (result: TestResult) {
+test arithmetic() -> (result: TestResult) {
     return from_assertion(equals_i64(42, 19 +% 23, 1001));
 }
 
-fn test_boolean() -> (result: TestResult) {
+test boolean() -> (result: TestResult) {
     return from_assertion(equals_bool(true, select(3 > 1, true, false), 1002));
 }
 
-fn test_task_lifecycle() -> (result: TestResult) {
+test task_lifecycle() -> (result: TestResult) {
     return from_assertion(equals_i64(0, candidate_invalid(), 1003));
 }
 
-fn test_property_replay() -> (result: TestResult) {
+test property_replay() -> (result: TestResult) {
     let drawn: i64 = replay(42, 7, 97) as i64;
     return from_assertion(equals_i64(58, drawn, 1004));
 }
 
-fn test_snapshot_witness() -> (result: TestResult) {
+test snapshot_witness() -> (result: TestResult) {
     let expected: [byte; 4] = [1, 2, 3, 4];
     let target: Witness = Witness { length: 4, checksum: 30 };
     return from_assertion(equals_bool(true, same(bytes(expected), target), 1005));
 }
 
-fn test_skipped() -> (result: TestResult) {
+test skipped() -> (result: TestResult) {
     return skip(1006);
-}
-
-fn suite() -> (result: SuiteSummary) {
-    return summarize<6>([
-        test_arithmetic(),
-        test_boolean(),
-        test_task_lifecycle(),
-        test_property_replay(),
-        test_snapshot_witness(),
-        test_skipped()
-    ]);
 }

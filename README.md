@@ -3,11 +3,12 @@
 Native testing, verification, and conformance framework for MNCS and the
 broader MNCS project family.
 
-`mncs-test` puts the meaning of a test in MNCS. A test is an ordinary MNCS
-function that returns a typed `TestResult`; a suite is an ordinary MNCS
-function that folds those results into a typed `SuiteSummary`. The external
-launcher only supplies the current compiler/runtime, carries bounded request
-and result documents, and preserves evidence needed to reproduce a run.
+`mncs-test` is the canonical provider for MNCS source tests. In source Profile
+0.17, a `test` declaration is a language-owned declaration kind. The compiler
+emits its structural inventory; this runner selects and executes that
+inventory, while the native `mncs.test.*` modules continue to own assertion,
+suite, property, and snapshot semantics. The launcher only supplies compiler
+and platform transport and preserves evidence needed to reproduce a run.
 
 ## Quick start
 
@@ -23,7 +24,7 @@ MNCS=/path/to/mncs-language/target/debug/mncs
   --format text
 ```
 
-The example suite contains arithmetic and boolean assertions, a real
+The example test module contains arithmetic and boolean assertions, a real
 `mncs.std.task.v1` lifecycle witness, deterministic property replay, a native
 snapshot witness, and an explicit skip. The successful run is `5` passed and
 `1` skipped. Machine consumers should use the default JSON output or the
@@ -31,23 +32,25 @@ generated `.mncs/mncs-test-check.json` (`mncs.check-result/1`).
 
 ## Native test surface
 
-The current language profile does not yet have a first-class `test`
-declaration or function values. The idiomatic surface for this release is
-therefore explicit and inspectable:
+Runtime tests use the first-class declaration directly:
 
 ```mncs
+mncs 0.17;
+module examples.addition_tests;
+
 use mncs.test.assertions.v1;
 
-fn test_addition() -> (result: TestResult) {
+test addition_is_stable() -> (result: TestResult) {
     return from_assertion(equals_i64(42, 19 +% 23, 1001));
 }
 ```
 
-A suite imports `mncs.test.suite.v1` and calls `summarize<N>` over a static
-sequence of result values. The manifest gives each entrypoint a stable test
-identity, kind, tag set, optional bounded arguments, and timeout/step budget.
-This explicit registry is temporary pressure evidence, not a hidden host-side
-test collector.
+No `[[tests]]` entry or handwritten suite is needed for ordinary runtime
+tests. `mncs-test` asks `mncs test-inventory` for the compiler-owned
+declaration list, then selects and executes those declarations. A manifest
+still names the source/module and may set libraries, budgets, filters, and
+artifact policy. Explicit entries remain a compatibility form for legacy
+function tests and for external compiler-input experiments.
 
 The native modules are:
 
@@ -62,9 +65,11 @@ The native modules are:
 ## Commands
 
 ```text
-mncs-test discover [--root DIR] [--recursive] [--format json|text]
+mncs-test discover [--root DIR] [--recursive] [--inventory] [--mncs BIN]
+                    [--library DIR ...] [--format json|text]
 mncs-test validate-manifest [--manifest FILE]
 mncs-test run [--manifest FILE] [--mncs BIN] [--library DIR ...]
+                 [--embed-library FILE] [--filter TEXT ...]
                  [--result FILE] [--check-result FILE] [--artifacts DIR]
                  [--format json|text]
 mncs-test replay --result FILE [--format json|text]
@@ -72,9 +77,22 @@ mncs-test replay --result FILE [--format json|text]
 
 Discovery is controlled and deterministic. Without `--recursive`, the runner
 reads the root `mncs-test.toml` and direct `tests/*.toml` manifests. Recursive
-discovery is opt-in. A manifest names the MNCS source/module, optional suite,
-profile, library roots, and ordered test entries; it does not contain an
-assertion language of its own.
+manifest discovery is opt-in; it is not the source-test discovery mechanism.
+`discover --inventory` asks the compiler for each runtime inventory. Ordering,
+names, source spans, and semantic identities then come from the compiler, not
+from Python filesystem scans or source-text matching.
+
+The compiler exposes the same provider input directly:
+
+```text
+mncs test-inventory path/to/module.mncs
+mncs compile path/to/module.mncs --exclude-tests
+mncs compile path/to/module.mncs --include-tests --target research-bytecode
+```
+
+Production compilation excludes test declarations by default. `--include-tests`
+is the explicit test-artifact policy used by `mncs-test`; `--exclude-tests`
+states the production policy explicitly and is useful in build scripts.
 
 `replay` is intentionally non-executing. It prints the recorded reproduction
 command and run identity so a developer can choose to run it deliberately.
@@ -98,17 +116,35 @@ expected-failure test; an unexpected trap is a runtime failure. A compile-fail
 entry passes only when the compiler rejects the source and its structured
 diagnostic codes match the manifest.
 
-Native suite summaries are authoritative. The adapter validates their shape
-and checks the declared total against the manifest, but it never computes a
-replacement verdict by folding individual results. Compile-only manifests
-without a suite necessarily use the adapter projection and say so in
-`summary.authority`.
+For the first-class path, each returned `TestResult` is the native oracle
+evaluation for one compiler-inventoried test. The adapter does not fold
+assertions or recompute a native verdict. `summary.authority` identifies the
+compiler-inventory observation projection. Legacy native suite summaries
+remain authoritative for compatibility manifests only.
 
-Every test preserves its source entry location, raw request, captured
-stdout/stderr, compiler execution status, program/function identities when
-available, and artifact digests. The run records source, manifest, compiler,
-library-root, host, and runner provenance. `run_id` is content-derived from
-the inputs and test selection; it is not a wall-clock identifier.
+Every first-class test preserves declaration, test-case, function, subject,
+execution, observation, and oracle-evaluation identities, plus the compiler
+source span, raw request, compiler execution status, and artifact digests. The
+run records source, manifest, compiler, library-root, host, and runner
+provenance. `run_id` is content-derived from the inputs and test selection; it
+is not a wall-clock identifier.
+
+## RFC 0034 mapping
+
+The result's `experiment` projection keeps the RFC 0034 distinctions visible:
+
+```text
+compiler `test` declaration → TestCase definition
+                         → retained-session TestExecution
+                         → Observation
+                         → native OracleEvaluation
+                         → bounded EmpiricalClaim/result projection
+```
+
+The production subject identity is separate from the test declaration and
+body-sensitive test-case identity. Editing a test creates a new case and run
+identity while the verification-only production subject fingerprint stays
+stable. A finite PASS is bounded evidence, never a universal proof.
 
 ## Actions and future Forge boundary
 
@@ -139,19 +175,22 @@ Stage 3  mncs-test executes its own native suite
 Stage 4  future: host tests retained only as independent oracles
 ```
 
-The remaining critical-path boundary is the external `mncs execute` process.
-The Python adapter is not a second assertion engine; it is a temporary
-process/file/transport boundary. Independent Rust/Python tests remain valid
-where they are differential witnesses or platform-specific action checks.
+The normal first-class runtime path uses one compiler invocation, one backend
+artifact, one retained `mncs-embed` session, and one batch call. If the shared
+library is unavailable, the runner records an explicit subprocess-per-test
+fallback rather than silently changing semantic ownership. Python remains a
+file/TOML/process/ctypes transport boundary; it is not an assertion engine.
+Independent Rust/Python tests remain valid where they are differential
+witnesses or platform-specific action checks.
 
 ## Limitations and pressures
 
 Current limitations are recorded in [`pressures/`](pressures/README.md) and
-linked to existing Commons records. The important open pressures are the lack
-of process supervision and structured compiler diagnostic APIs, the lack of
-in-process invocation, the lack of first-class test declarations/function
-values, controlled filesystem enumeration, and string/JSON values at the
-MNCS process boundary. Each workaround is narrow, named, and reproducible.
+linked to existing Commons records. The important remaining boundaries are
+platform process supervision, external structured-result transport, and
+advanced callable-value features. Compiler-owned inventory removes source
+regex discovery, and retained embed sessions remove subprocess-per-test from
+the normal path. Each workaround is narrow, named, and reproducible.
 The survey and disposition of pre-existing host-language tests is in
 [`docs/external-tests.md`](docs/external-tests.md).
 

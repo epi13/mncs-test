@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/epi13/mncs-test/blob/main/schemas/test-inventory.schema.json",
+  "title": "MNCS compiler test inventory",
+  "description": "Compiler-owned structural inventory consumed by mncs-test.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "module",
+    "source_artifact_identity",
+    "source_profile",
+    "subject_identity",
+    "subject_fingerprint",
+    "tests"
+  ],
+  "properties": {
+    "schema_version": {"const": "mncs.test-inventory/1"},
+    "module": {"type": "string", "minLength": 1},
+    "source_artifact_identity": {"type": "string", "minLength": 1},
+    "source_profile": {"type": "string", "minLength": 1},
+    "subject_identity": {"type": "string", "minLength": 1},
+    "subject_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "declaration_identity",
+          "test_case_identity",
+          "function_identity",
+          "module",
+          "name",
+          "qualified_name",
+          "source_span",
+          "profile",
+          "semantic_fingerprint",
+          "subject_identity",
+          "subject_fingerprint"
+        ],
+        "properties": {
+          "declaration_identity": {"type": "string", "minLength": 1},
+          "test_case_identity": {"type": "string", "minLength": 1},
+          "function_identity": {"type": "string", "minLength": 1},
+          "module": {"type": "string", "minLength": 1},
+          "name": {"type": "string", "minLength": 1},
+          "qualified_name": {"type": "string", "minLength": 1},
+          "source_span": {
+            "type": "object",
+            "required": ["start", "end", "line", "column"],
+            "properties": {
+              "start": {"type": "integer", "minimum": 0},
+              "end": {"type": "integer", "minimum": 0},
+              "line": {"type": "integer", "minimum": 1},
+              "column": {"type": "integer", "minimum": 1}
+            },
+            "additionalProperties": true
+          },
+          "profile": {"type": "string", "minLength": 1},
+          "generic_params": {"type": "array"},
+          "semantic_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "subject_identity": {"type": "string", "minLength": 1},
+          "subject_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "inputs": {"type": "array"},
+          "outputs": {"type": "array"},
+          "effects": {"type": "array"},
+          "capabilities": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

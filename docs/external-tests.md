@@ -22,11 +22,13 @@ of its own behavior.
 
 ## C — exists because the current MNCS boundary is incomplete
 
-The external process/session launcher, compiler diagnostic transport, broad
-filesystem discovery, first-class callable/test declarations, and
-string/JSON result projection are recorded as `MNCS-TEST-P-001` through
-`MNCS-TEST-P-006`. The Python runner and the action shell are limited to those
-named boundaries; they do not contain a shadow assertion engine.
+OS process supervision, external compiler/result transport, advanced callable
+values, and string/JSON interoperability remain recorded as
+`MNCS-TEST-P-001` through `MNCS-TEST-P-006`. Compiler-owned test inventory has
+removed source-text test discovery, and retained `mncs-embed` sessions have
+removed subprocess-per-test from the normal runtime path. The Python runner
+and action shell are limited to those named boundaries; they do not contain a
+shadow assertion engine.
 
 ## D — correctly remains infrastructure-specific
 
