@@ -152,6 +152,8 @@ of process supervision and structured compiler diagnostic APIs, the lack of
 in-process invocation, the lack of first-class test declarations/function
 values, controlled filesystem enumeration, and string/JSON values at the
 MNCS process boundary. Each workaround is narrow, named, and reproducible.
+The survey and disposition of pre-existing host-language tests is in
+[`docs/external-tests.md`](docs/external-tests.md).
 
 ## Development
 
