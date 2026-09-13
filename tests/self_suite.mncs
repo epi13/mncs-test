@@ -6,6 +6,7 @@ mncs 0.17;
 module tests.self_suite;
 
 use mncs.test.assertions.v1;
+use mncs.test.suite.v1;
 use mncs.test.generative.v1;
 use mncs.test.snapshot.v1;
 use mncs.std.task.v1;

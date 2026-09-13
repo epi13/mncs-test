@@ -39,6 +39,7 @@ mncs 0.17;
 module examples.addition_tests;
 
 use mncs.test.assertions.v1;
+use mncs.test.suite.v1;
 
 test addition_is_stable() -> (result: TestResult) {
     return from_assertion(equals_i64(42, 19 +% 23, 1001));
@@ -117,10 +118,11 @@ entry passes only when the compiler rejects the source and its structured
 diagnostic codes match the manifest.
 
 For the first-class path, each returned `TestResult` is the native oracle
-evaluation for one compiler-inventoried test. The adapter does not fold
-assertions or recompute a native verdict. `summary.authority` identifies the
-compiler-inventory observation projection. Legacy native suite summaries
-remain authoritative for compatibility manifests only.
+evaluation for one compiler-inventoried test. The adapter carries those typed
+values through `mncs.test.suite.v1::empty` and `observe` in the same retained
+session; it does not fold assertions or recompute a native verdict. The
+result's `summary.authority` is `native_suite` for this path. Legacy adapter
+projections remain only for compatibility manifests and external failures.
 
 Every first-class test preserves declaration, test-case, function, subject,
 execution, observation, and oracle-evaluation identities, plus the compiler
@@ -176,10 +178,12 @@ Stage 4  future: host tests retained only as independent oracles
 ```
 
 The normal first-class runtime path uses one compiler invocation, one backend
-artifact, one retained `mncs-embed` session, and one batch call. If the shared
-library is unavailable, the runner records an explicit subprocess-per-test
-fallback rather than silently changing semantic ownership. Python remains a
-file/TOML/process/ctypes transport boundary; it is not an assertion engine.
+artifact, one retained `mncs-embed` session, one test batch, and native suite
+fold calls over that same session. If the shared library is unavailable, the
+runner records an explicit subprocess-per-test fallback rather than silently
+changing semantic ownership. Python remains a file/TOML/process/ctypes
+transport boundary; it carries native values but is not an assertion or
+verdict engine.
 Independent Rust/Python tests remain valid where they are differential
 witnesses or platform-specific action checks.
 

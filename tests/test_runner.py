@@ -136,9 +136,15 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["summary"]["skipped"], 1)
             self.assertEqual(
                 document["summary"]["authority"],
-                "compiler_inventory_native_observation_projection",
+                "native_suite",
             )
             self.assertEqual(document["execution"]["mode"], "retained-embed-batch")
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["authority"],
+                "mncs.test.suite.v1",
+            )
+            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 7)
+            self.assertEqual(document["native_suite_summary"]["total"], 6)
             self.assertEqual(document["test_inventory"]["test_count"], 6)
             self.assertEqual(len(document["experiment"]["definition"]["test_cases"]), 6)
             self.assertEqual(len(document["experiment"]["observations"]), 6)
@@ -173,6 +179,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["test_inventory"]["test_count"], 6)
             self.assertEqual(document["execution"]["selected_test_count"], 1)
             self.assertEqual(document["execution"]["batch_size"], 1)
+            self.assertEqual(document["summary"]["authority"], "native_suite")
             self.assertEqual([item["entry"] for item in document["tests"]], ["arithmetic"])
             self.assertEqual(len(document["experiment"]["observations"]), 1)
 

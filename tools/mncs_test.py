@@ -1270,6 +1270,112 @@ def execute_batch(
     return results
 
 
+def native_suite_fold(
+    *,
+    test_results: list[dict[str, Any]],
+    session: EmbedSession,
+    step_budget: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Fold native TestResult values through the MNCS suite module.
+
+    The host carries returned ABI values between retained-session calls but
+    never recomputes the suite verdict or failure counters.  A missing native
+    value is a transport/compatibility condition: callers may retain the
+    legacy adapter projection for external fixtures, but a normal
+    first-class declaration path should have a complete native fold.
+    """
+
+    if not test_results:
+        return None, {
+            "authority": "mncs.test.suite.v1",
+            "status": "not_run",
+            "reason": "no selected first-class test results",
+        }
+    native_values: list[Any] = []
+    for index, item in enumerate(test_results):
+        if item.get("execution_status") != "returned":
+            return None, {
+                "authority": "mncs.test.suite.v1",
+                "status": "unavailable",
+                "reason": f"test result {index} did not return a native TestResult value",
+            }
+        execution = item.get("execution")
+        returned = execution.get("returned") if isinstance(execution, dict) else None
+        if not isinstance(returned, list) or len(returned) != 1:
+            return None, {
+                "authority": "mncs.test.suite.v1",
+                "status": "unavailable",
+                "reason": f"test result {index} has no single native TestResult value",
+            }
+        native_values.append(returned[0])
+
+    try:
+        empty_output = session.call_batch(
+            [
+                {
+                    "module": "mncs.test.suite.v1",
+                    "function": "empty",
+                    "args": [],
+                    "step_budget": step_budget,
+                }
+            ]
+        )[0]
+        empty_returned = empty_output.get("returned") if isinstance(empty_output, dict) else None
+        if empty_output.get("status") != "returned" or not isinstance(empty_returned, list) or len(empty_returned) != 1:
+            return None, {
+                "authority": "mncs.test.suite.v1",
+                "status": "unavailable",
+                "reason": "suite.empty did not return a native SuiteSummary value",
+                "output": empty_output,
+            }
+        summary_value = empty_returned[0]
+        summary_output = empty_output
+        calls = 1
+        for value in native_values:
+            summary_output = session.call_batch(
+                [
+                    {
+                        "module": "mncs.test.suite.v1",
+                        "function": "observe",
+                        "args": [summary_value, value],
+                        "step_budget": step_budget,
+                    }
+                ]
+            )[0]
+            calls += 1
+            returned = summary_output.get("returned") if isinstance(summary_output, dict) else None
+            if summary_output.get("status") != "returned" or not isinstance(returned, list) or len(returned) != 1:
+                return None, {
+                    "authority": "mncs.test.suite.v1",
+                    "status": "unavailable",
+                    "reason": "suite.observe did not return a native SuiteSummary value",
+                    "call_index": calls - 1,
+                    "output": summary_output,
+                }
+            summary_value = returned[0]
+        summary = native_suite_summary(summary_output)
+        if summary is None:
+            return None, {
+                "authority": "mncs.test.suite.v1",
+                "status": "unavailable",
+                "reason": "suite.observe returned a malformed SuiteSummary value",
+            }
+        return summary, {
+            "authority": "mncs.test.suite.v1",
+            "module": "mncs.test.suite.v1",
+            "initializer": "empty",
+            "observer": "observe",
+            "status": "returned",
+            "calls": calls,
+        }
+    except (AdapterError, IndexError) as error:
+        return None, {
+            "authority": "mncs.test.suite.v1",
+            "status": "unavailable",
+            "reason": str(error),
+        }
+
+
 def compile_entry(
     *,
     test: dict[str, Any],
@@ -1895,6 +2001,12 @@ def run_manifest(args: argparse.Namespace) -> int:
                             artifacts=artifacts,
                             transport=transport,
                         )
+                        suite_summary, native_aggregation = native_suite_fold(
+                            test_results=test_results,
+                            session=session,
+                            step_budget=args.step_budget or manifest["step_budget"],
+                        )
+                        execution["native_aggregation"] = native_aggregation
                     finally:
                         session.close()
                 else:

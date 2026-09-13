@@ -29,8 +29,10 @@ The adapter owns four platform boundaries that are not test semantics:
 
 The adapter receives a native result, validates its shape, and carries it
 forward. A first-class test's returned verdict is the native oracle evaluation;
-the adapter does not fold assertions or recompute it. Legacy suite summaries
-remain authoritative for compatibility manifests.
+the adapter carries those values through `mncs.test.suite.v1::empty` and
+`observe` in the retained session, so the native `SuiteSummary` remains the
+summary authority. Legacy adapter projections remain only for compatibility
+manifests and external failures.
 
 ## Manifest and discovery
 
@@ -58,10 +60,11 @@ scan source text.
 For a first-class runtime manifest, the adapter asks `mncs test-inventory`,
 compiles once with `--include-tests`, opens one verified `mncs-embed` Session,
 and sends the selected calls through `mncs_session_call_batch`. Each returned
-value remains a distinct execution observation. If the embed library is not
-available, the result records an explicit subprocess-per-test fallback. A
-legacy manifest with a suite retains its compatibility behavior and native
-suite authority.
+value remains a distinct execution observation. The adapter then calls native
+`mncs.test.suite.v1::empty`/`observe` through that same session to obtain the
+semantic summary. If the embed library is not available, the result records an
+explicit subprocess-per-test fallback. A legacy manifest with a suite retains
+its compatibility behavior and native suite authority.
 
 Compile-only entries invoke `mncs validate`. A compile-fail or diagnostic
 entry is passing only when the compiler rejects the source and every declared
