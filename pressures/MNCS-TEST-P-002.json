@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["tools/mncs_test.py", "schemas/test-manifest.schema.json", "docs/architecture.md"],
   "relevant_tests": ["tests/test_runner.py::test_discovery_is_deterministic"],
-  "relevant_commits": ["pending-delivery"],
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470"],
   "commons_observations": ["MNCS-TOOLING-C5FD211E05C1--OBS-8AF8511663BD"]
 }

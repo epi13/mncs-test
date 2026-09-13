@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["tools/mncs_test.py", "schemas/test-result.schema.json", "tests/fixtures/compile_fail.mncs"],
   "relevant_tests": ["tests/test_runner.py::test_expected_compile_failure"],
-  "relevant_commits": ["pending-delivery"],
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470"],
   "commons_observations": ["MNCS-TOOLING-E920D54703E3--OBS-9BB91C7F9694"]
 }

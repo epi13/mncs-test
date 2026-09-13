@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["tools/mncs_test.py", "schemas/test-result.schema.json", "docs/architecture.md"],
   "relevant_tests": ["tests/test_runner.py::test_structured_check_result"],
-  "relevant_commits": ["pending-delivery"],
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-actions:95df975"],
   "commons_observations": ["MNCS-TOOLING-146FB6F4BBC6--OBS-4F19097B5A90"]
 }
