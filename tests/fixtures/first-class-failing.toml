@@ -1,0 +1,8 @@
+schema_version = "mncs.test-manifest/1"
+name = "mncs-test-first-class-failing"
+source = "first_class_failing.mncs"
+module = "tests.first_class_failing"
+profile = "0.17"
+step_budget = 200000
+timeout_seconds = 60
+libraries = ["../../native"]

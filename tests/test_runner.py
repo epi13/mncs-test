@@ -208,6 +208,33 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["tests"][0]["native_result"]["actual"], 6)
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_first_class_failing_assertion_uses_native_suite_fold(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-first-class-fail-") as directory:
+            result = Path(directory) / "result.json"
+            completed = self.invoke(
+                "run",
+                "--manifest",
+                "tests/fixtures/first-class-failing.toml",
+                *self.live_args(),
+                "--result",
+                str(result),
+                "--check-result",
+                str(Path(directory) / "check.json"),
+                "--artifacts",
+                str(Path(directory) / "artifacts"),
+            )
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            document = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(document["verdict"], "FAIL")
+            self.assertEqual(document["summary"]["authority"], "native_suite")
+            self.assertEqual(document["native_suite_summary"]["failed"], 1)
+            self.assertEqual(document["native_suite_summary"]["assertion_failures"], 1)
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["status"],
+                "returned",
+            )
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_expected_compile_failure(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-compile-") as directory:
             result = Path(directory) / "result.json"
