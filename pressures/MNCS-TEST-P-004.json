@@ -15,6 +15,6 @@
   "status": "open",
   "relevant_files": ["tools/mncs_test.py", "docs/architecture.md", "docs/bootstrap.md"],
   "relevant_tests": ["tests/test_runner.py::test_self_suite", "tests/test_runner.py::test_compiler_inventory_discovery"],
-  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-test:e396217", "mncs-language:ea5e594", "mncs-actions:7701127"],
-  "commons_observations": ["MNCS-LANG-52A5E0C72A39--OBS-AE964BA5A065", "MNCS-LANG-52A5E0C72A39--OBS-C2417F1CBF4A"]
+  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-test:e396217", "mncs-test:e9235f7", "mncs-language:ea5e594", "mncs-actions:7701127"],
+  "commons_observations": ["MNCS-LANG-52A5E0C72A39--OBS-AE964BA5A065", "MNCS-LANG-52A5E0C72A39--OBS-C2417F1CBF4A", "MNCS-LANG-52A5E0C72A39--OBS-120B0AED4AF2"]
 }
