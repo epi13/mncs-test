@@ -20,6 +20,7 @@ LIVE = MNCS.is_file() and os.access(MNCS, os.X_OK)
 
 sys.path.insert(0, str(REPO / "tools"))
 import mncs_test  # noqa: E402
+from family_contract import verification_plan_contract  # noqa: E402
 
 
 class RunnerTests(unittest.TestCase):
@@ -222,7 +223,7 @@ class RunnerTests(unittest.TestCase):
         selected = inventory["tests"][0]
         plan = {
             "schema_version": "mncs.verification-plan/1",
-            "plan_id": "plan-compact-test",
+            "plan_id": "",
             "source": {
                 "path": str(source),
                 "sha256": mncs_test.sha256_file(source),
@@ -238,19 +239,35 @@ class RunnerTests(unittest.TestCase):
                 "risk_flags": [],
                 "complete": True,
                 "limitations": ["test fixture impact evidence"],
+                "cross_repository": {
+                    "graph_identity": "b" * 64,
+                    "edges": [],
+                    "selected_repositories": [],
+                    "complete": True,
+                    "limitations": ["test fixture does not exercise family topology"],
+                },
             },
             "selection": {
                 "level": "changed_item",
                 "selected_test_identities": [selected["test_case_identity"]],
                 "available_test_count": len(inventory["tests"]),
                 "escalation_reasons": [],
+                "selected_repositories": [],
+                "available_repository_count": 0,
             },
             "proof": {
                 "sufficient_to_stop": True,
-                "required_evidence": ["selected_tests_pass"],
+                "required_evidence": ["selected_test_cases_pass"],
+                "boundary": {
+                    "claimed_scope": "changed_item",
+                    "established": True,
+                    "executor": "mncs-test",
+                    "stop_condition": "selected_test_cases_pass",
+                },
             },
-            "provenance": {"provider": "ravel", "impact_schema": "mncs.semantic-impact/1"},
+            "provenance": {"provider": "ravel", "policy": "test-fixture", "impact_schema": "mncs.semantic-impact/1"},
         }
+        plan["plan_id"] = verification_plan_contract().plan_identity(plan)
         with tempfile.TemporaryDirectory(prefix="mncs-test-plan-") as directory:
             plan_path = Path(directory) / "plan.json"
             result_path = Path(directory) / "result.json"
@@ -277,7 +294,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(result["selection"]["selected_count"], 1)
             self.assertEqual(result["summary"]["total"], 1)
             self.assertNotIn("test_result", check)
-            self.assertEqual(check["selection"]["plan_id"], "plan-compact-test")
+            self.assertEqual(check["selection"]["plan_id"], plan["plan_id"])
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_failing_assertion_is_not_hidden(self):
