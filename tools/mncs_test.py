@@ -75,6 +75,7 @@ VERIFICATION_LEVELS = (
     "family",
 )
 ESCALATION_REASONS = {
+    "direct_dependents_affected",
     "public_contract_changed",
     "shared_type_changed",
     "parser_semantics_changed",
@@ -1688,8 +1689,19 @@ def load_verification_plan(
         raise ManifestError(
             "verification plan is stale: source sha256 does not match the current source"
         )
-    if source.get("path") is not None and not isinstance(source.get("path"), str):
-        raise ManifestError("verification plan source.path must be a string")
+    source_value = source.get("path")
+    if not isinstance(source_value, str) or not source_value:
+        raise ManifestError("verification plan source.path must be a non-empty string")
+    declared_source_path = Path(source_value)
+    if not declared_source_path.is_absolute():
+        declared_source_path = path.parent / declared_source_path
+    try:
+        if declared_source_path.resolve() != source_path.resolve():
+            raise ManifestError(
+                "verification plan source.path does not match the current source"
+            )
+    except OSError as error:
+        raise ManifestError("verification plan source.path could not be resolved") from error
     impact = value.get("impact")
     if not isinstance(impact, dict):
         raise ManifestError("verification plan has no impact projection")
@@ -1700,6 +1712,15 @@ def load_verification_plan(
         raise ManifestError("verification plan impact.graph_identity must be non-empty")
     if not isinstance(impact.get("complete"), bool):
         raise ManifestError("verification plan impact.complete must be boolean")
+    for field in ("roots", "direct_dependents", "test_identities", "risk_flags", "limitations"):
+        values = impact.get(field)
+        if not isinstance(values, list) or not all(
+            isinstance(item, str) and (item or field == "limitations") for item in values
+        ):
+            raise ManifestError(f"verification plan impact.{field} must be string identities")
+    affected_count = impact.get("affected_count")
+    if not isinstance(affected_count, int) or isinstance(affected_count, bool) or affected_count < 0:
+        raise ManifestError("verification plan impact.affected_count must be a non-negative integer")
     selection = value.get("selection")
     if not isinstance(selection, dict):
         raise ManifestError("verification plan has no selection")
@@ -1720,6 +1741,22 @@ def load_verification_plan(
     risks = impact.get("risk_flags", [])
     if not isinstance(risks, list) or not all(isinstance(item, str) and item for item in risks):
         raise ManifestError("verification plan impact.risk_flags must be strings")
+    available_count = selection.get("available_test_count")
+    if not isinstance(available_count, int) or isinstance(available_count, bool) or available_count < 0:
+        raise ManifestError("verification plan selection.available_test_count must be a non-negative integer")
+    if len(set(selected)) > available_count:
+        raise ManifestError(
+            "verification plan selects more test identities than its available inventory"
+        )
+    proof = value.get("proof")
+    if not isinstance(proof, dict) or not isinstance(proof.get("sufficient_to_stop"), bool):
+        raise ManifestError("verification plan proof.sufficient_to_stop must be boolean")
+    required_evidence = proof.get("required_evidence", [])
+    if not isinstance(required_evidence, list) or not all(isinstance(item, str) and item for item in required_evidence):
+        raise ManifestError("verification plan proof.required_evidence must be string identities")
+    provenance = value.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ManifestError("verification plan provenance must be an object")
     value["_source_path"] = str(source_path.resolve())
     value["_source_sha256"] = current_sha256
     value["_selected_test_identities"] = sorted(set(selected))
@@ -1742,8 +1779,8 @@ def apply_verification_plan(
         )
     selected = [test for test in tests if test.get("id") in requested]
     available = len(tests)
-    if available and not selected:
-        raise ManifestError("verification plan selected no current test identities")
+    if not selected:
+        raise ManifestError("verification plan selected no current test identities; no behavioral proof can be established")
     expected_count = plan.get("selection", {}).get("available_test_count")
     if isinstance(expected_count, int) and expected_count != available:
         raise ManifestError(
@@ -1763,13 +1800,16 @@ def selection_summary(
     impact = plan.get("impact", {}) if isinstance(plan, dict) else {}
     selected_ids = [str(test.get("id")) for test in tests if test.get("id")]
     available_count = len(inventory.get("tests", [])) if isinstance(inventory, dict) else len(tests)
+    impact_nodes = impact.get("nodes", []) if isinstance(impact, dict) else []
+    if not isinstance(impact_nodes, list):
+        impact_nodes = []
     summary: dict[str, Any] = {
         "authority": "ravel-verification-plan" if plan is not None else "manifest-default",
         "level": selection.get("level", "repository_canonical") if plan is not None else "repository_canonical",
         "selected_test_identities": selected_ids,
         "selected_count": len(tests),
         "available_count": available_count,
-        "affected_surface_count": impact.get("affected_count", len(impact.get("nodes", []))) if isinstance(impact, dict) else len(tests),
+        "affected_surface_count": impact.get("affected_count", len(impact_nodes)) if isinstance(impact, dict) else len(tests),
         "risk_flags": sorted(impact.get("risk_flags", [])) if isinstance(impact, dict) else [],
         "escalation_reasons": sorted(plan.get("_escalation_reasons", [])) if plan is not None else [],
         "stop_sufficient": bool(plan.get("proof", {}).get("sufficient_to_stop", False)) if plan is not None else False,
@@ -1919,6 +1959,9 @@ def make_result(
         plan=verification_plan,
         plan_ref=verification_plan_ref,
     )
+    reproduction_command = ["mncs-test", "run", "--manifest", str(manifest["manifest_path"])]
+    if verification_plan_ref is not None and verification_plan_ref.get("path"):
+        reproduction_command.extend(["--verification-plan", str(verification_plan_ref["path"])])
     result: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA,
         "protocol_version": 1,
@@ -2005,7 +2048,7 @@ def make_result(
         "provenance": provenance,
         "artifacts": artifacts.items,
         "reproduction": {
-            "command": shlex.join(["mncs-test", "run", "--manifest", str(manifest["manifest_path"])]),
+            "command": shlex.join(reproduction_command),
             "replay_command": shlex.join(["mncs-test", "replay", "--result", "<result-file>"]),
             "cwd": str(cwd),
             "run_id": run_id,
