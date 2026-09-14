@@ -799,6 +799,55 @@ def expected_status_for(test: dict[str, Any]) -> str | None:
     return None
 
 
+def canonical_execution_request(
+    *,
+    module: str,
+    function: str,
+    arguments: Any,
+    step_budget: int,
+    type_arguments: Any = None,
+    include_type_arguments: bool = False,
+) -> dict[str, Any]:
+    """Build the stable request document shared with debugger consumers.
+
+    The retained embed ABI intentionally has a smaller transport request. It
+    must never replace the canonical request in a TestResult because the
+    request document is part of the test-to-debug lineage.
+    """
+
+    request: dict[str, Any] = {
+        "schema_version": "0.1",
+        "target": {"module": module, "function": function},
+        "arguments": arguments,
+        "step_budget": step_budget,
+    }
+    if include_type_arguments:
+        request["type_arguments"] = type_arguments
+    return request
+
+
+def embed_execution_request(
+    *,
+    module: str,
+    function: str,
+    arguments: Any,
+    step_budget: int,
+    type_arguments: Any = None,
+    include_type_arguments: bool = False,
+) -> dict[str, Any]:
+    """Build only the request shape accepted by the retained embed ABI."""
+
+    request = {
+        "module": module,
+        "function": function,
+        "args": arguments,
+        "step_budget": step_budget,
+    }
+    if include_type_arguments:
+        request["type_arguments"] = type_arguments
+    return request
+
+
 def base_test_result(test: dict[str, Any], source_path: Path, source_text: str = "") -> dict[str, Any]:
     del source_text  # source locations come from the compiler inventory.
     result = {
@@ -1011,14 +1060,14 @@ def execute_entry(
     entry = test["entry"]
     step_budget = int(test.get("step_budget", default_step_budget))
     timeout_seconds = int(test.get("timeout_seconds", default_timeout))
-    request: dict[str, Any] = {
-        "schema_version": "0.1",
-        "target": {"module": module, "function": entry},
-        "arguments": test.get("arguments", []),
-        "step_budget": step_budget,
-    }
-    if "type_arguments" in test:
-        request["type_arguments"] = test["type_arguments"]
+    request = canonical_execution_request(
+        module=module,
+        function=entry,
+        arguments=test.get("arguments", []),
+        step_budget=step_budget,
+        type_arguments=test.get("type_arguments"),
+        include_type_arguments="type_arguments" in test,
+    )
     request_path = artifacts.root / "requests" / f"{artifact_key}.json"
     request_path.parent.mkdir(parents=True, exist_ok=True)
     request_path.write_bytes(json_bytes(request))
@@ -1039,6 +1088,7 @@ def execute_entry(
     test_result = base_test_result(test, source_path, source_text)
     test_result["request"] = request
     test_result["request_artifact"] = request_artifact["path"]
+    test_result["request_artifact_ref"] = dict(request_artifact)
     test_result["stdout_artifact"] = process["stdout_artifact"]
     test_result["stderr_artifact"] = process["stderr_artifact"]
     test_result["command_artifact"] = process["command_artifact"]
@@ -1201,26 +1251,29 @@ def execute_batch(
     artifacts: ArtifactStore,
     transport: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    requests: list[dict[str, Any]] = []
-    request_artifacts: list[str] = []
+    request_documents: list[dict[str, Any]] = []
+    transport_requests: list[dict[str, Any]] = []
+    request_artifacts: list[dict[str, Any]] = []
     for index, test in enumerate(tests):
         step_budget = int(test.get("step_budget", default_step_budget))
-        request: dict[str, Any] = {
-            "schema_version": "0.1",
-            "target": {"module": module, "function": test["entry"]},
-            "arguments": test.get("arguments", []),
-            "step_budget": step_budget,
-        }
-        if "type_arguments" in test:
-            request["type_arguments"] = test["type_arguments"]
-        requests.append(
-            {
-                "module": module,
-                "function": test["entry"],
-                "args": test.get("arguments", []),
-                "step_budget": step_budget,
-                **({"type_arguments": test["type_arguments"]} if "type_arguments" in test else {}),
-            }
+        request = canonical_execution_request(
+            module=module,
+            function=test["entry"],
+            arguments=test.get("arguments", []),
+            step_budget=step_budget,
+            type_arguments=test.get("type_arguments"),
+            include_type_arguments="type_arguments" in test,
+        )
+        request_documents.append(request)
+        transport_requests.append(
+            embed_execution_request(
+                module=module,
+                function=test["entry"],
+                arguments=test.get("arguments", []),
+                step_budget=step_budget,
+                type_arguments=test.get("type_arguments"),
+                include_type_arguments="type_arguments" in test,
+            )
         )
         request_path = artifacts.root / "requests" / f"batch-{index:03d}-{safe_artifact_key(test['id'])}.json"
         request_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1231,20 +1284,25 @@ def execute_batch(
             "sha256": sha256_file(request_path),
         }
         artifacts.items.append(request_artifact)
-        request_artifacts.append(request_artifact["path"])
+        request_artifacts.append(request_artifact)
     try:
-        decoded = session.call_batch(requests)
+        decoded = session.call_batch(transport_requests)
     except AdapterError as error:
-        return [
-            result_failure(
+        results = []
+        for index, test in enumerate(tests):
+            result = result_failure(
                 base_test_result(test, source_path, source_text),
                 failure_class="infrastructure_failure",
                 message="retained MNCS session could not execute the test batch",
                 error=str(error),
                 transport=transport,
             )
-            for test in tests
-        ]
+            result["request"] = request_documents[index]
+            result["transport_request"] = transport_requests[index]
+            result["request_artifact"] = request_artifacts[index]["path"]
+            result["request_artifact_ref"] = dict(request_artifacts[index])
+            results.append(result)
+        return results
     results: list[dict[str, Any]] = []
     for index, test in enumerate(tests):
         if index >= len(decoded):
@@ -1264,8 +1322,10 @@ def execute_batch(
                 step_budget=int(test.get("step_budget", default_step_budget)),
                 transport=transport,
             )
-        result["request"] = requests[index]
-        result["request_artifact"] = request_artifacts[index]
+        result["request"] = request_documents[index]
+        result["transport_request"] = transport_requests[index]
+        result["request_artifact"] = request_artifacts[index]["path"]
+        result["request_artifact_ref"] = dict(request_artifacts[index])
         results.append(result)
     return results
 
@@ -1671,6 +1731,30 @@ def make_result(
             "verdict": item.get("verdict"),
             "status": item.get("execution_status", item.get("status")),
             "interpretation": "bounded oracle evaluation; not a universal proof",
+        }
+        request = item.get("request")
+        request_ref = item.get("request_artifact_ref")
+        item["execution_lineage"] = {
+            "test_case_identity": semantic.get("test_case_identity"),
+            "declaration_identity": semantic.get("declaration_identity"),
+            "function_identity": semantic.get("function_identity"),
+            "module": semantic.get("module"),
+            "subject_identity": semantic.get("subject_identity")
+            or (test_inventory or {}).get("subject_identity"),
+            "execution_identity": item["execution_identity"],
+            "observation_identity": item["observation_identity"],
+            "oracle_evaluation_identity": item["oracle_evaluation"]["identity"],
+            "source": {
+                "path": item.get("source"),
+                "sha256": provenance["source"].get("sha256"),
+                "span": item.get("source_span"),
+            },
+            "request": {
+                "schema_version": request.get("schema_version") if isinstance(request, dict) else None,
+                "target": request.get("target") if isinstance(request, dict) else None,
+                "sha256": request_ref.get("sha256") if isinstance(request_ref, dict) else None,
+                "artifact": request_ref,
+            },
         }
     native_suite_payload = None
     if suite_summary is not None:

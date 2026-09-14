@@ -58,7 +58,48 @@
         "verdict": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
         "status": {"type": "string", "minLength": 1},
         "location": {"type": "object"},
-        "failure": {"type": "object"}
+        "failure": {"type": "object"},
+        "request": {"$ref": "#/$defs/execution_request"},
+        "transport_request": {"type": "object"},
+        "request_artifact": {"type": "string", "minLength": 1},
+        "request_artifact_ref": {"$ref": "#/$defs/artifact"},
+        "execution_lineage": {"$ref": "#/$defs/execution_lineage"}
+      },
+      "additionalProperties": true
+    },
+    "execution_request": {
+      "type": "object",
+      "required": ["schema_version", "target", "arguments", "step_budget"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "target": {
+          "type": "object",
+          "required": ["module", "function"],
+          "properties": {
+            "module": {"type": "string", "minLength": 1},
+            "function": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": true
+        },
+        "arguments": {"type": "array"},
+        "type_arguments": {"type": "array"},
+        "step_budget": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "execution_lineage": {
+      "type": "object",
+      "properties": {
+        "test_case_identity": {"type": "string", "minLength": 1},
+        "declaration_identity": {"type": "string", "minLength": 1},
+        "function_identity": {"type": "string", "minLength": 1},
+        "module": {"type": "string", "minLength": 1},
+        "subject_identity": {"type": "string", "minLength": 1},
+        "execution_identity": {"type": "string", "minLength": 1},
+        "observation_identity": {"type": "string", "minLength": 1},
+        "oracle_evaluation_identity": {"type": "string", "minLength": 1},
+        "source": {"type": "object"},
+        "request": {"type": "object"}
       },
       "additionalProperties": true
     },

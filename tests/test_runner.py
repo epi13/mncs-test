@@ -152,6 +152,15 @@ class RunnerTests(unittest.TestCase):
                 all("first-class" in item["tags"] for item in document["tests"])
             )
             self.assertTrue(all(item["location"]["authority"] == "mncs-compiler-test-inventory" for item in document["tests"]))
+            self.assertTrue(
+                all(
+                    item["request"]["schema_version"] == "0.1"
+                    and item["request"]["target"]["module"]
+                    and item["request"]["target"]["function"]
+                    and item["request_artifact_ref"]["sha256"]
+                    for item in document["tests"]
+                )
+            )
             self.assertEqual(json.loads(check.read_text(encoding="utf-8"))["verdict"], "PASS")
             self.assertTrue(list((artifacts / "requests").glob("*.json")))
             self.assertTrue(list((artifacts / "stdout").glob("*.out")))
@@ -182,6 +191,17 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["summary"]["authority"], "native_suite")
             self.assertEqual([item["entry"] for item in document["tests"]], ["arithmetic"])
             self.assertEqual(len(document["experiment"]["observations"]), 1)
+            item = document["tests"][0]
+            self.assertEqual(item["request"]["target"]["function"], "arithmetic")
+            self.assertEqual(item["transport_request"]["function"], "arithmetic")
+            self.assertEqual(item["transport_request"]["args"], item["request"]["arguments"])
+            self.assertEqual(
+                item["execution_lineage"]["execution_identity"], item["execution_identity"]
+            )
+            self.assertEqual(
+                item["execution_lineage"]["request"]["sha256"],
+                item["request_artifact_ref"]["sha256"],
+            )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_failing_assertion_is_not_hidden(self):
@@ -233,6 +253,10 @@ class RunnerTests(unittest.TestCase):
                 document["execution"]["native_aggregation"]["status"],
                 "returned",
             )
+            item = document["tests"][0]
+            self.assertEqual(item["request"]["target"]["function"], "failing_assertion")
+            self.assertEqual(item["request"]["target"]["module"], "tests.first_class_failing")
+            self.assertEqual(item["execution_lineage"]["test_case_identity"], item["semantic"]["test_case_identity"])
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_expected_compile_failure(self):
