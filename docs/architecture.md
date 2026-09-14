@@ -77,8 +77,22 @@ The result has two layers:
   classifications, diagnostics, declaration/test-case/subject/execution/
   observation identities, artifacts, and reproduction;
 - `mncs.check-result/1` is a small action/Forge-facing envelope with the
-  top-level verdict, claim, digest, unresolved list, and a reference to the
-  detailed result.
+  top-level verdict, claim, digest, unresolved list, compact `selection`
+  summary, and a digest-bound reference to the detailed result. Detailed test
+  records are not nested into the check, so Actions and Forge can reason from
+  a small machine-readable witness and retrieve the raw result only when
+  needed.
+
+## Minimum-sufficient verification
+
+`mncs.verification-plan/1` is the selective provider boundary. Ravel supplies a
+plan from the compiler's `mncs.semantic-impact/1` projection and inventory;
+the runner verifies the current source and subject binding, then selects exact
+test-case identities. The plan records its level, impact counts, risks,
+escalation reasons, graph identity, and proof stop condition. Plan selection is
+identity-based rather than substring-based. A stale or incomplete plan is an
+explicit UNKNOWN/invalid invocation condition, never a reason to broaden to a
+full suite without a new plan.
 
 ## Failure taxonomy
 

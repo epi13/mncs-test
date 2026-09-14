@@ -32,6 +32,7 @@ MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
+VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 RUNNER_VERSION = "0.2.0"
 
 EXIT_SUCCESS = 0
@@ -65,6 +66,31 @@ TEST_KINDS = {
     "unsupported",
 }
 DIAGNOSTIC_CODE = re.compile(r"^[A-Z][A-Z0-9_-]*")
+
+VERIFICATION_LEVELS = (
+    "changed_item",
+    "direct_dependents",
+    "affected_subsystem",
+    "repository_canonical",
+    "family",
+)
+ESCALATION_REASONS = {
+    "public_contract_changed",
+    "shared_type_changed",
+    "parser_semantics_changed",
+    "serialization_format_changed",
+    "effect_semantics_changed",
+    "abi_boundary_changed",
+    "canonical_fixture_changed",
+    "high_connectivity_definition_changed",
+    "dependent_targeted_test_failed",
+    "insufficient_diagnostic_evidence",
+    "migration_broad_semantic_surface",
+    "language_profile_changed",
+    "cross_repository_contract_changed",
+    "impact_evidence_truncated",
+    "unknown_changed_identity",
+}
 
 
 class ManifestError(ValueError):
@@ -1631,6 +1657,131 @@ def manifest_provenance(manifest: dict[str, Any], source_text: str, mncs: str, l
     }
 
 
+def load_verification_plan(
+    path: Path,
+    *,
+    source_path: Path,
+    source_text: str,
+) -> dict[str, Any]:
+    """Load and bind one Ravel-produced minimum-sufficient-proof plan.
+
+    The runner validates the transport shape and exact source binding, then
+    selects compiler-inventory identities. It does not reinterpret the
+    compiler graph or invent a second impact algorithm.
+    """
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read verification plan {path}: {error}") from error
+    if not isinstance(value, dict) or value.get("schema_version") != VERIFICATION_PLAN_SCHEMA:
+        raise ManifestError(f"verification plan must be {VERIFICATION_PLAN_SCHEMA}")
+    plan_id = value.get("plan_id")
+    if not isinstance(plan_id, str) or not plan_id:
+        raise ManifestError("verification plan has no stable plan_id")
+    source = value.get("source")
+    if not isinstance(source, dict):
+        raise ManifestError("verification plan has no source binding")
+    source_sha256 = source.get("sha256")
+    current_sha256 = sha256_file(source_path)
+    if source_sha256 != current_sha256:
+        raise ManifestError(
+            "verification plan is stale: source sha256 does not match the current source"
+        )
+    if source.get("path") is not None and not isinstance(source.get("path"), str):
+        raise ManifestError("verification plan source.path must be a string")
+    impact = value.get("impact")
+    if not isinstance(impact, dict):
+        raise ManifestError("verification plan has no impact projection")
+    for field in ("graph_identity", "complete"):
+        if field not in impact:
+            raise ManifestError(f"verification plan impact is missing {field}")
+    if not isinstance(impact.get("graph_identity"), str) or not impact["graph_identity"]:
+        raise ManifestError("verification plan impact.graph_identity must be non-empty")
+    if not isinstance(impact.get("complete"), bool):
+        raise ManifestError("verification plan impact.complete must be boolean")
+    selection = value.get("selection")
+    if not isinstance(selection, dict):
+        raise ManifestError("verification plan has no selection")
+    level = selection.get("level")
+    if level not in VERIFICATION_LEVELS:
+        raise ManifestError(f"verification plan has unsupported selection level: {level!r}")
+    selected = selection.get("selected_test_identities")
+    if not isinstance(selected, list) or not all(isinstance(item, str) and item for item in selected):
+        raise ManifestError("verification plan selection.selected_test_identities must be string identities")
+    reasons = selection.get("escalation_reasons", value.get("escalation_reasons", []))
+    if not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons):
+        raise ManifestError("verification plan escalation reasons must be strings")
+    unknown_reasons = sorted(set(reasons) - ESCALATION_REASONS)
+    if unknown_reasons:
+        raise ManifestError(
+            "verification plan has unknown escalation reasons: " + ", ".join(unknown_reasons)
+        )
+    risks = impact.get("risk_flags", [])
+    if not isinstance(risks, list) or not all(isinstance(item, str) and item for item in risks):
+        raise ManifestError("verification plan impact.risk_flags must be strings")
+    value["_source_path"] = str(source_path.resolve())
+    value["_source_sha256"] = current_sha256
+    value["_selected_test_identities"] = sorted(set(selected))
+    value["_escalation_reasons"] = sorted(set(reasons))
+    return value
+
+
+def apply_verification_plan(
+    tests: list[dict[str, Any]], plan: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Select exact compiler identities named by a validated plan."""
+
+    requested = set(plan.get("_selected_test_identities", []))
+    by_id = {str(test.get("id")): test for test in tests}
+    missing = sorted(requested - set(by_id))
+    if missing:
+        raise ManifestError(
+            "verification plan names tests absent from the current compiler inventory: "
+            + ", ".join(missing)
+        )
+    selected = [test for test in tests if test.get("id") in requested]
+    available = len(tests)
+    if available and not selected:
+        raise ManifestError("verification plan selected no current test identities")
+    expected_count = plan.get("selection", {}).get("available_test_count")
+    if isinstance(expected_count, int) and expected_count != available:
+        raise ManifestError(
+            "verification plan is stale: compiler inventory test count changed"
+        )
+    return selected
+
+
+def selection_summary(
+    *,
+    tests: list[dict[str, Any]],
+    inventory: dict[str, Any] | None,
+    plan: dict[str, Any] | None,
+    plan_ref: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selection = plan.get("selection", {}) if isinstance(plan, dict) else {}
+    impact = plan.get("impact", {}) if isinstance(plan, dict) else {}
+    selected_ids = [str(test.get("id")) for test in tests if test.get("id")]
+    available_count = len(inventory.get("tests", [])) if isinstance(inventory, dict) else len(tests)
+    summary: dict[str, Any] = {
+        "authority": "ravel-verification-plan" if plan is not None else "manifest-default",
+        "level": selection.get("level", "repository_canonical") if plan is not None else "repository_canonical",
+        "selected_test_identities": selected_ids,
+        "selected_count": len(tests),
+        "available_count": available_count,
+        "affected_surface_count": impact.get("affected_count", len(impact.get("nodes", []))) if isinstance(impact, dict) else len(tests),
+        "risk_flags": sorted(impact.get("risk_flags", [])) if isinstance(impact, dict) else [],
+        "escalation_reasons": sorted(plan.get("_escalation_reasons", [])) if plan is not None else [],
+        "stop_sufficient": bool(plan.get("proof", {}).get("sufficient_to_stop", False)) if plan is not None else False,
+    }
+    if plan is not None:
+        summary["plan_id"] = plan.get("plan_id")
+        summary["graph_identity"] = impact.get("graph_identity")
+        if plan_ref is not None:
+            summary["plan_ref"] = plan_ref
+    return summary
+
+
 def make_result(
     *,
     manifest: dict[str, Any],
@@ -1649,6 +1800,8 @@ def make_result(
     message: str | None,
     failure_details: dict[str, Any] | None,
     allow_unsupported: bool,
+    verification_plan: dict[str, Any] | None = None,
+    verification_plan_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_path = Path(manifest["source_path"])
     if suite_summary is not None:
@@ -1693,6 +1846,7 @@ def make_result(
         "tests": [item["id"] for item in test_results],
         "subject_identity": (test_inventory or {}).get("subject_identity"),
         "subject_fingerprint": (test_inventory or {}).get("subject_fingerprint"),
+        "verification_plan": (verification_plan or {}).get("plan_id"),
         "execution": {
             key: (execution or {}).get(key)
             for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
@@ -1759,6 +1913,12 @@ def make_result(
     native_suite_payload = None
     if suite_summary is not None:
         native_suite_payload = {**suite_summary, "authority": "native_suite"}
+    selected_summary = selection_summary(
+        tests=test_results,
+        inventory=test_inventory,
+        plan=verification_plan,
+        plan_ref=verification_plan_ref,
+    )
     result: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA,
         "protocol_version": 1,
@@ -1778,6 +1938,7 @@ def make_result(
             "discovery": "compiler-inventory" if test_inventory is not None else "manifest",
         },
         "summary": summary,
+        "selection": selected_summary,
         "tests": test_results,
         "suite": suite_result,
         "native_suite_summary": native_suite_payload,
@@ -1871,6 +2032,17 @@ def minimal_result(*, classification: str, message: str, cwd: Path) -> dict[str,
         "run_id": sha256_bytes(message.encode()),
         "scope": {"manifest": None, "cwd": str(cwd)},
         "summary": {"total": 0, "passed": 0, "failed": 0, "skipped": 0, "unsupported": 0, "authority": "adapter"},
+        "selection": {
+            "authority": "adapter",
+            "level": "unknown",
+            "selected_test_identities": [],
+            "selected_count": 0,
+            "available_count": 0,
+            "affected_surface_count": 0,
+            "risk_flags": [],
+            "escalation_reasons": [],
+            "stop_sufficient": False,
+        },
         "tests": [],
         "suite": None,
         "native_suite_summary": None,
@@ -1894,6 +2066,21 @@ def check_result(result: dict[str, Any], result_digest: str) -> dict[str, Any]:
     unresolved = []
     if result["verdict"] == "UNKNOWN":
         unresolved.append(result.get("failure", {}).get("message", "unsupported capability"))
+    summary = result.get("summary", {})
+    failure_identity = next(
+        (
+            item.get("id")
+            for item in result.get("tests", [])
+            if isinstance(item, dict) and item.get("verdict") == "FAIL"
+        ),
+        None,
+    )
+    compact_summary = (
+        f"{result['classification']}: {summary.get('passed', 0)} passed, "
+        f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped"
+    )
+    if failure_identity:
+        compact_summary += f"; failing_identity={failure_identity}"
     return {
         "schema_version": CHECK_SCHEMA,
         "id": result["id"],
@@ -1901,13 +2088,19 @@ def check_result(result: dict[str, Any], result_digest: str) -> dict[str, Any]:
         "verdict": result["verdict"],
         "scope": result.get("scope", {}).get("manifest", "mncs-test"),
         "claim": "MNCS-native tests were executed under the compiler-owned inventory or declared compatibility fixture",
-        "summary": f"{result['classification']}: {result.get('summary', {}).get('passed', 0)} passed, {result.get('summary', {}).get('failed', 0)} failed, {result.get('summary', {}).get('skipped', 0)} skipped",
+        "summary": compact_summary,
         "contract_revision": RESULT_SCHEMA,
         "producer_revision": f"sha256:{result.get('provenance', {}).get('runner', {}).get('source_sha256', '')}",
         "digest": f"sha256:{result_digest}",
         "unresolved": unresolved,
         "references": [{"kind": "mncs-test-result", "uri": f"urn:mncs-test:{result.get('run_id', '')}", "digest": f"sha256:{result_digest}"}],
-        "test_result": result,
+        "selection": result.get("selection"),
+        "result_ref": {
+            "kind": "mncs-test-result",
+            "uri": f"urn:mncs-test:{result.get('run_id', '')}",
+            "digest": f"sha256:{result_digest}",
+            "detail": "retrieve the retained result artifact when per-test detail is required",
+        },
         "classification": result["classification"],
         "failure_class": result["failure_class"],
     }
@@ -1972,6 +2165,24 @@ def run_manifest(args: argparse.Namespace) -> int:
         manifest = load_manifest(manifest_path)
         source_text = read_source(Path(manifest["source_path"]))
         mncs = resolve_mncs(args.mncs, cwd)
+        verification_plan: dict[str, Any] | None = None
+        verification_plan_ref: dict[str, Any] | None = None
+        if args.verification_plan:
+            verification_plan_path = resolve_path(args.verification_plan, cwd, must_exist=True)
+            verification_plan = load_verification_plan(
+                verification_plan_path,
+                source_path=Path(manifest["source_path"]),
+                source_text=source_text,
+            )
+            verification_plan_ref = {
+                "kind": "mncs-verification-plan",
+                "path": relative_path(verification_plan_path, cwd),
+                "sha256": sha256_file(verification_plan_path),
+                "plan_id": verification_plan["plan_id"],
+                "schema_revision": VERIFICATION_PLAN_SCHEMA,
+            }
+            if args.filter:
+                raise ManifestError("--filter cannot be combined with --verification-plan; the plan owns exact selection")
         library_paths = list(manifest["library_paths"])
         for raw_path in args.library or []:
             for component in raw_path.split(os.pathsep):
@@ -2008,7 +2219,12 @@ def run_manifest(args: argparse.Namespace) -> int:
             )
             if test_inventory is not None:
                 configured_tests = normalize_inventory_tests(test_inventory, manifest)
-                configured_tests = select_tests(configured_tests, args.filter or [])
+                if verification_plan is not None:
+                    if verification_plan.get("source", {}).get("subject_identity") not in (None, test_inventory.get("subject_identity")):
+                        raise ManifestError("verification plan subject identity does not match the current compiler inventory")
+                    configured_tests = apply_verification_plan(configured_tests, verification_plan)
+                else:
+                    configured_tests = select_tests(configured_tests, args.filter or [])
                 execution = {
                     "mode": "compiler-inventory-awaiting-execution",
                     "inventory_artifact": inventory_transport["process"]["stdout_artifact"],
@@ -2041,7 +2257,10 @@ def run_manifest(args: argparse.Namespace) -> int:
                         "details": {"inventory_document": document},
                     }
         else:
-            configured_tests = select_tests(configured_tests, args.filter or [])
+            if verification_plan is not None:
+                configured_tests = apply_verification_plan(configured_tests, verification_plan)
+            else:
+                configured_tests = select_tests(configured_tests, args.filter or [])
 
         manifest_for_run = dict(manifest)
         manifest_for_run["tests"] = configured_tests
@@ -2249,6 +2468,8 @@ def run_manifest(args: argparse.Namespace) -> int:
             message=message,
             failure_details=failure_details,
             allow_unsupported=args.allow_unsupported,
+            verification_plan=verification_plan,
+            verification_plan_ref=verification_plan_ref,
         )
     except ManifestError as error:
         result = minimal_result(classification="invalid_invocation", message=str(error), cwd=cwd)
@@ -2397,6 +2618,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--library", action="append", default=[], help="additional MNCS library root; may be repeated")
     run.add_argument("--embed-library", help="explicit mncs-embed shared library; otherwise discover beside mncs")
     run.add_argument("--filter", action="append", default=[], help="select tests containing this identity/name fragment; may be repeated")
+    run.add_argument(
+        "--verification-plan",
+        "--plan",
+        help="digest-bound mncs.verification-plan/1 selecting exact compiler test identities",
+    )
     run.add_argument("--result", default=".mncs/mncs-test-result.json")
     run.add_argument("--check-result", default=".mncs/mncs-test-check.json")
     run.add_argument("--artifacts", default=".mncs/mncs-test-artifacts")
