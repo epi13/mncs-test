@@ -204,6 +204,82 @@ class RunnerTests(unittest.TestCase):
             )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_verification_plan_selects_exact_identity_and_keeps_check_compact(self):
+        source = REPO / "tests" / "self_suite.mncs"
+        environment = dict(os.environ)
+        environment["MNCS_LIBRARY_PATH"] = str(REPO / "native") + os.pathsep + str(LANGUAGE / "library")
+        inventory_process = subprocess.run(
+            [str(MNCS), "test-inventory", str(source)],
+            cwd=REPO,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(inventory_process.returncode, 0, inventory_process.stderr)
+        inventory_document = json.loads(inventory_process.stdout)
+        inventory = inventory_document["inventory"]
+        selected = inventory["tests"][0]
+        plan = {
+            "schema_version": "mncs.verification-plan/1",
+            "plan_id": "plan-compact-test",
+            "source": {
+                "path": str(source),
+                "sha256": mncs_test.sha256_file(source),
+                "subject_identity": inventory["subject_identity"],
+                "subject_fingerprint": inventory["subject_fingerprint"],
+            },
+            "impact": {
+                "graph_identity": "a" * 64,
+                "roots": [selected["function_identity"]],
+                "affected_count": 1,
+                "direct_dependents": [],
+                "test_identities": [selected["test_case_identity"]],
+                "risk_flags": [],
+                "complete": True,
+                "limitations": ["test fixture impact evidence"],
+            },
+            "selection": {
+                "level": "changed_item",
+                "selected_test_identities": [selected["test_case_identity"]],
+                "available_test_count": len(inventory["tests"]),
+                "escalation_reasons": [],
+            },
+            "proof": {
+                "sufficient_to_stop": True,
+                "required_evidence": ["selected_tests_pass"],
+            },
+            "provenance": {"provider": "ravel", "impact_schema": "mncs.semantic-impact/1"},
+        }
+        with tempfile.TemporaryDirectory(prefix="mncs-test-plan-") as directory:
+            plan_path = Path(directory) / "plan.json"
+            result_path = Path(directory) / "result.json"
+            check_path = Path(directory) / "check.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            completed = self.invoke(
+                "run",
+                "--manifest",
+                "mncs-test.toml",
+                *self.live_args(),
+                "--verification-plan",
+                str(plan_path),
+                "--result",
+                str(result_path),
+                "--check-result",
+                str(check_path),
+                "--artifacts",
+                str(Path(directory) / "artifacts"),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            check = json.loads(check_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["selection"]["level"], "changed_item")
+            self.assertEqual(result["selection"]["selected_count"], 1)
+            self.assertEqual(result["summary"]["total"], 1)
+            self.assertNotIn("test_result", check)
+            self.assertEqual(check["selection"]["plan_id"], "plan-compact-test")
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_failing_assertion_is_not_hidden(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-fail-") as directory:
             result = Path(directory) / "result.json"

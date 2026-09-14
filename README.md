@@ -10,6 +10,12 @@ inventory, while the native `mncs.test.*` modules continue to own assertion,
 suite, property, and snapshot semantics. The launcher only supplies compiler
 and platform transport and preserves evidence needed to reproduce a run.
 
+When compiler impact evidence is available, the normal selective entrypoint is
+`--verification-plan`. The `mncs.verification-plan/1` document is bound to the
+current source bytes and compiler inventory and names exact test-case
+identities. A stale or incomplete plan fails closed; it never silently falls
+back to the full suite.
+
 ## Quick start
 
 Build or obtain the current `mncs` executable, then run the checked-in
@@ -71,6 +77,7 @@ mncs-test discover [--root DIR] [--recursive] [--inventory] [--mncs BIN]
 mncs-test validate-manifest [--manifest FILE]
 mncs-test run [--manifest FILE] [--mncs BIN] [--library DIR ...]
                  [--embed-library FILE] [--filter TEXT ...]
+                 [--verification-plan FILE]
                  [--result FILE] [--check-result FILE] [--artifacts DIR]
                  [--format json|text]
 mncs-test replay --result FILE [--format json|text]
@@ -116,6 +123,13 @@ needed. A runtime trap expected by a `runtime-failure` entry is a passing
 expected-failure test; an unexpected trap is a runtime failure. A compile-fail
 entry passes only when the compiler rejects the source and its structured
 diagnostic codes match the manifest.
+
+The result's `selection` object is the compact reasoning interface. It records
+the selected level, exact selected/available counts, affected-surface count,
+structural risks, escalation reasons, plan identity, and graph identity. The
+action-facing check preserves a digest-bound result reference and this summary;
+detailed per-test output remains in the retained result artifact instead of
+being nested into every check or receipt.
 
 For the first-class path, each returned `TestResult` is the native oracle
 evaluation for one compiler-inventoried test. The adapter carries those typed
