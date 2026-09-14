@@ -25,6 +25,8 @@ import tomllib
 from pathlib import Path
 from typing import Any, Iterable
 
+from family_contract import validate_inventory, validate_plan
+
 
 RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
@@ -67,31 +69,6 @@ TEST_KINDS = {
 }
 DIAGNOSTIC_CODE = re.compile(r"^[A-Z][A-Z0-9_-]*")
 
-VERIFICATION_LEVELS = (
-    "changed_item",
-    "direct_dependents",
-    "affected_subsystem",
-    "repository_canonical",
-    "family",
-)
-ESCALATION_REASONS = {
-    "direct_dependents_affected",
-    "public_contract_changed",
-    "shared_type_changed",
-    "parser_semantics_changed",
-    "serialization_format_changed",
-    "effect_semantics_changed",
-    "abi_boundary_changed",
-    "canonical_fixture_changed",
-    "high_connectivity_definition_changed",
-    "dependent_targeted_test_failed",
-    "insufficient_diagnostic_evidence",
-    "migration_broad_semantic_surface",
-    "language_profile_changed",
-    "cross_repository_contract_changed",
-    "impact_evidence_truncated",
-    "unknown_changed_identity",
-}
 
 
 class ManifestError(ValueError):
@@ -1675,88 +1652,13 @@ def load_verification_plan(
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ManifestError(f"cannot read verification plan {path}: {error}") from error
-    if not isinstance(value, dict) or value.get("schema_version") != VERIFICATION_PLAN_SCHEMA:
-        raise ManifestError(f"verification plan must be {VERIFICATION_PLAN_SCHEMA}")
-    plan_id = value.get("plan_id")
-    if not isinstance(plan_id, str) or not plan_id:
-        raise ManifestError("verification plan has no stable plan_id")
-    source = value.get("source")
-    if not isinstance(source, dict):
-        raise ManifestError("verification plan has no source binding")
-    source_sha256 = source.get("sha256")
-    current_sha256 = sha256_file(source_path)
-    if source_sha256 != current_sha256:
-        raise ManifestError(
-            "verification plan is stale: source sha256 does not match the current source"
-        )
-    source_value = source.get("path")
-    if not isinstance(source_value, str) or not source_value:
-        raise ManifestError("verification plan source.path must be a non-empty string")
-    declared_source_path = Path(source_value)
-    if not declared_source_path.is_absolute():
-        declared_source_path = path.parent / declared_source_path
     try:
-        if declared_source_path.resolve() != source_path.resolve():
-            raise ManifestError(
-                "verification plan source.path does not match the current source"
-            )
-    except OSError as error:
-        raise ManifestError("verification plan source.path could not be resolved") from error
-    impact = value.get("impact")
-    if not isinstance(impact, dict):
-        raise ManifestError("verification plan has no impact projection")
-    for field in ("graph_identity", "complete"):
-        if field not in impact:
-            raise ManifestError(f"verification plan impact is missing {field}")
-    if not isinstance(impact.get("graph_identity"), str) or not impact["graph_identity"]:
-        raise ManifestError("verification plan impact.graph_identity must be non-empty")
-    if not isinstance(impact.get("complete"), bool):
-        raise ManifestError("verification plan impact.complete must be boolean")
-    for field in ("roots", "direct_dependents", "test_identities", "risk_flags", "limitations"):
-        values = impact.get(field)
-        if not isinstance(values, list) or not all(
-            isinstance(item, str) and (item or field == "limitations") for item in values
-        ):
-            raise ManifestError(f"verification plan impact.{field} must be string identities")
-    affected_count = impact.get("affected_count")
-    if not isinstance(affected_count, int) or isinstance(affected_count, bool) or affected_count < 0:
-        raise ManifestError("verification plan impact.affected_count must be a non-negative integer")
-    selection = value.get("selection")
-    if not isinstance(selection, dict):
-        raise ManifestError("verification plan has no selection")
-    level = selection.get("level")
-    if level not in VERIFICATION_LEVELS:
-        raise ManifestError(f"verification plan has unsupported selection level: {level!r}")
-    selected = selection.get("selected_test_identities")
-    if not isinstance(selected, list) or not all(isinstance(item, str) and item for item in selected):
-        raise ManifestError("verification plan selection.selected_test_identities must be string identities")
-    reasons = selection.get("escalation_reasons", value.get("escalation_reasons", []))
-    if not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons):
-        raise ManifestError("verification plan escalation reasons must be strings")
-    unknown_reasons = sorted(set(reasons) - ESCALATION_REASONS)
-    if unknown_reasons:
-        raise ManifestError(
-            "verification plan has unknown escalation reasons: " + ", ".join(unknown_reasons)
-        )
-    risks = impact.get("risk_flags", [])
-    if not isinstance(risks, list) or not all(isinstance(item, str) and item for item in risks):
-        raise ManifestError("verification plan impact.risk_flags must be strings")
-    available_count = selection.get("available_test_count")
-    if not isinstance(available_count, int) or isinstance(available_count, bool) or available_count < 0:
-        raise ManifestError("verification plan selection.available_test_count must be a non-negative integer")
-    if len(set(selected)) > available_count:
-        raise ManifestError(
-            "verification plan selects more test identities than its available inventory"
-        )
-    proof = value.get("proof")
-    if not isinstance(proof, dict) or not isinstance(proof.get("sufficient_to_stop"), bool):
-        raise ManifestError("verification plan proof.sufficient_to_stop must be boolean")
-    required_evidence = proof.get("required_evidence", [])
-    if not isinstance(required_evidence, list) or not all(isinstance(item, str) and item for item in required_evidence):
-        raise ManifestError("verification plan proof.required_evidence must be string identities")
-    provenance = value.get("provenance")
-    if not isinstance(provenance, dict):
-        raise ManifestError("verification plan provenance must be an object")
+        value = validate_plan(value, source_path=source_path, plan_path=path)
+    except (RuntimeError, ValueError) as error:
+        raise ManifestError(str(error)) from error
+    current_sha256 = sha256_file(source_path)
+    selected = value["selection"]["selected_test_identities"]
+    reasons = value["selection"]["escalation_reasons"]
     value["_source_path"] = str(source_path.resolve())
     value["_source_sha256"] = current_sha256
     value["_selected_test_identities"] = sorted(set(selected))
@@ -1769,6 +1671,10 @@ def apply_verification_plan(
 ) -> list[dict[str, Any]]:
     """Select exact compiler identities named by a validated plan."""
 
+    try:
+        validate_inventory(plan, [str(test.get("id")) for test in tests if test.get("id")])
+    except (RuntimeError, ValueError) as error:
+        raise ManifestError(str(error)) from error
     requested = set(plan.get("_selected_test_identities", []))
     by_id = {str(test.get("id")): test for test in tests}
     missing = sorted(requested - set(by_id))

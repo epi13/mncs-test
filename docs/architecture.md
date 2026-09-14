@@ -94,6 +94,14 @@ identity-based rather than substring-based. A stale or incomplete plan is an
 explicit UNKNOWN/invalid invocation condition, never a reason to broaden to a
 full suite without a new plan.
 
+The transport authority is MNCS-Commons, not this runner: the family validator
+owns schema revision, identity, vocabularies, proof boundaries, and
+cross-repository bindings. mncs-test contributes only role-specific inventory
+membership and executable-test checks. The shared mutation corpus is exercised
+by family contract tests so malformed identities, stale source bindings,
+unknown levels/reasons, incomplete impact, and inventory mismatches have one
+disposition across consumers.
+
 ## Failure taxonomy
 
 `PASS`, `FAIL`, and `UNKNOWN` are intentionally not collapsed. `FAIL` covers

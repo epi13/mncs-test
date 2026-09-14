@@ -13,8 +13,11 @@ and platform transport and preserves evidence needed to reproduce a run.
 When compiler impact evidence is available, the normal selective entrypoint is
 `--verification-plan`. The `mncs.verification-plan/1` document is bound to the
 current source bytes and compiler inventory and names exact test-case
-identities. A stale or incomplete plan fails closed; it never silently falls
-back to the full suite.
+identities. Its transport schema, identity algorithm, vocabulary, and
+validator are owned by the sibling `MNCS-Commons/src/mncs_commons/verification_plan.py`;
+the former local schema copy is removed. mncs-test adds only its inventory
+join and executable-test checks. A stale or incomplete plan fails closed; it
+never silently falls back to the full suite.
 
 ## Quick start
 
