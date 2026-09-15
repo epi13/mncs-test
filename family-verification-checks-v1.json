@@ -1,0 +1,18 @@
+{
+  "schema_version": "commons.mncs.family-verification-checks/v1",
+  "repository_id": "mncs-test",
+  "checks": [
+    {
+      "identity": "mncs-test:test-inventory-join",
+      "contract_identity": "mncs.compiler.test-inventory/1",
+      "runner": "declaration",
+      "surface": "compiler-inventory-to-runner"
+    },
+    {
+      "identity": "mncs-test:verification-plan-contract",
+      "contract_identity": "mncs.verification-plan/1",
+      "runner": "declaration",
+      "surface": "selected-consumer-contract"
+    }
+  ]
+}
