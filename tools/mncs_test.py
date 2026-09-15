@@ -1895,6 +1895,7 @@ def make_result(
         "test_inventory": (
             {
                 "schema_version": test_inventory.get("schema_version"),
+                "inventory_identity": sha256_bytes(compact_json(test_inventory).encode()),
                 "source_artifact_identity": test_inventory.get("source_artifact_identity"),
                 "source_profile": test_inventory.get("source_profile"),
                 "subject_identity": test_inventory.get("subject_identity"),
@@ -2055,6 +2056,199 @@ def check_result(result: dict[str, Any], result_digest: str) -> dict[str, Any]:
     }
 
 
+FAMILY_CHECK_REQUEST_SCHEMA = "mncs.family-check-request/1"
+FAMILY_CHECK_RESPONSE_SCHEMA = "mncs.family-check-response/1"
+
+
+def load_family_check(
+    path: Path,
+    *,
+    check_identity: str,
+    contract_identity: str,
+    repository_id: str,
+) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read family verification checks: {error}") from error
+    if not isinstance(document, dict) or document.get("schema_version") != "commons.mncs.family-verification-checks/v1":
+        raise ManifestError("family verification checks have an unsupported schema")
+    if document.get("repository_id") != repository_id:
+        raise ManifestError("family verification checks repository_id does not match the runner")
+    checks = document.get("checks")
+    if not isinstance(checks, list):
+        raise ManifestError("family verification checks must be an array")
+    matches = [item for item in checks if isinstance(item, dict) and item.get("identity") == check_identity]
+    if len(matches) != 1:
+        raise ManifestError(f"family check identity is not unique in the repository manifest: {check_identity}")
+    check = dict(matches[0])
+    if check.get("contract_identity") != contract_identity:
+        raise ManifestError("family check contract identity does not match the request")
+    if check.get("runner") != "mncs-test":
+        raise ManifestError(f"family check {check_identity} is not owned by the mncs-test runner")
+    selector = check.get("selector")
+    if not isinstance(selector, dict):
+        raise ManifestError("mncs-test family checks require a selector")
+    manifest = selector.get("manifest")
+    identities = selector.get("test_identities")
+    if (
+        not isinstance(manifest, str)
+        or not manifest
+        or Path(manifest).is_absolute()
+        or ".." in Path(manifest).parts
+        or not isinstance(identities, list)
+        or not identities
+        or len(identities) > 256
+        or not all(isinstance(item, str) and item for item in identities)
+        or len(set(identities)) != len(identities)
+    ):
+        raise ManifestError("mncs-test family check selector is invalid")
+    check["selector"] = {
+        "manifest": manifest,
+        "test_identities": sorted(identities),
+        **(
+            {"inventory_identity": selector["inventory_identity"]}
+            if isinstance(selector.get("inventory_identity"), str)
+            else {}
+        ),
+    }
+    return check
+
+
+def load_family_check_request(path: Path) -> dict[str, Any]:
+    try:
+        request = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read family check request: {error}") from error
+    if not isinstance(request, dict) or request.get("schema_version") != FAMILY_CHECK_REQUEST_SCHEMA:
+        raise ManifestError(f"family check request must be {FAMILY_CHECK_REQUEST_SCHEMA}")
+    for field in (
+        "check_identity",
+        "contract_identity",
+        "contract_revision",
+        "verification_plan_id",
+        "family_graph_identity",
+        "edge_fingerprint",
+    ):
+        value = request.get(field)
+        if not isinstance(value, str) or not value:
+            raise ManifestError(f"family check request {field} must be non-empty")
+    for field in ("family_graph_identity", "edge_fingerprint"):
+        value = request[field]
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ManifestError(f"family check request {field} must be a lowercase digest")
+    return request
+
+
+def run_family_check(args: argparse.Namespace) -> int:
+    cwd = Path.cwd().resolve()
+    try:
+        request = load_family_check_request(resolve_path(args.request, cwd, must_exist=True))
+        check = load_family_check(
+            resolve_path(args.checks, cwd, must_exist=True),
+            check_identity=request["check_identity"],
+            contract_identity=request["contract_identity"],
+            repository_id=args.repository_id,
+        )
+        selector = check["selector"]
+        manifest_path = resolve_path(selector["manifest"], cwd, must_exist=True)
+        with tempfile.TemporaryDirectory(prefix="mncs-family-check-") as directory:
+            root = Path(directory)
+            result_path = root / "test-result.json"
+            check_path = root / "check-result.json"
+            artifacts = root / "artifacts"
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "run",
+                "--manifest",
+                str(manifest_path),
+                "--mncs",
+                args.mncs,
+                "--result",
+                str(result_path),
+                "--check-result",
+                str(check_path),
+                "--artifacts",
+                str(artifacts),
+                "--format",
+                "json",
+            ]
+            for identity in selector["test_identities"]:
+                command.extend(["--test-identity", identity])
+            for library in args.library:
+                command.extend(["--library", library])
+            if args.embed_library:
+                command.extend(["--embed-library", args.embed_library])
+            completed = subprocess.run(
+                command,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=args.timeout_seconds,
+            )
+            if not result_path.is_file() or not check_path.is_file():
+                raise AdapterError(
+                    "mncs-test family check did not produce the required TestResult/CheckResult artifacts: "
+                    + (completed.stderr.strip() or completed.stdout.strip())
+                )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            produced_check = json.loads(check_path.read_text(encoding="utf-8"))
+        if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
+            raise AdapterError("family check produced an invalid mncs.test-result/1 document")
+        if not isinstance(produced_check, dict) or produced_check.get("schema_version") != CHECK_SCHEMA:
+            raise AdapterError("family check produced an invalid mncs.check-result/1 document")
+        selected = result.get("selection", {}).get("selected_test_identities", [])
+        if sorted(selected) != selector["test_identities"]:
+            raise AdapterError("family check did not execute exactly the declared test identities")
+        inventory = result.get("test_inventory")
+        inventory_identity = inventory.get("inventory_identity") if isinstance(inventory, dict) else None
+        expected_inventory = selector.get("inventory_identity")
+        if expected_inventory is not None and inventory_identity != expected_inventory:
+            raise AdapterError("family check compiler inventory identity is stale")
+        response = {
+            "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
+            "check_identity": request["check_identity"],
+            "contract_identity": request["contract_identity"],
+            "contract_revision": request["contract_revision"],
+            "runner": "mncs-test",
+            "verdict": result.get("verdict", "UNKNOWN"),
+            "test_result": result,
+            "check_result": produced_check,
+            "execution": {
+                "run_identity": result.get("experiment", {}).get("run_identity"),
+                "test_case_identities": selected,
+                "inventory_identity": inventory_identity,
+                "runner_version": RUNNER_VERSION,
+            },
+            "family_binding": {
+                key: request[key]
+                for key in (
+                    "verification_plan_id",
+                    "family_graph_identity",
+                    "edge_fingerprint",
+                )
+            },
+        }
+        print(json.dumps(response, indent=2, sort_keys=True, ensure_ascii=False))
+        return int(result.get("exit_code", completed.returncode))
+    except (ManifestError, AdapterError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
+        print(
+            json.dumps(
+                {
+                    "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
+                    "runner": "mncs-test",
+                    "verdict": "UNKNOWN",
+                    "failure": {"class": "infrastructure_failure", "message": str(error)},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return EXIT_INFRASTRUCTURE_FAILURE
+
+
 def write_output(path: Path | None, value: Any) -> str | None:
     if path is None:
         return None
@@ -2106,6 +2300,24 @@ def select_tests(tests: list[dict[str, Any]], filters: list[str]) -> list[dict[s
     return selected
 
 
+def select_exact_test_identities(
+    tests: list[dict[str, Any]], requested: list[str]
+) -> list[dict[str, Any]]:
+    """Select only compiler identities named by a family check."""
+
+    expected = sorted(set(requested))
+    if not expected or len(expected) != len(requested):
+        raise ManifestError("family check test identities must be a non-empty unique list")
+    by_id = {str(test.get("id")): test for test in tests if test.get("id")}
+    missing = sorted(set(expected) - set(by_id))
+    if missing:
+        raise ManifestError(
+            "family check names tests absent from the current compiler inventory: "
+            + ", ".join(missing)
+        )
+    return [by_id[test_id] for test_id in expected]
+
+
 def run_manifest(args: argparse.Namespace) -> int:
     cwd = Path.cwd().resolve()
     result_path, check_path, artifact_root = result_paths(args, cwd)
@@ -2132,6 +2344,8 @@ def run_manifest(args: argparse.Namespace) -> int:
             }
             if args.filter:
                 raise ManifestError("--filter cannot be combined with --verification-plan; the plan owns exact selection")
+            if args.test_identity:
+                raise ManifestError("--test-identity cannot be combined with --verification-plan; the plan owns exact selection")
         library_paths = list(manifest["library_paths"])
         for raw_path in args.library or []:
             for component in raw_path.split(os.pathsep):
@@ -2172,6 +2386,8 @@ def run_manifest(args: argparse.Namespace) -> int:
                     if verification_plan.get("source", {}).get("subject_identity") not in (None, test_inventory.get("subject_identity")):
                         raise ManifestError("verification plan subject identity does not match the current compiler inventory")
                     configured_tests = apply_verification_plan(configured_tests, verification_plan)
+                elif args.test_identity:
+                    configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
                 else:
                     configured_tests = select_tests(configured_tests, args.filter or [])
                 execution = {
@@ -2208,6 +2424,8 @@ def run_manifest(args: argparse.Namespace) -> int:
         else:
             if verification_plan is not None:
                 configured_tests = apply_verification_plan(configured_tests, verification_plan)
+            elif args.test_identity:
+                configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
             else:
                 configured_tests = select_tests(configured_tests, args.filter or [])
 
@@ -2567,6 +2785,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--library", action="append", default=[], help="additional MNCS library root; may be repeated")
     run.add_argument("--embed-library", help="explicit mncs-embed shared library; otherwise discover beside mncs")
     run.add_argument("--filter", action="append", default=[], help="select tests containing this identity/name fragment; may be repeated")
+    run.add_argument("--test-identity", action="append", default=[], help="select exact compiler test identity; may be repeated")
     run.add_argument(
         "--verification-plan",
         "--plan",
@@ -2580,6 +2799,19 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-seconds", type=int)
     run.add_argument("--allow-unsupported", action="store_true")
     run.set_defaults(handler=run_manifest)
+
+    family_check = commands.add_parser(
+        "run-check",
+        help="resolve and execute one repository-owned behavioral family check",
+    )
+    family_check.add_argument("--request", required=True, help="mncs.family-check-request/1 document")
+    family_check.add_argument("--checks", default="family-verification-checks-v1.json")
+    family_check.add_argument("--repository-id", required=True)
+    family_check.add_argument("--mncs", default="mncs")
+    family_check.add_argument("--library", action="append", default=[])
+    family_check.add_argument("--embed-library")
+    family_check.add_argument("--timeout-seconds", type=int, default=120)
+    family_check.set_defaults(handler=run_family_check)
 
     discover = commands.add_parser("discover", help="inspect manifests and optionally compiler-owned test inventories")
     discover.add_argument("--root", default=".")

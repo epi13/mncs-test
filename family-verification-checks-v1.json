@@ -11,8 +11,16 @@
     {
       "identity": "mncs-test:verification-plan-contract",
       "contract_identity": "mncs.verification-plan/1",
-      "runner": "declaration",
-      "surface": "selected-consumer-contract"
+      "runner": "mncs-test",
+      "surface": "selected-consumer-behavior",
+      "selector": {
+        "manifest": "mncs-test.toml",
+        "inventory_identity": "9c97462da26b12f46c76247409caa33d40f87c82649842cf7244d848dc2f7060",
+        "test_identities": [
+          "mncs:0.2:test-case:tests.self_suite::arithmetic::048110093302a319d4962bf0ab6cf893312cfcc10981d4326ca6fafff87fd2a0",
+          "mncs:0.2:test-case:tests.self_suite::boolean::36fb811221b71e39a0daec26be573986edb5703221a8f8ba179f98e9a65a4b56"
+        ]
+      }
     }
   ]
 }

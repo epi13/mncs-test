@@ -31,7 +31,7 @@
       "verification": {
         "check_identity": "mncs-test:verification-plan-contract",
         "executor": "mncs-test",
-        "surface": "selected-consumer-contract",
+        "surface": "selected-consumer-behavior",
         "evidence": "family-verification-checks-v1.json"
       }
     }
