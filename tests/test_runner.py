@@ -189,6 +189,8 @@ class RunnerTests(unittest.TestCase):
                 "family-verification-checks-v1.json",
                 "--repository-id",
                 "mncs-test",
+                "--library",
+                str(REPO / "native"),
                 *self.live_args(),
             )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -202,7 +204,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],
-            "9c97462da26b12f46c76247409caa33d40f87c82649842cf7244d848dc2f7060",
+            "fbefc565bb03b559a075b65dce0c44780d6115ab2a566a014657433b6e5e65f3",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
