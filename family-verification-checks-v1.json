@@ -15,7 +15,7 @@
       "surface": "selected-consumer-behavior",
       "selector": {
         "manifest": "mncs-test.toml",
-        "inventory_identity": "5d69ac8678f4c84c67b48830c2e61906b5374b3fb9c1d0b773f89724ec511fe8",
+        "inventory_identity": "fbefc565bb03b559a075b65dce0c44780d6115ab2a566a014657433b6e5e65f3",
         "test_identities": [
           "mncs:0.2:test-case:tests.self_suite::arithmetic::048110093302a319d4962bf0ab6cf893312cfcc10981d4326ca6fafff87fd2a0",
           "mncs:0.2:test-case:tests.self_suite::boolean::36fb811221b71e39a0daec26be573986edb5703221a8f8ba179f98e9a65a4b56"
