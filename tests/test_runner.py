@@ -226,6 +226,44 @@ class RunnerTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_family_inventory_join_runs_its_exact_behavioral_test(self):
+        request = {
+            "schema_version": "mncs.family-check-request/1",
+            "check_identity": "mncs-test:test-inventory-join",
+            "contract_identity": "mncs.compiler.test-inventory/1",
+            "contract_revision": "0.17",
+            "verification_plan_id": "a" * 64,
+            "family_graph_identity": "b" * 64,
+            "edge_fingerprint": "c" * 64,
+            "source_change_sha256": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory(prefix="mncs-test-family-inventory-") as directory:
+            request_path = Path(directory) / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            completed = self.invoke(
+                "run-check",
+                "--request",
+                str(request_path),
+                "--checks",
+                "family-verification-checks-v1.json",
+                "--repository-id",
+                "mncs-test",
+                "--library",
+                str(REPO / "native"),
+                *self.live_args(),
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["verdict"], "PASS")
+        self.assertEqual(
+            response["execution"]["test_case_identities"],
+            [
+                "mncs:0.2:test-case:tests.self_suite::task_lifecycle::"
+                "699193aeddc0a792f85936fd4d4b34c62615ecc3eeb519c51fa3a6a7b34ea2db"
+            ],
+        )
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_filter_selects_inventory_without_mutating_authority(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-filter-") as directory:
             result = Path(directory) / "result.json"
