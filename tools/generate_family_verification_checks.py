@@ -116,23 +116,29 @@ def regenerate(
         for check in generated["checks"]
         if isinstance(check, dict) and check.get("runner") == "mncs-test"
     ]
-    if len(behavioral) != 1:
-        raise ValueError("expected exactly one mncs-test behavioral family check")
-    selector = behavioral[0].get("selector")
-    if not isinstance(selector, dict):
-        raise ValueError("mncs-test behavioral family check has no selector")
-    selected = selector.get("test_identities")
-    if not isinstance(selected, list) or not selected or not all(
-        isinstance(identity, str) and identity for identity in selected
-    ):
-        raise ValueError("mncs-test behavioral selector must name test identities")
-    missing = sorted(set(selected) - available)
-    if missing:
-        raise ValueError(
-            "mncs-test behavioral selector names tests absent from the compiler inventory: "
-            + ", ".join(missing)
-        )
-    selector["inventory_identity"] = hashlib.sha256(canonical_bytes(inventory)).hexdigest()
+    if not behavioral:
+        raise ValueError("expected at least one mncs-test behavioral family check")
+    inventory_identity = hashlib.sha256(canonical_bytes(inventory)).hexdigest()
+    for check in behavioral:
+        selector = check.get("selector")
+        if not isinstance(selector, dict):
+            raise ValueError(
+                f"mncs-test behavioral family check {check.get('identity')} has no selector"
+            )
+        selected = selector.get("test_identities")
+        if not isinstance(selected, list) or not selected or not all(
+            isinstance(identity, str) and identity for identity in selected
+        ):
+            raise ValueError(
+                f"mncs-test behavioral selector {check.get('identity')} must name test identities"
+            )
+        missing = sorted(set(selected) - available)
+        if missing:
+            raise ValueError(
+                f"mncs-test behavioral selector {check.get('identity')} names tests absent from the compiler inventory: "
+                + ", ".join(missing)
+            )
+        selector["inventory_identity"] = inventory_identity
     return generated
 
 

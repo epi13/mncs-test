@@ -5,8 +5,15 @@
     {
       "identity": "mncs-test:test-inventory-join",
       "contract_identity": "mncs.compiler.test-inventory/1",
-      "runner": "declaration",
-      "surface": "compiler-inventory-to-runner"
+      "runner": "mncs-test",
+      "surface": "compiler-inventory-to-runner",
+      "selector": {
+        "manifest": "mncs-test.toml",
+        "inventory_identity": "fbefc565bb03b559a075b65dce0c44780d6115ab2a566a014657433b6e5e65f3",
+        "test_identities": [
+          "mncs:0.2:test-case:tests.self_suite::task_lifecycle::699193aeddc0a792f85936fd4d4b34c62615ecc3eeb519c51fa3a6a7b34ea2db"
+        ]
+      }
     },
     {
       "identity": "mncs-test:verification-plan-contract",
