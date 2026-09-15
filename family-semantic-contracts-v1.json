@@ -15,13 +15,25 @@
       "contract_identity": "mncs.compiler.test-inventory/1",
       "contract_revision": "0.17",
       "consumer_identity": "mncs-test:test-inventory",
-      "evidence": "tools/mncs_test.py"
+      "evidence": "tools/mncs_test.py",
+      "verification": {
+        "check_identity": "mncs-test:test-inventory-join",
+        "executor": "mncs-test",
+        "surface": "compiler-inventory-to-runner",
+        "evidence": "family-verification-checks-v1.json"
+      }
     },
     {
       "contract_identity": "mncs.verification-plan/1",
       "contract_revision": "1",
       "consumer_identity": "mncs-test:verification-plan",
-      "evidence": "tools/family_contract.py"
+      "evidence": "tools/family_contract.py",
+      "verification": {
+        "check_identity": "mncs-test:verification-plan-contract",
+        "executor": "mncs-test",
+        "surface": "selected-consumer-contract",
+        "evidence": "family-verification-checks-v1.json"
+      }
     }
   ]
 }
