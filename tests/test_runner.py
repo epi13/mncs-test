@@ -167,6 +167,45 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(list((artifacts / "stdout").glob("*.out")))
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_family_check_runs_exact_declared_behavioral_tests(self):
+        request = {
+            "schema_version": "mncs.family-check-request/1",
+            "check_identity": "mncs-test:verification-plan-contract",
+            "contract_identity": "mncs.verification-plan/1",
+            "contract_revision": "1",
+            "verification_plan_id": "a" * 64,
+            "family_graph_identity": "b" * 64,
+            "edge_fingerprint": "c" * 64,
+            "source_change_sha256": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory(prefix="mncs-test-family-check-") as directory:
+            request_path = Path(directory) / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            completed = self.invoke(
+                "run-check",
+                "--request",
+                str(request_path),
+                "--checks",
+                "family-verification-checks-v1.json",
+                "--repository-id",
+                "mncs-test",
+                *self.live_args(),
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["schema_version"], "mncs.family-check-response/1")
+        self.assertEqual(response["verdict"], "PASS")
+        self.assertEqual(response["runner"], "mncs-test")
+        self.assertEqual(response["test_result"]["schema_version"], "mncs.test-result/1")
+        self.assertEqual(response["check_result"]["schema_version"], "mncs.check-result/1")
+        self.assertEqual(response["execution"]["runner_version"], mncs_test.RUNNER_VERSION)
+        self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
+        self.assertEqual(
+            response["execution"]["inventory_identity"],
+            "9c97462da26b12f46c76247409caa33d40f87c82649842cf7244d848dc2f7060",
+        )
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_filter_selects_inventory_without_mutating_authority(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-filter-") as directory:
             result = Path(directory) / "result.json"
