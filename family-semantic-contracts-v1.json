@@ -1,0 +1,27 @@
+{
+  "schema_version": "commons.mncs.semantic-contract-declarations/v1",
+  "repository_id": "mncs-test",
+  "revision": "1",
+  "provides": [
+    {
+      "contract_identity": "mncs.test-result/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-test:test-result",
+      "evidence": "tools/mncs_test.py"
+    }
+  ],
+  "consumes": [
+    {
+      "contract_identity": "mncs.compiler.test-inventory/1",
+      "contract_revision": "0.17",
+      "consumer_identity": "mncs-test:test-inventory",
+      "evidence": "tools/mncs_test.py"
+    },
+    {
+      "contract_identity": "mncs.verification-plan/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-test:verification-plan",
+      "evidence": "tools/family_contract.py"
+    }
+  ]
+}
