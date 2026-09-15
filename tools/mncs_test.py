@@ -221,6 +221,37 @@ def finite_discriminant(value: Any) -> int | None:
     return None
 
 
+def finite_variant(value: Any, *, type_name: str) -> str | None:
+    """Read the nominal finite variant exposed by the typed value ABI.
+
+    The discriminant remains in the compatibility projection, but it is not
+    a semantic authority.  Variant identity is stable across enum evolution
+    and fails closed when a different finite type is returned.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    finite = value.get("finite")
+    if not isinstance(finite, dict):
+        return None
+    type_identity = finite.get("type_identity")
+    variant_identity = finite.get("variant_identity")
+    if isinstance(type_identity, str) and isinstance(variant_identity, str):
+        variant_parts = variant_identity.rsplit("::", 2)
+        if (
+            not type_identity.endswith(f"::{type_name}")
+            or len(variant_parts) != 3
+            or variant_parts[-2] != type_name
+        ):
+            return None
+        return variant_parts[-1]
+    # Accept the legacy typed-value spelling only when it still carries the
+    # nominal type name; never fall back to the numeric discriminant.
+    if finite.get("type") == type_name and isinstance(finite.get("variant"), str):
+        return finite["variant"]
+    return None
+
+
 def diagnostic_list(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
@@ -257,26 +288,17 @@ def native_test_result(execution: dict[str, Any]) -> dict[str, Any] | None:
     fields = record_fields(returned[0])
     if fields is None:
         return None
-    verdict_code = integer_value(fields.get("verdict_code"))
-    failure_kind = finite_discriminant(fields.get("failure_kind"))
-    if verdict_code not in (0, 1, 2, 3) or failure_kind is None:
+    verdict = finite_variant(fields.get("verdict"), type_name="Verdict")
+    failure_kind = finite_variant(fields.get("failure_kind"), type_name="FailureKind")
+    if verdict not in {"PASS", "FAIL", "SKIP", "UNSUPPORTED"} or failure_kind is None:
         return None
-    verdicts = {0: "PASS", 1: "FAIL", 2: "SKIP", 3: "UNSUPPORTED"}
-    failure_kinds = {
-        0: "none",
-        1: "assertion",
-        2: "setup",
-        3: "compile",
-        4: "runtime",
-        5: "timeout",
-        6: "unsupported",
-        7: "infrastructure",
-    }
     return {
-        "verdict": verdicts[verdict_code],
-        "verdict_code": verdict_code,
-        "failure_kind": failure_kinds.get(failure_kind, "unknown"),
-        "failure_kind_code": failure_kind,
+        "verdict": verdict,
+        # Compatibility fields are retained for downstream evidence readers;
+        # neither field participates in semantic control flow anymore.
+        "verdict_code": integer_value(fields.get("verdict_code")),
+        "failure_kind": "none" if failure_kind == "NoFailure" else failure_kind.lower(),
+        "failure_kind_code": finite_discriminant(fields.get("failure_kind")),
         "failure_code": integer_value(fields.get("failure_code")),
         "assertions": integer_value(fields.get("assertions")),
         "failures": integer_value(fields.get("failures")),
@@ -293,8 +315,8 @@ def native_suite_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
     fields = record_fields(returned[0])
     if fields is None:
         return None
-    verdict_code = integer_value(fields.get("verdict_code"))
-    if verdict_code not in (0, 1, 3):
+    verdict = finite_variant(fields.get("verdict"), type_name="Verdict")
+    if verdict not in {"PASS", "FAIL", "UNSUPPORTED"}:
         return None
     values: dict[str, Any] = {}
     for name in (
@@ -316,10 +338,16 @@ def native_suite_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
     if any(value is None for value in values.values()):
         return None
     return {
-        "verdict": {0: "PASS", 1: "FAIL", 3: "UNKNOWN"}[verdict_code],
-        "verdict_code": verdict_code,
+        "verdict": verdict,
+        "verdict_code": integer_value(fields.get("verdict_code")),
         **values,
     }
+
+
+def external_verdict(variant: str) -> str:
+    """Adapt the native enum to the public TestResult verdict vocabulary."""
+
+    return "UNKNOWN" if variant == "UNSUPPORTED" else variant
 
 
 def resolve_mncs(binary: str, cwd: Path) -> str:
@@ -966,11 +994,7 @@ def execution_result_from_decoded(
         test_result["native_result"] = native
         if suite:
             test_result["status"] = "passed" if native["verdict"] == "PASS" else "returned"
-            test_result["verdict"] = {
-                "PASS": "PASS",
-                "FAIL": "FAIL",
-                "UNKNOWN": "UNKNOWN",
-            }[native["verdict"]]
+            test_result["verdict"] = external_verdict(native["verdict"])
             return test_result
         verdict = native["verdict"]
         if verdict == "PASS":
@@ -1164,11 +1188,7 @@ def execute_entry(
         test_result["native_result"] = native
         if suite:
             test_result["status"] = "passed" if native["verdict"] == "PASS" else "returned"
-            test_result["verdict"] = {
-                "PASS": "PASS",
-                "FAIL": "FAIL",
-                "UNKNOWN": "UNKNOWN",
-            }[native["verdict"]]
+            test_result["verdict"] = external_verdict(native["verdict"])
             return test_result
         verdict = native["verdict"]
         if verdict == "PASS":
