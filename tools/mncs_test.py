@@ -1878,7 +1878,11 @@ def make_result(
         }
     native_suite_payload = None
     if suite_summary is not None:
-        native_suite_payload = {**suite_summary, "authority": "native_suite"}
+        native_suite_payload = {
+            **suite_summary,
+            "verdict": external_verdict(suite_summary["verdict"]),
+            "authority": "native_suite",
+        }
     selected_summary = selection_summary(
         tests=test_results,
         inventory=test_inventory,
@@ -2602,7 +2606,8 @@ def run_manifest(args: argparse.Namespace) -> int:
             classification = classification_for_failure(failure_class)
             message = str(failure.get("message", "native suite failed"))
         elif suite_summary is not None:
-            if suite_summary["verdict"] == "FAIL":
+            suite_verdict = external_verdict(suite_summary["verdict"])
+            if suite_verdict == "FAIL":
                 classification = "test_failure"
                 failure_class = next(
                     (
@@ -2613,7 +2618,7 @@ def run_manifest(args: argparse.Namespace) -> int:
                     "assertion",
                 )
                 message = "native suite returned FAIL"
-            elif suite_summary["verdict"] == "UNKNOWN":
+            elif suite_verdict == "UNKNOWN":
                 classification = "unsupported"
                 failure_class = "unsupported"
                 message = "native suite returned UNSUPPORTED"
