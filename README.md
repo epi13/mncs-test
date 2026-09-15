@@ -80,9 +80,12 @@ mncs-test discover [--root DIR] [--recursive] [--inventory] [--mncs BIN]
 mncs-test validate-manifest [--manifest FILE]
 mncs-test run [--manifest FILE] [--mncs BIN] [--library DIR ...]
                  [--embed-library FILE] [--filter TEXT ...]
+                 [--test-identity ID ...]
                  [--verification-plan FILE]
                  [--result FILE] [--check-result FILE] [--artifacts DIR]
                  [--format json|text]
+mncs-test run-check --request FILE --checks FILE --repository-id ID
+                    [--mncs BIN] [--library DIR ...]
 mncs-test replay --result FILE [--format json|text]
 ```
 
@@ -165,22 +168,23 @@ body-sensitive test-case identity. Editing a test creates a new case and run
 identity while the verification-only production subject fingerprint stays
 stable. A finite PASS is bounded evidence, never a universal proof.
 
-## Actions and future Forge boundary
+## Actions and Forge boundary
 
 `mncs-actions` provides a composite `actions/mncs-test` action. It invokes this
 CLI, packages the `mncs.check-result/1`, execution receipt, evidence manifest,
 and raw artifacts, and exposes the verdict, failure class, result path, and
-manifest digest. A future family workflow can compose it with the existing
-aggregate action; Forge should eventually orchestrate that provider boundary
-without learning test semantics.
+manifest digest. For selected cross-repository proof, Actions invokes
+`run-check`; that command resolves a repository-owned `mncs-test` check to its
+bounded compiler inventory identities and returns the exact TestResult,
+CheckResult, execution identity, inventory identity, and family bindings.
+Forge orchestrates this provider boundary without learning test semantics.
 
 The intended future shape is conceptually:
 
 ```text
-forge test → mncs-test run → mncs.check-result/1 → action/Forge aggregation
+Forge plan → Actions selected proof → mncs-test run-check
+      → exact TestResult/CheckResult → reusable receipt → Forge
 ```
-
-No Forge source is modified by this repository.
 
 ## Trust and bootstrap status
 

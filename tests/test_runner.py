@@ -200,7 +200,25 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(response["runner"], "mncs-test")
         self.assertEqual(response["test_result"]["schema_version"], "mncs.test-result/1")
         self.assertEqual(response["check_result"]["schema_version"], "mncs.check-result/1")
+        self.assertEqual(response["check_result"]["id"], request["check_identity"])
+        self.assertEqual(
+            response["family_binding"]["source_change_sha256"],
+            request["source_change_sha256"],
+        )
         self.assertEqual(response["execution"]["runner_version"], mncs_test.RUNNER_VERSION)
+        self.assertEqual(
+            response["execution"]["check_definition_identity"],
+            mncs_test.sha256_bytes(
+                mncs_test.compact_json(
+                    mncs_test.load_family_check(
+                        REPO / "family-verification-checks-v1.json",
+                        check_identity=request["check_identity"],
+                        contract_identity=request["contract_identity"],
+                        repository_id="mncs-test",
+                    )
+                ).encode()
+            ),
+        )
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],

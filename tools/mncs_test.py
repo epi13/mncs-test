@@ -36,6 +36,9 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 RUNNER_VERSION = "0.2.0"
+SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
+FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
+FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -2036,7 +2039,13 @@ def minimal_result(*, classification: str, message: str, cwd: Path) -> dict[str,
     }
 
 
-def check_result(result: dict[str, Any], result_digest: str) -> dict[str, Any]:
+def check_result(
+    result: dict[str, Any],
+    result_digest: str,
+    *,
+    check_id: str | None = None,
+    claim: str | None = None,
+) -> dict[str, Any]:
     unresolved = []
     if result["verdict"] == "UNKNOWN":
         unresolved.append(result.get("failure", {}).get("message", "unsupported capability"))
@@ -2057,11 +2066,12 @@ def check_result(result: dict[str, Any], result_digest: str) -> dict[str, Any]:
         compact_summary += f"; failing_identity={failure_identity}"
     return {
         "schema_version": CHECK_SCHEMA,
-        "id": result["id"],
+        "id": check_id or result["id"],
         "provider": result["provider"],
         "verdict": result["verdict"],
         "scope": result.get("scope", {}).get("manifest", "mncs-test"),
-        "claim": "MNCS-native tests were executed under the compiler-owned inventory or declared compatibility fixture",
+        "claim": claim
+        or "MNCS-native tests were executed under the compiler-owned inventory or declared compatibility fixture",
         "summary": compact_summary,
         "contract_revision": RESULT_SCHEMA,
         "producer_revision": f"sha256:{result.get('provenance', {}).get('runner', {}).get('source_sha256', '')}",
@@ -2110,31 +2120,46 @@ def load_family_check(
         raise ManifestError("family check contract identity does not match the request")
     if check.get("runner") != "mncs-test":
         raise ManifestError(f"family check {check_identity} is not owned by the mncs-test runner")
+    for forbidden in ("command", "commands", "shell", "script", "argv", "executable"):
+        if forbidden in check:
+            raise ManifestError(f"family check cannot carry executable field {forbidden!r}")
     selector = check.get("selector")
     if not isinstance(selector, dict):
         raise ManifestError("mncs-test family checks require a selector")
+    unknown_selector_fields = set(selector) - {"manifest", "inventory_identity", "test_identities"}
+    if unknown_selector_fields:
+        raise ManifestError(
+            "mncs-test family check selector contains unsupported fields: "
+            + ", ".join(sorted(unknown_selector_fields))
+        )
     manifest = selector.get("manifest")
+    inventory_identity = selector.get("inventory_identity")
     identities = selector.get("test_identities")
     if (
         not isinstance(manifest, str)
         or not manifest
+        or len(manifest) > FAMILY_CHECK_MAX_SELECTOR_LENGTH
         or Path(manifest).is_absolute()
+        or "\\" in manifest
         or ".." in Path(manifest).parts
+        or not isinstance(inventory_identity, str)
+        or not SHA256_HEX.fullmatch(inventory_identity)
         or not isinstance(identities, list)
         or not identities
         or len(identities) > 256
-        or not all(isinstance(item, str) and item for item in identities)
+        or not all(
+            isinstance(item, str)
+            and bool(item)
+            and len(item) <= FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH
+            for item in identities
+        )
         or len(set(identities)) != len(identities)
     ):
         raise ManifestError("mncs-test family check selector is invalid")
     check["selector"] = {
         "manifest": manifest,
+        "inventory_identity": inventory_identity,
         "test_identities": sorted(identities),
-        **(
-            {"inventory_identity": selector["inventory_identity"]}
-            if isinstance(selector.get("inventory_identity"), str)
-            else {}
-        ),
     }
     return check
 
@@ -2157,25 +2182,32 @@ def load_family_check_request(path: Path) -> dict[str, Any]:
         value = request.get(field)
         if not isinstance(value, str) or not value:
             raise ManifestError(f"family check request {field} must be non-empty")
-    for field in ("family_graph_identity", "edge_fingerprint"):
+    for field in (
+        "verification_plan_id",
+        "family_graph_identity",
+        "edge_fingerprint",
+        "source_change_sha256",
+    ):
         value = request[field]
-        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        if not SHA256_HEX.fullmatch(value):
             raise ManifestError(f"family check request {field} must be a lowercase digest")
     return request
 
 
 def run_family_check(args: argparse.Namespace) -> int:
     cwd = Path.cwd().resolve()
+    request: dict[str, Any] = {}
     try:
         request = load_family_check_request(resolve_path(args.request, cwd, must_exist=True))
+        checks_path = resolve_path(args.checks, cwd, must_exist=True)
         check = load_family_check(
-            resolve_path(args.checks, cwd, must_exist=True),
+            checks_path,
             check_identity=request["check_identity"],
             contract_identity=request["contract_identity"],
             repository_id=args.repository_id,
         )
         selector = check["selector"]
-        manifest_path = resolve_path(selector["manifest"], cwd, must_exist=True)
+        manifest_path = resolve_path(selector["manifest"], checks_path.parent, must_exist=True)
         with tempfile.TemporaryDirectory(prefix="mncs-family-check-") as directory:
             root = Path(directory)
             result_path = root / "test-result.json"
@@ -2219,10 +2251,13 @@ def run_family_check(args: argparse.Namespace) -> int:
                 )
             result = json.loads(result_path.read_text(encoding="utf-8"))
             produced_check = json.loads(check_path.read_text(encoding="utf-8"))
+            result_digest = sha256_file(result_path)
         if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.test-result/1 document")
         if not isinstance(produced_check, dict) or produced_check.get("schema_version") != CHECK_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.check-result/1 document")
+        if produced_check.get("verdict") != result.get("verdict"):
+            raise AdapterError("family check TestResult and CheckResult verdicts disagree")
         selected = result.get("selection", {}).get("selected_test_identities", [])
         if sorted(selected) != selector["test_identities"]:
             raise AdapterError("family check did not execute exactly the declared test identities")
@@ -2231,6 +2266,14 @@ def run_family_check(args: argparse.Namespace) -> int:
         expected_inventory = selector.get("inventory_identity")
         if expected_inventory is not None and inventory_identity != expected_inventory:
             raise AdapterError("family check compiler inventory identity is stale")
+        check_result_document = check_result(
+            result,
+            result_digest,
+            check_id=request["check_identity"],
+            claim="The exact repository-owned behavioral family check was executed by mncs-test",
+        )
+        check_result_digest = sha256_bytes(json_bytes(check_result_document))
+        check_definition_identity = sha256_bytes(compact_json(check).encode())
         response = {
             "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
             "check_identity": request["check_identity"],
@@ -2239,12 +2282,15 @@ def run_family_check(args: argparse.Namespace) -> int:
             "runner": "mncs-test",
             "verdict": result.get("verdict", "UNKNOWN"),
             "test_result": result,
-            "check_result": produced_check,
+            "check_result": check_result_document,
             "execution": {
                 "run_identity": result.get("experiment", {}).get("run_identity"),
                 "test_case_identities": selected,
                 "inventory_identity": inventory_identity,
                 "runner_version": RUNNER_VERSION,
+                "result_sha256": result_digest,
+                "check_result_sha256": check_result_digest,
+                "check_definition_identity": check_definition_identity,
             },
             "family_binding": {
                 key: request[key]
@@ -2252,6 +2298,7 @@ def run_family_check(args: argparse.Namespace) -> int:
                     "verification_plan_id",
                     "family_graph_identity",
                     "edge_fingerprint",
+                    "source_change_sha256",
                 )
             },
         }
@@ -2262,6 +2309,25 @@ def run_family_check(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
+                    **(
+                        {
+                            "check_identity": request["check_identity"],
+                            "contract_identity": request["contract_identity"],
+                            "contract_revision": request["contract_revision"],
+                            "family_binding": {
+                                key: request[key]
+                                for key in (
+                                    "verification_plan_id",
+                                    "family_graph_identity",
+                                    "edge_fingerprint",
+                                    "source_change_sha256",
+                                )
+                                if key in request
+                            },
+                        }
+                        if request
+                        else {}
+                    ),
                     "runner": "mncs-test",
                     "verdict": "UNKNOWN",
                     "failure": {"class": "infrastructure_failure", "message": str(error)},
