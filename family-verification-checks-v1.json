@@ -9,7 +9,7 @@
       "surface": "compiler-inventory-to-runner",
       "selector": {
         "manifest": "mncs-test.toml",
-        "inventory_identity": "cf2ed97b0b44f1cbec6bf2692e53c9af7987d4444efe227a72e590bfba6efa3d",
+        "inventory_identity": "cf14fefd6c7809287b9a00b243dc57d118e5ea3e91c60acb2f868a1536b3b444",
         "test_identities": [
           "mncs:0.2:test-case:tests.self_suite::task_lifecycle::699193aeddc0a792f85936fd4d4b34c62615ecc3eeb519c51fa3a6a7b34ea2db"
         ]
@@ -22,7 +22,7 @@
       "surface": "selected-consumer-behavior",
       "selector": {
         "manifest": "mncs-test.toml",
-        "inventory_identity": "cf2ed97b0b44f1cbec6bf2692e53c9af7987d4444efe227a72e590bfba6efa3d",
+        "inventory_identity": "cf14fefd6c7809287b9a00b243dc57d118e5ea3e91c60acb2f868a1536b3b444",
         "test_identities": [
           "mncs:0.2:test-case:tests.self_suite::arithmetic::048110093302a319d4962bf0ab6cf893312cfcc10981d4326ca6fafff87fd2a0",
           "mncs:0.2:test-case:tests.self_suite::boolean::36fb811221b71e39a0daec26be573986edb5703221a8f8ba179f98e9a65a4b56"

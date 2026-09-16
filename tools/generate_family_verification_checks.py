@@ -31,6 +31,26 @@ def canonical_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def semantic_inventory_identity(inventory: dict[str, Any]) -> str:
+    """Match the runner's semantic inventory identity projection.
+
+    Transport metadata (schema, source path, diagnostics, and future fields)
+    must not change a family selector's binding.  The native runner and the
+    compatibility adapter both bind the subject and ordered test identities.
+    """
+
+    material = [
+        inventory.get("subject_identity"),
+        inventory.get("subject_fingerprint"),
+        [
+            entry.get("test_case_identity")
+            for entry in inventory.get("tests", [])
+            if isinstance(entry, dict)
+        ],
+    ]
+    return hashlib.sha256(canonical_bytes(material)).hexdigest()
+
+
 def load_json(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -118,7 +138,7 @@ def regenerate(
     ]
     if not behavioral:
         raise ValueError("expected at least one mncs-test behavioral family check")
-    inventory_identity = hashlib.sha256(canonical_bytes(inventory)).hexdigest()
+    inventory_identity = semantic_inventory_identity(inventory)
     for check in behavioral:
         selector = check.get("selector")
         if not isinstance(selector, dict):

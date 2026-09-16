@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import sys
 import tempfile
 import unittest
@@ -64,9 +63,7 @@ class FamilyVerificationGenerationTests(unittest.TestCase):
                     libraries=[],
                 )
 
-        expected = hashlib.sha256(
-            generator.canonical_bytes(inventory)
-        ).hexdigest()
+        expected = generator.semantic_inventory_identity(inventory)
         self.assertEqual(
             [
                 check["selector"]["inventory_identity"]

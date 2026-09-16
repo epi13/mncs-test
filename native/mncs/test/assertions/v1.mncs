@@ -17,6 +17,8 @@ module mncs.test.assertions.v1;
 
 enum Verdict { PASS, FAIL, SKIP, UNSUPPORTED }
 enum FailureKind { NoFailure, Assertion, Setup, Compile, Runtime, Timeout, Unsupported, Infrastructure }
+enum TestStatus { PASSED, FAILED, SKIPPED, UNSUPPORTED }
+enum TestClassification { PASSED, TEST_FAILURE, UNSUPPORTED }
 
 record Assertion {
     passed: bool,
@@ -35,6 +37,13 @@ record TestResult {
     expected: i64,
     actual: i64,
     assertion_code: u64
+}
+
+record TestProjection {
+    status: TestStatus,
+    classification: TestClassification,
+    verdict: Verdict,
+    failure_kind: FailureKind
 }
 
 fn equals_i64(expected: i64, actual: i64, code: u64) -> (result: Assertion) {
@@ -89,6 +98,35 @@ fn from_assertion(assertion: Assertion) -> (result: TestResult) {
         expected: assertion.expected,
         actual: assertion.actual,
         assertion_code: assertion.code
+    };
+}
+
+fn project_test(test: TestResult) -> (result: TestProjection) {
+    return match test.verdict {
+        PASS => TestProjection {
+            status: TestStatus.PASSED,
+            classification: TestClassification.PASSED,
+            verdict: test.verdict,
+            failure_kind: test.failure_kind
+        },
+        FAIL => TestProjection {
+            status: TestStatus.FAILED,
+            classification: TestClassification.TEST_FAILURE,
+            verdict: test.verdict,
+            failure_kind: test.failure_kind
+        },
+        SKIP => TestProjection {
+            status: TestStatus.SKIPPED,
+            classification: TestClassification.PASSED,
+            verdict: test.verdict,
+            failure_kind: test.failure_kind
+        },
+        UNSUPPORTED => TestProjection {
+            status: TestStatus.UNSUPPORTED,
+            classification: TestClassification.UNSUPPORTED,
+            verdict: test.verdict,
+            failure_kind: test.failure_kind
+        }
     };
 }
 

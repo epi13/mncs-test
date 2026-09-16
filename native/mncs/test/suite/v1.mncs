@@ -29,6 +29,15 @@ record SuiteSummary {
     failure_count: u64
 }
 
+enum SuiteStatus { PASSED, FAILED, UNSUPPORTED }
+enum SuiteClassification { PASSED, TEST_FAILURE, UNSUPPORTED }
+
+record SuiteProjection {
+    status: SuiteStatus,
+    classification: SuiteClassification,
+    verdict: Verdict
+}
+
 fn empty() -> (result: SuiteSummary) {
     return SuiteSummary {
         verdict: Verdict.PASS,
@@ -57,6 +66,31 @@ fn verdict_for(summary: SuiteSummary) -> (result: SuiteSummary) {
         return SuiteSummary { ..summary, verdict: Verdict.UNSUPPORTED, verdict_code: 3 };
     }
     return SuiteSummary { ..summary, verdict: Verdict.PASS, verdict_code: 0 };
+}
+
+fn project(summary: SuiteSummary) -> (result: SuiteProjection) {
+    return match summary.verdict {
+        PASS => SuiteProjection {
+            status: SuiteStatus.PASSED,
+            classification: SuiteClassification.PASSED,
+            verdict: summary.verdict
+        },
+        FAIL => SuiteProjection {
+            status: SuiteStatus.FAILED,
+            classification: SuiteClassification.TEST_FAILURE,
+            verdict: summary.verdict
+        },
+        UNSUPPORTED => SuiteProjection {
+            status: SuiteStatus.UNSUPPORTED,
+            classification: SuiteClassification.UNSUPPORTED,
+            verdict: summary.verdict
+        },
+        SKIP => SuiteProjection {
+            status: SuiteStatus.PASSED,
+            classification: SuiteClassification.PASSED,
+            verdict: summary.verdict
+        }
+    };
 }
 
 fn observe(summary: SuiteSummary, test: TestResult) -> (result: SuiteSummary) {
