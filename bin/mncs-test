@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
-# The only shell in mncs-test is a transparent executable launcher.  It does
-# not discover tests, evaluate assertions, or transform semantic results.
+# Canonical executable adapter for the MNCS-native runner.
+#
+# This file is intentionally a small packaging boundary: application
+# semantics live in MNCS and the compiler/runtime is the trusted bootstrap.
+# The old Python implementation is not a fallback here.  Use the explicitly
+# named `bin/mncs-test-compat` adapter when an independent oracle is desired.
 set -euo pipefail
+
+if [[ "${1:-}" == "compat" || "${1:-}" == "oracle" ]]; then
+    echo "error: the Python compatibility runner is explicit; invoke bin/mncs-test-compat directly" >&2
+    exit 2
+fi
+
+case "${1:-}" in
+    discover|validate-manifest|run|run-check|replay)
+        echo "error: legacy mncs-test subcommands are compatibility-only; invoke bin/mncs-test-compat explicitly" >&2
+        exit 2
+        ;;
+esac
+
+MNCS_BIN="${MNCS:-mncs}"
+if ! command -v "$MNCS_BIN" >/dev/null 2>&1 && [[ ! -x "$MNCS_BIN" ]]; then
+    echo "error: native mncs compiler/runtime not found; set MNCS to the trusted bootstrap executable" >&2
+    exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$SCRIPT_DIR/../tools/mncs_test.py" "$@"
+SOURCE="${MNCS_TEST_SOURCE:-$SCRIPT_DIR/../tests/self_suite.mncs}"
+if [[ $# -eq 0 ]]; then
+    set -- "$SOURCE"
+fi
+
+exec "$MNCS_BIN" test "$@"

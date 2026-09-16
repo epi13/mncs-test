@@ -1,13 +1,14 @@
 # mncs-actions integration
 
 `mncs-actions/actions/mncs-test` is the automation boundary for this
-repository. A caller supplies a checked-out `mncs-test` executable (or the
-transparent `bin/mncs-test` launcher), the current `mncs` binary, the library
-roots, and a manifest.
+repository. A caller supplies the current Rust `mncs` bootstrap executable,
+the native library roots, and a source/selection request. The checked-in
+`bin/mncs-test` launcher is transparent and native; the Python manifest
+adapter is explicit compatibility-only.
 
 The ordinary action:
 
-1. invokes `mncs-test run` with explicit result and artifact paths;
+1. invokes `mncs test` with explicit result and artifact paths;
 2. preserves the native result and raw request/stdout/stderr artifacts;
 3. validates the emitted `mncs.check-result/1`;
 4. writes the standard execution receipt and evidence manifest; and

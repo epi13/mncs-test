@@ -93,6 +93,27 @@ def compact_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def compiler_inventory_identity(inventory: dict[str, Any]) -> str:
+    """Bind the compiler inventory without transport/path metadata.
+
+    The native ``mncs test`` entrypoint uses the same three-part semantic
+    projection.  Keeping this compatibility/oracle calculation independent
+    from the serialized source envelope makes family selectors reusable when
+    a checkout moves between worktrees or CI directories.
+    """
+
+    material = [
+        inventory.get("subject_identity"),
+        inventory.get("subject_fingerprint"),
+        [
+            entry.get("test_case_identity")
+            for entry in inventory.get("tests", [])
+            if isinstance(entry, dict)
+        ],
+    ]
+    return sha256_bytes(json.dumps(material, separators=(",", ":"), ensure_ascii=False).encode())
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -1922,7 +1943,7 @@ def make_result(
         "test_inventory": (
             {
                 "schema_version": test_inventory.get("schema_version"),
-                "inventory_identity": sha256_bytes(compact_json(test_inventory).encode()),
+                "inventory_identity": compiler_inventory_identity(test_inventory),
                 "source_artifact_identity": test_inventory.get("source_artifact_identity"),
                 "source_profile": test_inventory.get("source_profile"),
                 "subject_identity": test_inventory.get("subject_identity"),

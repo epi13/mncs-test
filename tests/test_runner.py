@@ -67,7 +67,15 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(manifest["inventory"]["schema_version"], "mncs.test-inventory/1")
         self.assertEqual(
             [item["entry"] for item in manifest["tests"]],
-            ["arithmetic", "boolean", "property_replay", "skipped", "snapshot_witness", "task_lifecycle"],
+            [
+                "arithmetic",
+                "boolean",
+                "native_runner_policy",
+                "property_replay",
+                "skipped",
+                "snapshot_witness",
+                "task_lifecycle",
+            ],
         )
         self.assertTrue(all(item["source_span"]["start"] < item["source_span"]["end"] for item in manifest["tests"]))
 
@@ -132,8 +140,8 @@ class RunnerTests(unittest.TestCase):
             document = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(document["schema_version"], "mncs.test-result/1")
             self.assertEqual(document["verdict"], "PASS")
-            self.assertEqual(document["summary"]["total"], 6)
-            self.assertEqual(document["summary"]["passed"], 5)
+            self.assertEqual(document["summary"]["total"], 7)
+            self.assertEqual(document["summary"]["passed"], 6)
             self.assertEqual(document["summary"]["skipped"], 1)
             self.assertEqual(
                 document["summary"]["authority"],
@@ -144,11 +152,11 @@ class RunnerTests(unittest.TestCase):
                 document["execution"]["native_aggregation"]["authority"],
                 "mncs.test.suite.v1",
             )
-            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 7)
-            self.assertEqual(document["native_suite_summary"]["total"], 6)
-            self.assertEqual(document["test_inventory"]["test_count"], 6)
-            self.assertEqual(len(document["experiment"]["definition"]["test_cases"]), 6)
-            self.assertEqual(len(document["experiment"]["observations"]), 6)
+            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 8)
+            self.assertEqual(document["native_suite_summary"]["total"], 7)
+            self.assertEqual(document["test_inventory"]["test_count"], 7)
+            self.assertEqual(len(document["experiment"]["definition"]["test_cases"]), 7)
+            self.assertEqual(len(document["experiment"]["observations"]), 7)
             self.assertTrue(
                 all("first-class" in item["tags"] for item in document["tests"])
             )
@@ -222,7 +230,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],
-            "fbefc565bb03b559a075b65dce0c44780d6115ab2a566a014657433b6e5e65f3",
+            "cf2ed97b0b44f1cbec6bf2692e53c9af7987d4444efe227a72e590bfba6efa3d",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -283,7 +291,7 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stdout)
             document = json.loads(result.read_text(encoding="utf-8"))
-            self.assertEqual(document["test_inventory"]["test_count"], 6)
+            self.assertEqual(document["test_inventory"]["test_count"], 7)
             self.assertEqual(document["execution"]["selected_test_count"], 1)
             self.assertEqual(document["execution"]["batch_size"], 1)
             self.assertEqual(document["summary"]["authority"], "native_suite")

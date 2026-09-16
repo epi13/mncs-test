@@ -3,21 +3,25 @@
 Native testing, verification, and conformance framework for MNCS and the
 broader MNCS project family.
 
-`mncs-test` is the canonical provider for MNCS source tests. In source Profile
-0.17, a `test` declaration is a language-owned declaration kind. The compiler
-emits its structural inventory; this runner selects and executes that
-inventory, while the native `mncs.test.*` modules continue to own assertion,
-suite, property, and snapshot semantics. The launcher only supplies compiler
-and platform transport and preserves evidence needed to reproduce a run.
+`mncs-test` is the first MNCS-native application in the family. In source
+Profile 0.17, a `test` declaration is a language-owned declaration kind. The
+Rust MNCS compiler/runtime/toolchain is the trusted bootstrap that emits the
+structural inventory and backend artifact; native `mncs.test.*` modules own
+assertion, suite, runner-policy, property, and snapshot semantics. The
+canonical entrypoint is the compiler-owned `mncs test` command and it has no
+Python fallback.
 
-When compiler impact evidence is available, the normal selective entrypoint is
-`--verification-plan`. The `mncs.verification-plan/1` document is bound to the
-current source bytes and compiler inventory and names exact test-case
-identities. Its transport schema, identity algorithm, vocabulary, and
-validator are owned by the sibling `MNCS-Commons/src/mncs_commons/verification_plan.py`;
-the former local schema copy is removed. mncs-test adds only its inventory
-join and executable-test checks. A stale or incomplete plan fails closed; it
-never silently falls back to the full suite.
+The machine-readable lifecycle is recorded in
+[`native-userland-status.json`](native-userland-status.json):
+`native_canonical`. The Python implementation remains available only as an
+explicit compatibility/differential oracle through
+[`bin/mncs-test-compat`](bin/mncs-test-compat).
+
+The compatibility adapter still consumes `--verification-plan` and the
+legacy `mncs.verification-plan/1` transport contract. The native command
+currently consumes exact `--test-identity` values and compiler inventory
+directly; typed verification-plan ingestion is a next runtime/library slice.
+No stale or incomplete plan is silently widened to the full suite.
 
 ## Quick start
 
@@ -26,18 +30,20 @@ self-suite from this repository:
 
 ```bash
 MNCS=/path/to/mncs-language/target/debug/mncs
-./bin/mncs-test discover --format text
-./bin/mncs-test run \
-  --mncs "$MNCS" \
-  --library /path/to/mncs-language/library \
-  --format text
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+  "$MNCS" test tests/self_suite.mncs --format text
+
+# Transparent native packaging adapter.
+MNCS="$MNCS" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+  ./bin/mncs-test
 ```
 
 The example test module contains arithmetic and boolean assertions, a real
 `mncs.std.task.v1` lifecycle witness, deterministic property replay, a native
-snapshot witness, and an explicit skip. The successful run is `5` passed and
-`1` skipped. Machine consumers should use the default JSON output or the
-generated `.mncs/mncs-test-check.json` (`mncs.check-result/1`).
+snapshot witness, an explicit skip, and a native no-fallback policy check. The
+successful run is `6` passed and `1` skipped. Machine consumers should use the
+default JSON output or an explicitly requested `--check-result` artifact.
 
 ## Native test surface
 
@@ -56,11 +62,11 @@ test addition_is_stable() -> (result: TestResult) {
 ```
 
 No `[[tests]]` entry or handwritten suite is needed for ordinary runtime
-tests. `mncs-test` asks `mncs test-inventory` for the compiler-owned
-declaration list, then selects and executes those declarations. A manifest
-still names the source/module and may set libraries, budgets, filters, and
-artifact policy. Explicit entries remain a compatibility form for legacy
-function tests and for external compiler-input experiments.
+tests. `mncs test` consumes the compiler-owned declaration inventory directly,
+then selects and executes those declarations through one retained native
+session. The native command intentionally accepts a source and typed selection
+options; legacy TOML manifest handling remains in the explicit compatibility
+adapter.
 
 The native modules are:
 
@@ -75,26 +81,19 @@ The native modules are:
 ## Commands
 
 ```text
-mncs-test discover [--root DIR] [--recursive] [--inventory] [--mncs BIN]
-                    [--library DIR ...] [--format json|text]
-mncs-test validate-manifest [--manifest FILE]
-mncs-test run [--manifest FILE] [--mncs BIN] [--library DIR ...]
-                 [--embed-library FILE] [--filter TEXT ...]
-                 [--test-identity ID ...]
-                 [--verification-plan FILE]
-                 [--result FILE] [--check-result FILE] [--artifacts DIR]
-                 [--format json|text]
-mncs-test run-check --request FILE --checks FILE --repository-id ID
-                    [--mncs BIN] [--library DIR ...]
-mncs-test replay --result FILE [--format json|text]
+mncs test SOURCE [--library ROOT ...] [--filter SELECTOR ...]
+          [--test-identity ID ...] [--step-budget N]
+          [--result FILE] [--check-result FILE] [--artifacts DIR]
+          [--format json|text]
+
+bin/mncs-test-compat discover|validate-manifest|run|run-check|replay ...
 ```
 
-Discovery is controlled and deterministic. Without `--recursive`, the runner
-reads the root `mncs-test.toml` and direct `tests/*.toml` manifests. Recursive
-manifest discovery is opt-in; it is not the source-test discovery mechanism.
-`discover --inventory` asks the compiler for each runtime inventory. Ordering,
-names, source spans, and semantic identities then come from the compiler, not
-from Python filesystem scans or source-text matching.
+The native command does not silently discover manifests, launch subprocesses,
+or fall back to Python. A legacy manifest or subcommand passed to
+`bin/mncs-test` fails closed and points to the explicit compatibility adapter.
+The compatibility adapter retains controlled manifest discovery for migration
+and differential testing.
 
 The compiler exposes the same provider input directly:
 
@@ -188,23 +187,23 @@ Forge plan → Actions selected proof → mncs-test run-check
 
 ## Trust and bootstrap status
 
-This campaign reaches Stage 3 for the native semantic core:
+This campaign reaches `native_canonical` for the mncs-test application path:
 
 ```text
 Stage 0  existing Rust/Python/bootstrap witnesses
 Stage 1  host harness exercises the MNCS compiler/runtime
 Stage 2  mncs-test launches MNCS-native tests
 Stage 3  mncs-test executes its own native suite
-Stage 4  future: host tests retained only as independent oracles
+Stage 4  native canonical path; host implementation retained only as oracle
+Stage 5  future: remove compatibility implementation after corpus parity
 ```
 
 The normal first-class runtime path uses one compiler invocation, one backend
 artifact, one retained `mncs-embed` session, one test batch, and native suite
-fold calls over that same session. If the shared library is unavailable, the
-runner records an explicit subprocess-per-test fallback rather than silently
-changing semantic ownership. Python remains a file/TOML/process/ctypes
-transport boundary; it carries native values but is not an assertion or
-verdict engine.
+fold calls over that same session. If the native compiler/runtime is missing,
+the command fails closed. Python remains a file/TOML/process/ctypes
+compatibility boundary and independent oracle; it is not a canonical runner,
+assertion engine, or verdict engine.
 Independent Rust/Python tests remain valid where they are differential
 witnesses or platform-specific action checks.
 
@@ -212,10 +211,12 @@ witnesses or platform-specific action checks.
 
 Current limitations are recorded in [`pressures/`](pressures/README.md) and
 linked to existing Commons records. The important remaining boundaries are
-platform process supervision, external structured-result transport, and
-advanced callable-value features. Compiler-owned inventory removes source
+native manifest/verification-plan ingestion, platform process supervision for
+tests that themselves need child processes, and compiler-owned typed inventory
+consumption by future MNCS modules. Compiler-owned inventory removes source
 regex discovery, and retained embed sessions remove subprocess-per-test from
-the normal path. Each workaround is narrow, named, and reproducible.
+the native path. Each compatibility workaround is explicit, narrow, named,
+and reproducible.
 The survey and disposition of pre-existing host-language tests is in
 [`docs/external-tests.md`](docs/external-tests.md).
 
@@ -226,7 +227,10 @@ python3 -m py_compile tools/mncs_test.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 MNCS=/path/to/mncs-language/target/debug/mncs
 MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
-  ./bin/mncs-test run --mncs "$MNCS" --library /path/to/mncs-language/library
+  "$MNCS" test tests/self_suite.mncs --format text
+
+# Explicit compatibility/oracle validation only.
+./bin/mncs-test-compat run --mncs "$MNCS" --library /path/to/mncs-language/library --format text
 ```
 
 Keep native semantics in MNCS and update the local/Commons pressure record

@@ -5,7 +5,7 @@
 ```text
 MNCS `test` declaration (Profile 0.17)
         ↓ AST/model identity + compiler test inventory
-mncs-test selects TestCase identities
+Rust toolchain selects compiler-inventoried TestCase identities
         ↓ one compiled artifact + retained Session batch
 TestExecution → Observation → native OracleEvaluation
         ↓ mncs.test-result/1 + RFC 0034 projection
@@ -18,14 +18,14 @@ deliberately made from ordinary MNCS enums, records, functions, sequences,
 bounded iteration, and arithmetic. There is no hidden registration table in
 Python and no host-side assertion callback.
 
-The adapter owns four platform boundaries that are not test semantics:
+The native command owns compiler/toolchain transport and four platform
+boundaries that are not test semantics:
 
-1. TOML and controlled manifest/file discovery;
-2. starting the `mncs` executable, locating `mncs-embed`, and enforcing an OS
-   process timeout;
-3. JSON/TOML transport to the current CLI and projection into the family
-   `check-result/1` contract; and
-4. byte-for-byte capture, hashing, and publication of raw artifacts.
+1. source loading and explicit library resolution;
+2. compiler admission, backend artifact verification, and the retained
+   `mncs-embed` session;
+3. JSON projection into the family `check-result/1` contract; and
+4. bounded artifact publication.
 
 The adapter receives a native result, validates its shape, and carries it
 forward. A first-class test's returned verdict is the native oracle evaluation;
@@ -57,14 +57,14 @@ scan source text.
 
 ## Execution sequence
 
-For a first-class runtime manifest, the adapter asks `mncs test-inventory`,
-compiles once with `--include-tests`, opens one verified `mncs-embed` Session,
-and sends the selected calls through `mncs_session_call_batch`. Each returned
-value remains a distinct execution observation. The adapter then calls native
-`mncs.test.suite.v1::empty`/`observe` through that same session to obtain the
-semantic summary. If the embed library is not available, the result records an
-explicit subprocess-per-test fallback. A legacy manifest with a suite retains
-its compatibility behavior and native suite authority.
+For a first-class source, `mncs test` obtains `mncs.test-inventory/1` from the
+compiler front end, compiles once with tests included, opens one verified
+`mncs-embed` Session, and sends the selected calls through that retained
+session. Each returned value remains a distinct execution observation. The
+toolchain then calls native `mncs.test.suite.v1::empty`/`observe` through the
+same session to obtain the semantic summary. If the native toolchain is not
+available, the command fails closed. A legacy manifest retains its behavior
+only through `bin/mncs-test-compat`.
 
 Compile-only entries invoke `mncs validate`. A compile-fail or diagnostic
 entry is passing only when the compiler rejects the source and every declared

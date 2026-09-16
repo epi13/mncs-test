@@ -7,7 +7,9 @@
       "contract_identity": "mncs.test-result/1",
       "contract_revision": "1",
       "exported_identity": "mncs-test:test-result",
-      "evidence": "tools/mncs_test.py"
+      "evidence": "native/mncs/test/suite/v1.mncs",
+      "canonical_entrypoint": "mncs test",
+      "status": "native_canonical"
     }
   ],
   "consumes": [
@@ -15,7 +17,9 @@
       "contract_identity": "mncs.compiler.test-inventory/1",
       "contract_revision": "0.17",
       "consumer_identity": "mncs-test:test-inventory",
-      "evidence": "tools/mncs_test.py",
+      "evidence": "native-userland-status.json",
+      "canonical_entrypoint": "mncs test",
+      "status": "native_canonical",
       "verification": {
         "check_identity": "mncs-test:test-inventory-join",
         "executor": "mncs-test",

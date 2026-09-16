@@ -28,20 +28,20 @@ profile = "0.17"
 libraries = ["native"]
 ```
 
-Run and filter through the canonical provider:
+Run and filter through the canonical native entrypoint:
 
 ```bash
-mncs-test discover --inventory --mncs /path/to/mncs
-mncs-test run --manifest mncs-test.toml --mncs /path/to/mncs \
-  --filter addition
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+  /path/to/mncs test addition_tests.mncs --filter addition
 ```
 
 The compiler inventory supplies the stable declaration/test-case identities,
 source span, signature, effects, capabilities, and production subject
-identity. `mncs-test` adds selection, execution, result formatting, and
-evidence transport. The provider folds returned `TestResult` values through
-the native `mncs.test.suite.v1` module in the retained session; Python only
-carries ABI values and projects the returned summary. Use `equals_i64`,
+identity. The Rust toolchain adds selection, execution, result formatting, and
+evidence transport around native module calls. It folds returned `TestResult`
+values through the native `mncs.test.suite.v1` module in the retained
+session. Python remains only an explicit compatibility/oracle path. Use
+`equals_i64`,
 `equals_bool`, and bounded byte
 witnesses for the currently available value vocabulary. A failing assertion
 carries expected, actual, and assertion code in the native record; the

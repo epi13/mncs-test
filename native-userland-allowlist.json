@@ -1,0 +1,27 @@
+{
+  "schema_version": "mncs.native-userland-allowlist/1",
+  "repository_id": "mncs-test",
+  "canonical_status": "native_canonical",
+  "entries": [
+    {
+      "path": "tools/mncs_test.py",
+      "class": "differential_oracle",
+      "reason": "Independent compatibility and parity oracle retained until native result projections cover the legacy manifest corpus."
+    },
+    {
+      "path": "bin/mncs-test-compat",
+      "class": "external_adapter",
+      "reason": "Explicitly named migration path for consumers that still require the legacy manifest/CLI contract."
+    },
+    {
+      "path": "tools/family_contract.py",
+      "class": "packaging_bootstrap",
+      "reason": "Generates external family metadata; it is not invoked by the native test execution path."
+    },
+    {
+      "path": "tools/generate_family_verification_checks.py",
+      "class": "packaging_bootstrap",
+      "reason": "Generates checked-in family metadata; it is not invoked by the native test execution path."
+    }
+  ]
+}

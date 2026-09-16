@@ -1,0 +1,35 @@
+{
+  "schema_version": "mncs.native-userland-audit/1",
+  "repository": "mncs-test",
+  "status": "native_canonical",
+  "canonical_mncs_surfaces": [
+    "manifest-free source admission",
+    "compiler-owned test inventory selection",
+    "native TestResult and CheckResult projection",
+    "retained-session suite aggregation"
+  ],
+  "responsibilities": [
+    {"area": "manifest parsing", "classification": "test_oracle_tooling", "canonical_owner": "tools/mncs_test.py compatibility adapter"},
+    {"area": "source discovery and compiler inventory", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "Rust toolchain compiler API"},
+    {"area": "exact test identity selection", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "mncs test entrypoint"},
+    {"area": "TestResult/CheckResult construction", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "native runner and typed suite modules"},
+    {"area": "compiler invocation", "classification": "compiler_owned_typed_api", "canonical_owner": "Rust bootstrap toolchain"},
+    {"area": "test function execution and suite aggregation", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "retained MNCS runtime session"},
+    {"area": "artifact publication and canonical JSON projection", "classification": "missing_reusable_runtime_library_capability", "canonical_owner": "Rust toolchain file adapter during bootstrap"},
+    {"area": "host process timeout and external test binaries", "classification": "external_interoperability_only", "canonical_owner": "explicit compatibility path"},
+    {"area": "family-check request/response composition", "classification": "small_application_refactor", "canonical_owner": "mncs-actions native adapter"}
+  ],
+  "existing_pressures": [
+    "MNCS-TEST-P-004",
+    "MNCS-TEST-P-006",
+    "MNCS-TOOLING-146FB6F4BBC6",
+    "MNCS-LANG-52A5E0C72A39"
+  ],
+  "remaining_host_paths": [
+    {"path": "tools/mncs_test.py", "role": "differential oracle and explicit compatibility adapter"},
+    {"path": "bin/mncs-test-compat", "role": "explicit host compatibility entrypoint"},
+    {"path": "tools/generate_cases.py", "role": "test corpus generation utility"}
+  ],
+  "migration_order": 1,
+  "next_native_slice": "native family-check and external process capability pressure"
+}

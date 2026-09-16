@@ -9,6 +9,7 @@ use mncs.test.assertions.v1;
 use mncs.test.suite.v1;
 use mncs.test.generative.v1;
 use mncs.test.snapshot.v1;
+use mncs.test.runner.v1;
 use mncs.std.task.v1;
 
 test arithmetic() -> (result: TestResult) {
@@ -36,4 +37,9 @@ test snapshot_witness() -> (result: TestResult) {
 
 test skipped() -> (result: TestResult) {
     return skip(1006);
+}
+
+test native_runner_policy() -> (result: TestResult) {
+    let policy: Policy = native_policy();
+    return from_assertion(equals_bool(true, is_native(policy), 1007));
 }

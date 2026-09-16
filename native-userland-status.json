@@ -1,0 +1,54 @@
+{
+  "schema_version": "mncs.native-userland-status/1",
+  "repository_id": "mncs-test",
+  "status": "native_canonical",
+  "canonical_entrypoint": "mncs test",
+  "native_sources": {
+    "mncs-test.toml": "tests/self_suite.mncs"
+  },
+  "canonical_launcher": "bin/mncs-test",
+  "semantic_modules": [
+    "native/mncs/test/assertions/v1.mncs",
+    "native/mncs/test/generative/v1.mncs",
+    "native/mncs/test/runner/v1.mncs",
+    "native/mncs/test/snapshot/v1.mncs",
+    "native/mncs/test/suite/v1.mncs"
+  ],
+  "trusted_bootstrap": [
+    "Rust MNCS compiler/runtime/toolchain"
+  ],
+  "host_paths": [
+    {
+      "path": "tools/mncs_test.py",
+      "role": "differential_oracle_and_compatibility_adapter",
+      "canonical": false
+    },
+    {
+      "path": "bin/mncs-test-compat",
+      "role": "explicit_compatibility_adapter",
+      "canonical": false
+    },
+    {
+      "path": "tools/family_contract.py",
+      "role": "external_contract_generation_utility",
+      "canonical": false
+    },
+    {
+      "path": "tools/generate_family_verification_checks.py",
+      "role": "external_metadata_generation_utility",
+      "canonical": false
+    }
+  ],
+  "host_fallback": {
+    "allowed": false,
+    "failure_mode": "closed",
+    "compatibility_invocation": "bin/mncs-test-compat"
+  },
+  "bootstrap_boundary": {
+    "compiler_owned_inventory": true,
+    "compiler_owned_backend_artifact": true,
+    "retained_embed_session": true,
+    "host_subprocesses_per_native_test": 0,
+    "python_runner_calls": 0
+  }
+}

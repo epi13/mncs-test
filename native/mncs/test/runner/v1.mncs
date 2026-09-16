@@ -1,0 +1,33 @@
+mncs 0.16;
+
+// mncs.test.runner.v1 — the canonical execution-policy vocabulary.
+//
+// The compiler/runtime remains the trusted bootstrap implementation, but a
+// test application must be able to state its lifecycle in MNCS.  This module
+// makes the native path and its no-fallback rule data, rather than an
+// undocumented convention in a host launcher.
+module mncs.test.runner.v1;
+
+enum ExecutionMode { NativeCanonical, NativeShadow, HostCompatibility }
+
+record Policy {
+    mode: ExecutionMode,
+    fallback_allowed: bool,
+    host_subprocesses: u64
+}
+
+fn native_policy() -> (result: Policy) {
+    return Policy {
+        mode: ExecutionMode.NativeCanonical,
+        fallback_allowed: false,
+        host_subprocesses: 0
+    };
+}
+
+fn is_native(policy: Policy) -> (result: bool) {
+    return match policy.mode {
+        NativeCanonical => !policy.fallback_allowed && policy.host_subprocesses == 0,
+        NativeShadow => !policy.fallback_allowed && policy.host_subprocesses == 0,
+        HostCompatibility => false
+    };
+}
