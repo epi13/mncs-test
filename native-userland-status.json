@@ -49,6 +49,7 @@
     "compiler_owned_backend_artifact": true,
     "retained_embed_session": true,
     "host_subprocesses_per_native_test": 0,
-    "python_runner_calls": 0
+    "python_runner_calls": 0,
+    "verification_plan_ingestion": "native_structured_document_and_exact_inventory_join"
   }
 }

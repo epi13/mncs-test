@@ -8,6 +8,14 @@
     "native TestResult and CheckResult projection",
     "retained-session suite aggregation"
   ],
+  "verification_plan_ingestion": {
+    "status": "native_structural_admission",
+    "entrypoint": "mncs test --verification-plan FILE",
+    "selection_authority": "mncs.test.runner.v1 plus compiler-owned inventory join",
+    "shell_projection": false,
+    "jq_required": false,
+    "remaining_blocker": "Commons-owned plan construction and dynamic structured-value semantics remain external to the runner"
+  },
   "responsibilities": [
     {"area": "manifest parsing", "classification": "test_oracle_tooling", "canonical_owner": "tools/mncs_test.py compatibility adapter"},
     {"area": "source discovery and compiler inventory", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "Rust toolchain compiler API"},

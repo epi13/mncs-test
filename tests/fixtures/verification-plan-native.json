@@ -1,0 +1,9 @@
+{
+  "schema_version": "mncs.verification-plan/1",
+  "plan_id": "mncs:verification-plan:phase2-native-canary",
+  "selection": {
+    "selected_test_identities": [
+      "mncs:0.2:test-case:tests.self_suite::arithmetic::048110093302a319d4962bf0ab6cf893312cfcc10981d4326ca6fafff87fd2a0"
+    ]
+  }
+}
