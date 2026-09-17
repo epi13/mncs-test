@@ -1,0 +1,10 @@
+{
+  "schema_version": "mncs.test-provider-request/1",
+  "inventory_identity": "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
+  "selected_test_identities": [
+    "mncs:0.2:test-case:tests.self_suite::not_in_inventory::0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "selection_count": 1,
+  "interface_identity": "38bf9a1325913cee5db180f3f6ba446314b7f1cdb3d62b095eab0e58ae5e0a23",
+  "provider_revision_identity": "b5e5ef8c58ecf76ce0b36ee7ab636a9300b24f4c930d7d2f6f8ed7412198a265"
+}

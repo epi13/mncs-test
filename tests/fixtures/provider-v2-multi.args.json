@@ -1,0 +1,1517 @@
+[
+  {
+    "record": {
+      "type": "ProviderRequest",
+      "fields": {
+        "inventory_identity": {
+          "sequence": {
+            "values": [
+              {
+                "byte": {
+                  "value": 245
+                }
+              },
+              {
+                "byte": {
+                  "value": 194
+                }
+              },
+              {
+                "byte": {
+                  "value": 197
+                }
+              },
+              {
+                "byte": {
+                  "value": 102
+                }
+              },
+              {
+                "byte": {
+                  "value": 75
+                }
+              },
+              {
+                "byte": {
+                  "value": 36
+                }
+              },
+              {
+                "byte": {
+                  "value": 226
+                }
+              },
+              {
+                "byte": {
+                  "value": 126
+                }
+              },
+              {
+                "byte": {
+                  "value": 253
+                }
+              },
+              {
+                "byte": {
+                  "value": 190
+                }
+              },
+              {
+                "byte": {
+                  "value": 95
+                }
+              },
+              {
+                "byte": {
+                  "value": 78
+                }
+              },
+              {
+                "byte": {
+                  "value": 120
+                }
+              },
+              {
+                "byte": {
+                  "value": 172
+                }
+              },
+              {
+                "byte": {
+                  "value": 136
+                }
+              },
+              {
+                "byte": {
+                  "value": 142
+                }
+              },
+              {
+                "byte": {
+                  "value": 150
+                }
+              },
+              {
+                "byte": {
+                  "value": 101
+                }
+              },
+              {
+                "byte": {
+                  "value": 91
+                }
+              },
+              {
+                "byte": {
+                  "value": 85
+                }
+              },
+              {
+                "byte": {
+                  "value": 6
+                }
+              },
+              {
+                "byte": {
+                  "value": 49
+                }
+              },
+              {
+                "byte": {
+                  "value": 248
+                }
+              },
+              {
+                "byte": {
+                  "value": 177
+                }
+              },
+              {
+                "byte": {
+                  "value": 156
+                }
+              },
+              {
+                "byte": {
+                  "value": 170
+                }
+              },
+              {
+                "byte": {
+                  "value": 151
+                }
+              },
+              {
+                "byte": {
+                  "value": 49
+                }
+              },
+              {
+                "byte": {
+                  "value": 145
+                }
+              },
+              {
+                "byte": {
+                  "value": 39
+                }
+              },
+              {
+                "byte": {
+                  "value": 21
+                }
+              },
+              {
+                "byte": {
+                  "value": 219
+                }
+              }
+            ]
+          }
+        },
+        "selected_test_identities": {
+          "sequence": {
+            "values": [
+              {
+                "sequence": {
+                  "values": [
+                    {
+                      "byte": {
+                        "value": 109
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 110
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 46
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 45
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 46
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 108
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 95
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 117
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 105
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 114
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 105
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 104
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 109
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 105
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 55
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 51
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 55
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 55
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 55
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 51
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 57
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 57
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "sequence": {
+                  "values": [
+                    {
+                      "byte": {
+                        "value": 109
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 110
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 46
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 45
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 46
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 108
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 95
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 115
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 117
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 105
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 116
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 111
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 111
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 108
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 110
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 58
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 51
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 51
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 57
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 97
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 51
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 101
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 55
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 99
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 51
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 100
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 54
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 55
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 98
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 49
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 52
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 57
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 102
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 50
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 56
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 53
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    },
+                    {
+                      "byte": {
+                        "value": 48
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "selection_count": {
+          "integer": {
+            "value": 2
+          }
+        },
+        "interface_identity": {
+          "sequence": {
+            "values": [
+              {"byte": {"value": 56}},
+              {"byte": {"value": 191}},
+              {"byte": {"value": 154}},
+              {"byte": {"value": 19}},
+              {"byte": {"value": 37}},
+              {"byte": {"value": 145}},
+              {"byte": {"value": 60}},
+              {"byte": {"value": 238}},
+              {"byte": {"value": 93}},
+              {"byte": {"value": 177}},
+              {"byte": {"value": 128}},
+              {"byte": {"value": 243}},
+              {"byte": {"value": 246}},
+              {"byte": {"value": 186}},
+              {"byte": {"value": 68}},
+              {"byte": {"value": 99}},
+              {"byte": {"value": 20}},
+              {"byte": {"value": 183}},
+              {"byte": {"value": 241}},
+              {"byte": {"value": 205}},
+              {"byte": {"value": 179}},
+              {"byte": {"value": 214}},
+              {"byte": {"value": 43}},
+              {"byte": {"value": 9}},
+              {"byte": {"value": 94}},
+              {"byte": {"value": 171}},
+              {"byte": {"value": 14}},
+              {"byte": {"value": 88}},
+              {"byte": {"value": 174}},
+              {"byte": {"value": 94}},
+              {"byte": {"value": 10}},
+              {"byte": {"value": 35}}
+            ]
+          }
+        },
+        "provider_revision_identity": {
+          "sequence": {
+            "values": [
+              {
+                "byte": {
+                  "value": 181
+                }
+              },
+              {
+                "byte": {
+                  "value": 229
+                }
+              },
+              {
+                "byte": {
+                  "value": 239
+                }
+              },
+              {
+                "byte": {
+                  "value": 140
+                }
+              },
+              {
+                "byte": {
+                  "value": 88
+                }
+              },
+              {
+                "byte": {
+                  "value": 236
+                }
+              },
+              {
+                "byte": {
+                  "value": 247
+                }
+              },
+              {
+                "byte": {
+                  "value": 108
+                }
+              },
+              {
+                "byte": {
+                  "value": 224
+                }
+              },
+              {
+                "byte": {
+                  "value": 179
+                }
+              },
+              {
+                "byte": {
+                  "value": 110
+                }
+              },
+              {
+                "byte": {
+                  "value": 231
+                }
+              },
+              {
+                "byte": {
+                  "value": 171
+                }
+              },
+              {
+                "byte": {
+                  "value": 99
+                }
+              },
+              {
+                "byte": {
+                  "value": 106
+                }
+              },
+              {
+                "byte": {
+                  "value": 147
+                }
+              },
+              {
+                "byte": {
+                  "value": 0
+                }
+              },
+              {
+                "byte": {
+                  "value": 178
+                }
+              },
+              {
+                "byte": {
+                  "value": 79
+                }
+              },
+              {
+                "byte": {
+                  "value": 76
+                }
+              },
+              {
+                "byte": {
+                  "value": 147
+                }
+              },
+              {
+                "byte": {
+                  "value": 13
+                }
+              },
+              {
+                "byte": {
+                  "value": 125
+                }
+              },
+              {
+                "byte": {
+                  "value": 47
+                }
+              },
+              {
+                "byte": {
+                  "value": 111
+                }
+              },
+              {
+                "byte": {
+                  "value": 142
+                }
+              },
+              {
+                "byte": {
+                  "value": 215
+                }
+              },
+              {
+                "byte": {
+                  "value": 65
+                }
+              },
+              {
+                "byte": {
+                  "value": 33
+                }
+              },
+              {
+                "byte": {
+                  "value": 152
+                }
+              },
+              {
+                "byte": {
+                  "value": 162
+                }
+              },
+              {
+                "byte": {
+                  "value": 101
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]
