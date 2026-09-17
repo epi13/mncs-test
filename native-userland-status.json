@@ -4,7 +4,11 @@
   "status": "native_canonical",
   "canonical_entrypoint": "mncs test",
   "native_sources": {
-    "mncs-test.toml": "tests/self_suite.mncs"
+    "mncs-test.toml": "tests/self_suite.mncs",
+    "mncs-test-provider": "native/mncs/test/provider/v1.mncs"
+  },
+  "native_application_descriptors": {
+    "mncs-test-provider": "native-applications/test-provider.json"
   },
   "canonical_launcher": "bin/mncs-test",
   "semantic_modules": [

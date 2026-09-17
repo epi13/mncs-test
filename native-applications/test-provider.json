@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.provider",
+  "source": "../native/mncs/test/provider/v1.mncs",
+  "module": "mncs.test.provider.v1",
+  "entry_function": "provider_app",
+  "profile": "0.18",
+  "interface_identity": "ce42b238ce3e350ab7a6188362b0c681453e69a7750823310eaafe288cfa8594",
+  "libraries": [
+    "../../mncs-language/library",
+    "../native",
+    ".."
+  ],
+  "environment_keys": [],
+  "required_capabilities": []
+}
