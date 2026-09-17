@@ -7,9 +7,9 @@
   },
   "output": {
     "path": "native/mncs/test/provider/v2_inventory.mncs",
-    "source_sha256": "2b61331308fdb70afe82e6633031786ae5bbb3e43929832f8ff14a854b586389"
+    "source_sha256": "2f1256cce39000db49faa4620f4a7e3a3b0009b02f68e70d20cff4332222134b"
   },
-  "provider_policy_identity": "59928ae4bfba4e50320cee851720a9adeb9add2829d3491fd1eba410424d2d43",
-  "provider_revision_identity": "50d30d6cd6a5df4d20151672fe6dac1dbb99b9ddd99a30bb0f459dc679e2b0c2",
+  "provider_policy_identity": "19062c8bb010ed4de4fbed8718f172f32d424b1443cd30a2fbed331ee07f5446",
+  "provider_revision_identity": "b103258f35603e1b081ecec86cd1e093978c8b26915384129d6634b4b84dd5f2",
   "schema_version": "mncs-test.generated-provider/v2"
 }
