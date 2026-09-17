@@ -1,0 +1,62 @@
+mncs 0.18;
+
+// mncs.test.provider.v1 — the typed provider surface used by native
+// applications that need one selected test result.  The provider owns the
+// test inventory binding and calls the declared test directly; callers do
+// not launch `mncs-test`, serialize a request, or translate a verdict.
+module mncs.test.provider.v1;
+
+use mncs.test.assertions.v1;
+use mncs.std.application.v1;
+use tests.self_suite;
+
+fn is_arithmetic_identity(selector: [byte; up_to 1024]) -> (result: bool) {
+    let expected: [byte; 113] = [
+        109, 110, 99, 115, 58, 48, 46, 50, 58, 116, 101, 115, 116, 45, 99, 97, 115, 101,
+        58, 116, 101, 115, 116, 115, 46, 115, 101, 108, 102, 95, 115, 117, 105, 116, 101,
+        58, 58, 97, 114, 105, 116, 104, 109, 101, 116, 105, 99, 58, 58, 102, 54, 55,
+        56, 101, 53, 101, 99, 51, 48, 52, 49, 101, 52, 53, 101, 55, 56, 101, 53, 101,
+        98, 101, 102, 101, 52, 101, 56, 55, 49, 55, 50, 102, 100, 50, 102, 98, 100, 100,
+        51, 56, 53, 56, 52, 54, 97, 50, 54, 52, 49, 97, 56, 101, 57, 99, 102, 100,
+        50, 49, 50, 98, 57, 49, 49
+    ];
+    if selector.len != expected.len {
+        return false;
+    }
+    iterate i over expected carrying same: bool = true {
+        next same = same && selector[i] == expected[i];
+    }
+    return same;
+}
+
+// The first provider slice is deliberately exact: an unsupported or
+// unknown identity returns the native UNKNOWN-equivalent rather than
+// silently executing a nearby test.
+fn run_selected(selector: [byte; up_to 1024]) -> (result: TestResult) {
+    if is_arithmetic_identity(selector) {
+        let selected_result: TestResult = arithmetic();
+        return selected_result;
+    }
+    let unsupported_result: TestResult = unsupported(9001);
+    return unsupported_result;
+}
+
+// The provider can also be admitted as a generic MNCS application for
+// diagnostics and tooling.  Production composition calls run_selected
+// directly in the same linked session; this wrapper exists only to make the
+// repository-owned descriptor exercise the common ApplicationContext ABI.
+fn provider_app(context: ApplicationContext) -> (result: ApplicationExit) {
+    if !context_is_bounded(context) || context.argv_count != 1 {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 115, 101, 108, 101, 99, 116, 111, 114], 2);
+    }
+    let provider_result: TestResult = run_selected(context.argv[0]);
+    return select(
+        provider_result.verdict_code == 0,
+        success([80, 65, 83, 83]),
+        select(
+            provider_result.verdict_code == 1,
+            success([70, 65, 73, 76]),
+            success([85, 78, 75, 78, 79, 87, 78])
+        )
+    );
+}

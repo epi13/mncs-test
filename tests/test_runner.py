@@ -199,6 +199,8 @@ class RunnerTests(unittest.TestCase):
                 "mncs-test",
                 "--library",
                 str(REPO / "native"),
+                "--library",
+                str(REPO),
                 *self.live_args(),
             )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -230,7 +232,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],
-            "cf14fefd6c7809287b9a00b243dc57d118e5ea3e91c60acb2f868a1536b3b444",
+            "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -258,6 +260,8 @@ class RunnerTests(unittest.TestCase):
                 "mncs-test",
                 "--library",
                 str(REPO / "native"),
+                "--library",
+                str(REPO),
                 *self.live_args(),
             )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -267,7 +271,7 @@ class RunnerTests(unittest.TestCase):
             response["execution"]["test_case_identities"],
             [
                 "mncs:0.2:test-case:tests.self_suite::task_lifecycle::"
-                "699193aeddc0a792f85936fd4d4b34c62615ecc3eeb519c51fa3a6a7b34ea2db"
+                "acd1365f993616c64578e506fc793f07297b9049c77a9a1f0a3c3da188892dae"
             ],
         )
 
@@ -543,7 +547,7 @@ class RunnerTests(unittest.TestCase):
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_native_modules_validate(self):
         environment = dict(os.environ)
-        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join((str(REPO / "native"), str(LANGUAGE / "library")))
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join((str(REPO / "native"), str(REPO), str(LANGUAGE / "library")))
         for source in sorted((REPO / "native" / "mncs" / "test").rglob("*.mncs")):
             completed = subprocess.run(
                 [str(MNCS), "validate", str(source)],
