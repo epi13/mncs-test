@@ -83,7 +83,7 @@ def test_native_provider_dispatches_inventory_test_and_separates_check_identity(
         assert completed.returncode == 0, completed.stderr
         result = json.loads((artifact_root / "result.json").read_text(encoding="utf-8"))
         check = json.loads((artifact_root / "check.json").read_text(encoding="utf-8"))
-    assert result["native_result"]["verdict"]["variant"] == "PASS"
+    assert result["native_result"]["verdict"] == "PASS"
     assert result["selected_test_identities"] == request["selected_test_identities"]
     assert result["result_identity"] != check["result_identity"]
     assert check["test_result_identity"] == result["result_identity"]

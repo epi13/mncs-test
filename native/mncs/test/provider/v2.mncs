@@ -113,7 +113,7 @@ fn provider_identity() -> (result: [byte; 32]) {
 }
 
 fn interface_identity() -> (result: [byte; 32]) {
-    return [145, 235, 66, 212, 226, 117, 14, 106, 239, 78, 72, 99, 129, 105, 37, 40, 127, 98, 63, 175, 248, 53, 41, 16, 40, 40, 80, 130, 36, 206, 57, 248];
+    return [130, 1, 235, 250, 62, 203, 119, 80, 23, 238, 77, 244, 113, 234, 154, 187, 173, 45, 76, 14, 137, 101, 36, 0, 179, 172, 67, 15, 246, 243, 21, 144];
 }
 
 fn revision_identity() -> (result: [byte; 32]) {
@@ -122,6 +122,20 @@ fn revision_identity() -> (result: [byte; 32]) {
 
 fn check_identity() -> (result: [byte; up_to 256]) {
     return [109, 110, 99, 115, 45, 116, 101, 115, 116, 58, 99, 104, 101, 99, 107];
+}
+
+// Provider-owned schema labels are exported with the provider interface so a
+// consumer cannot silently drift from the provider's artifact boundary.
+fn provider_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn provider_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 114, 101, 115, 117, 108, 116, 47, 49];
+}
+
+fn provider_check_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 99, 104, 101, 99, 107, 47, 49];
 }
 
 fn copy_digest(view: [byte; up_to 64]) -> (result: [byte; 32]) {
@@ -165,6 +179,21 @@ fn duplicate_selection(request: ProviderRequest) -> (result: bool) {
         next duplicate = duplicate || duplicate_with(later, request.selected_test_identities, i);
     }
     return duplicate;
+}
+
+// The provider keeps an execution batch bound of eight for resource reasons,
+// but the family selection contract is wider. Materialize the validated
+// request through the shared bounded builder before dispatch so the provider
+// consumes an owned, deterministic sequence rather than relying on a
+// request-shaped view. The 64-slot staging bound is not an execution limit.
+fn materialize_provider_selection(
+    values: [[byte; up_to 1024]; up_to 8]
+) -> (result: [[byte; up_to 1024]; up_to 64]) {
+    let seed_builder: sequences.ByteViewBuilder64 = sequences.byte_view_builder64_empty();
+    iterate i over values carrying builder: sequences.ByteViewBuilder64 = seed_builder {
+        next builder = sequences.byte_view_builder64_push(builder, values[i], true);
+    }
+    return sequences.byte_view_builder64_finish(builder);
 }
 
 fn verdict_is_fail(value: Verdict) -> (result: bool) {
@@ -237,9 +266,9 @@ fn native_result(accumulator: ProviderAccumulator) -> (result: TestResult) {
     };
 }
 
-fn fold_selected(request: ProviderRequest) -> (result: ProviderAccumulator) {
-    iterate i over request.selected_test_identities carrying accumulator: ProviderAccumulator = empty_accumulator() {
-        next accumulator = observe(accumulator, run_one(request.selected_test_identities[i]));
+fn fold_selected(values: [[byte; up_to 1024]; up_to 64]) -> (result: ProviderAccumulator) {
+    iterate i over values carrying accumulator: ProviderAccumulator = empty_accumulator() {
+        next accumulator = observe(accumulator, run_one(values[i]));
     }
     return accumulator;
 }
@@ -267,7 +296,8 @@ fn run_selected_batch(request: ProviderRequest) -> (result: ProviderRun)
         next known = known && known_identity(request.selected_test_identities[i]);
     }
     let valid: bool = valid_shape && request.selected_test_identities.len > 0 && known;
-    let accumulator: ProviderAccumulator = select(valid, fold_selected(request), invalid_accumulator(request));
+    let selected: [[byte; up_to 1024]; up_to 64] = materialize_provider_selection(request.selected_test_identities);
+    let accumulator: ProviderAccumulator = select(valid, fold_selected(selected), invalid_accumulator(request));
     let selected_result: TestResult = native_result(accumulator);
     let execution_identity: [byte; 32] = copy_digest(structured_digest(ProviderExecutionMaterial {
         inventory_identity: request.inventory_identity,
@@ -340,13 +370,10 @@ fn provider_batch_app(context: ApplicationContext) -> (result: ApplicationExit)
     if !context_is_bounded(context) || context.argv_count < 3 {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 112, 114, 111, 118, 105, 100, 101, 114, 32, 97, 114, 103, 115], 2);
     }
-    let request_schema: [byte; up_to 64] = [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
-    let result_schema: [byte; up_to 64] = [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 114, 101, 115, 117, 108, 116, 47, 49];
-    let check_schema: [byte; up_to 64] = [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 99, 104, 101, 99, 107, 47, 49];
-    let request: ProviderRequest = structured_read(context.argv[0], request_schema);
+    let request: ProviderRequest = structured_read(context.argv[0], provider_request_schema());
     let run: ProviderRun = run_selected_batch(request);
-    let published_result: u64 = structured_write(context.argv[1], result_schema, run.test_result);
-    let published_check: u64 = structured_write(context.argv[2], check_schema, run.check_result);
+    let published_result: u64 = structured_write(context.argv[1], provider_result_schema(), run.test_result);
+    let published_check: u64 = structured_write(context.argv[2], provider_check_schema(), run.check_result);
     if published_result == 0 || published_check == 0 {
         return failure([112, 114, 111, 118, 105, 100, 101, 114, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
     }
