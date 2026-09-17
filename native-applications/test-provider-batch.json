@@ -5,7 +5,7 @@
   "module": "mncs.test.provider.v2",
   "entry_function": "provider_batch_app",
   "profile": "0.18",
-  "interface_identity": "38bf9a1325913cee5db180f3f6ba446314b7f1cdb3d62b095eab0e58ae5e0a23",
+  "interface_identity": "91eb42d4e2750e6aef4e4863816925287f623faff83529102828508224ce39f8",
   "libraries": [
     "../../mncs-language/library",
     "../native",

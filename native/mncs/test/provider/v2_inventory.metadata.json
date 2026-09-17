@@ -1,0 +1,15 @@
+{
+  "generator": "mncs-test:provider-generator:v2-inventory/1",
+  "input": {
+    "inventory_identity": "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
+    "source": "tests/self_suite.mncs",
+    "source_artifact_identity": "mncs:source:artifact:13db237e2e5743a1348f215aed3ced3788618c6a0dc1f698d5431d58dee4d1ca"
+  },
+  "output": {
+    "path": "native/mncs/test/provider/v2_inventory.mncs",
+    "source_sha256": "2b61331308fdb70afe82e6633031786ae5bbb3e43929832f8ff14a854b586389"
+  },
+  "provider_policy_identity": "59928ae4bfba4e50320cee851720a9adeb9add2829d3491fd1eba410424d2d43",
+  "provider_revision_identity": "50d30d6cd6a5df4d20151672fe6dac1dbb99b9ddd99a30bb0f459dc679e2b0c2",
+  "schema_version": "mncs-test.generated-provider/v2"
+}

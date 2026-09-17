@@ -5,7 +5,8 @@
   "canonical_entrypoint": "mncs test",
   "native_sources": {
     "mncs-test.toml": "tests/self_suite.mncs",
-    "mncs-test-provider": "native/mncs/test/provider/v2.mncs"
+    "mncs-test-provider": "native/mncs/test/provider/v2.mncs",
+    "mncs-test-provider-generated-inventory": "native/mncs/test/provider/v2_inventory.mncs"
   },
   "native_application_descriptors": {
     "mncs-test-provider": "native-applications/test-provider-batch.json"
@@ -41,6 +42,11 @@
       "path": "tools/generate_family_verification_checks.py",
       "role": "external_metadata_generation_utility",
       "canonical": false
+    },
+    {
+      "path": "tools/generate_provider_v2.py",
+      "role": "compiler_inventory_bound_native_source_generator",
+      "canonical": false
     }
   ],
   "host_fallback": {
@@ -66,6 +72,8 @@
     "verification_plan_ingestion": "native_structured_document_and_exact_inventory_join",
     "provider_interface": "mncs.test.provider.v2::run_selected_batch",
     "provider_selection_bound": 8,
-    "provider_inventory_binding": "compiler-generated test identities and inventory identity"
+    "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
+    "provider_inventory_binding": "compiler test-inventory → generated native dispatch module and checked metadata",
+    "provider_revision_binding": "inventory identity + compiler source artifact identity + provider policy identity + generator identity"
   }
 }
