@@ -5,10 +5,10 @@
   "canonical_entrypoint": "mncs test",
   "native_sources": {
     "mncs-test.toml": "tests/self_suite.mncs",
-    "mncs-test-provider": "native/mncs/test/provider/v1.mncs"
+    "mncs-test-provider": "native/mncs/test/provider/v2.mncs"
   },
   "native_application_descriptors": {
-    "mncs-test-provider": "native-applications/test-provider.json"
+    "mncs-test-provider": "native-applications/test-provider-batch.json"
   },
   "canonical_launcher": "bin/mncs-test",
   "semantic_modules": [
@@ -63,6 +63,9 @@
     ],
     "host_subprocesses_per_native_test": 0,
     "python_runner_calls": 0,
-    "verification_plan_ingestion": "native_structured_document_and_exact_inventory_join"
+    "verification_plan_ingestion": "native_structured_document_and_exact_inventory_join",
+    "provider_interface": "mncs.test.provider.v2::run_selected_batch",
+    "provider_selection_bound": 8,
+    "provider_inventory_binding": "compiler-generated test identities and inventory identity"
   }
 }
