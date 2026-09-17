@@ -5,6 +5,6 @@
     "mncs:0.2:test-case:tests.self_suite::not_in_inventory::0000000000000000000000000000000000000000000000000000000000000000"
   ],
   "selection_count": 1,
-  "interface_identity": "38bf9a1325913cee5db180f3f6ba446314b7f1cdb3d62b095eab0e58ae5e0a23",
-  "provider_revision_identity": "b5e5ef8c58ecf76ce0b36ee7ab636a9300b24f4c930d7d2f6f8ed7412198a265"
+  "interface_identity": "91eb42d4e2750e6aef4e4863816925287f623faff83529102828508224ce39f8",
+  "provider_revision_identity": "50d30d6cd6a5df4d20151672fe6dac1dbb99b9ddd99a30bb0f459dc679e2b0c2"
 }
