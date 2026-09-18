@@ -20,10 +20,10 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATED_SOURCE = ROOT / "native/mncs/test/provider/v2_inventory.mncs"
-GENERATED_METADATA = ROOT / "native/mncs/test/provider/v2_inventory.metadata.json"
-PROVIDER_SOURCE = ROOT / "native/mncs/test/provider/v2.mncs"
-GENERATOR_IDENTITY = "mncs-test:provider-generator:v2-inventory/1"
+GENERATED_SOURCE = ROOT / "native/mncs/test/provider_inventory.mncs"
+GENERATED_METADATA = ROOT / "native/mncs/test/provider_inventory.metadata.json"
+PROVIDER_SOURCE = ROOT / "native/mncs/test/provider.mncs"
+GENERATOR_IDENTITY = "mncs-test:provider-generator:inventory/1"
 
 
 def compact_json(value: object) -> bytes:
@@ -122,11 +122,11 @@ def generate_source(inventory: dict[str, object], identity: str, revision: str) 
         f"// generator: {GENERATOR_IDENTITY}",
         f"// compiler inventory identity: {identity}",
         f"// provider revision identity: {revision}",
-        "// source: tests/self_suite.mncs; regenerate with tools/generate_provider_v2.py",
-        "module mncs.test.provider.v2_inventory;",
+        "// source: tests/self_suite.mncs; regenerate with tools/generate_provider.py",
+        "module mncs.test.provider_inventory;",
         "",
         "use mncs.core.sequences.v1 as sequences;",
-        "use mncs.test.assertions.v1;",
+        "use mncs.test.assertions;",
         "use tests.self_suite;",
         "",
         "fn inventory_identity() -> (result: [byte; 32]) {",
@@ -191,29 +191,11 @@ def replace_simple_function(source: str, name: str, replacement: str) -> str:
 
 
 def update_provider_source(source: str) -> str:
-    source = source.replace(
-        "// The compiler owns the inventory and its identities. This module is the\n"
-        "// generated/bound dispatch surface for that inventory; Actions supplies only\n"
-        "// a typed bounded selection and never names a host function or a nearby test.\n"
-        "// Compiler inventory identity: f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db\n"
-        "// Bound test identities are compiler inventory output:\n"
-        "// mncs:0.2:test-case:tests.self_suite::arithmetic::f678e5ec3041e45e78e5ebefe4e87172fd2fbdd385846a2641a8e9cfd212b911\n"
-        "// mncs:0.2:test-case:tests.self_suite::boolean::aed88ee42cd04283f1a415c36c95a3ef6e1db7c20cc63d6b7b28104f90f28500\n"
-        "// mncs:0.2:test-case:tests.self_suite::native_runner_policy::a182f0bf43d22cd641fd735631b9580da645cdd8760b030c422095944e02c2e4\n"
-        "// mncs:0.2:test-case:tests.self_suite::property_replay::53a735b2f4e53cc0371ebab68a1ff986254356d4b60fbcdea6829c94e1d9213c\n"
-        "// mncs:0.2:test-case:tests.self_suite::skipped::5a80bc02aaf043e5158f6bb89b1a779c18fdf0fd1fec366f31902a2c2e487759\n"
-        "// mncs:0.2:test-case:tests.self_suite::snapshot_witness::1b56036ec6b10b5bbeffa0ce8074815673c9b18b79ea2a5609a4ca3af3caf9a7\n"
-        "// mncs:0.2:test-case:tests.self_suite::task_lifecycle::acd1365f993616c64578e506fc793f07297b9049c77a9a1f0a3c3da188892dae\n",
-        "// Compiler inventory dispatch is generated into v2_inventory.mncs.\n"
-        "// Actions supplies only a typed bounded selection and never names a\n"
-        "// host function or a nearby test.\n",
-    )
-    source = source.replace("use tests.self_suite;\n", "")
-    if "use mncs.test.provider.v2_inventory as generated;" not in source:
+    if "use mncs.test.provider_inventory as generated;" not in source:
         source = source.replace(
             "use mncs.core.sequences.v1 as sequences;\n",
             "use mncs.core.sequences.v1 as sequences;\n"
-            "use mncs.test.provider.v2_inventory as generated;\n",
+            "use mncs.test.provider_inventory as generated;\n",
             1,
         )
     source = replace_simple_function(
@@ -262,7 +244,7 @@ def main() -> int:
     revision = revision_identity(inventory, identity, policy_identity)
     generated = generate_source(inventory, identity, revision)
     metadata = {
-        "schema_version": "mncs-test.generated-provider/v2",
+        "schema_version": "mncs-test.generated-provider/1",
         "generator": GENERATOR_IDENTITY,
         "input": {
             "source": str(args.source),
@@ -278,12 +260,12 @@ def main() -> int:
     }
     if args.check:
         if GENERATED_SOURCE.read_text(encoding="utf-8") != generated:
-            raise SystemExit("generated provider inventory source is stale; run generate_provider_v2.py")
+            raise SystemExit("generated provider inventory source is stale; run generate_provider.py")
         if json.loads(GENERATED_METADATA.read_text(encoding="utf-8")) != metadata:
             raise SystemExit("generated provider inventory metadata is stale")
         provider = PROVIDER_SOURCE.read_text(encoding="utf-8")
-        if "use mncs.test.provider.v2_inventory as generated;" not in provider:
-            raise SystemExit("provider v2 is not bound to generated inventory dispatch")
+        if "use mncs.test.provider_inventory as generated;" not in provider:
+            raise SystemExit("provider is not bound to generated inventory dispatch")
     else:
         GENERATED_SOURCE.write_text(generated, encoding="utf-8")
         GENERATED_METADATA.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")

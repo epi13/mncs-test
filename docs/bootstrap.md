@@ -17,7 +17,7 @@ trust chain is:
 The meaningful semantic core in this repository is MNCS. Python does not
 choose property inputs, evaluate predicates, or translate an assertion into
 PASS. For first-class runtime tests it carries the returned native values
-through `mncs.test.suite.v1::empty` and `observe` in the retained session;
+through `mncs.test.suite::empty` and `observe` in the retained session;
 the native module folds suite results. JSON/TOML, OS process supervision, and
 the external structured transport remain platform boundaries.
 

@@ -150,7 +150,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["execution"]["mode"], "retained-embed-batch")
             self.assertEqual(
                 document["execution"]["native_aggregation"]["authority"],
-                "mncs.test.suite.v1",
+                "mncs.test.suite",
             )
             self.assertEqual(document["execution"]["native_aggregation"]["calls"], 8)
             self.assertEqual(document["native_suite_summary"]["total"], 7)
@@ -232,7 +232,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],
-            "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
+            "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -271,7 +271,7 @@ class RunnerTests(unittest.TestCase):
             response["execution"]["test_case_identities"],
             [
                 "mncs:0.2:test-case:tests.self_suite::task_lifecycle::"
-                "acd1365f993616c64578e506fc793f07297b9049c77a9a1f0a3c3da188892dae"
+                "b1ac42033bff08ddd2bdcbf98e5ff268458922c58a1f69a036906afe56734f75"
             ],
         )
 

@@ -2,8 +2,8 @@ mncs 0.17;
 
 module tests.first_class_failing;
 
-use mncs.test.assertions.v1;
-use mncs.test.suite.v1;
+use mncs.test.assertions;
+use mncs.test.suite;
 
 test failing_assertion() -> (result: TestResult) {
     return from_assertion(equals_i64(7, 6, 2001));

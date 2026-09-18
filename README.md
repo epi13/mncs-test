@@ -53,8 +53,8 @@ Runtime tests use the first-class declaration directly:
 mncs 0.17;
 module examples.addition_tests;
 
-use mncs.test.assertions.v1;
-use mncs.test.suite.v1;
+use mncs.test.assertions;
+use mncs.test.suite;
 
 test addition_is_stable() -> (result: TestResult) {
     return from_assertion(equals_i64(42, 19 +% 23, 1001));
@@ -70,13 +70,13 @@ adapter.
 
 The native modules are:
 
-- `mncs.test.assertions.v1`: typed assertions, verdicts, failure kinds, and
+- `mncs.test.assertions`: typed assertions, verdicts, failure kinds, and
   structured expected/actual values;
-- `mncs.test.suite.v1`: deterministic bounded aggregation with category
+- `mncs.test.suite`: deterministic bounded aggregation with category
   counters;
-- `mncs.test.generative.v1`: pure deterministic bounded generation, replay,
+- `mncs.test.generative`: pure deterministic bounded generation, replay,
   and a shrink direction;
-- `mncs.test.snapshot.v1`: native bounded witness/checksum comparison.
+- `mncs.test.snapshot`: native bounded witness/checksum comparison.
 
 ## Commands
 
@@ -138,7 +138,7 @@ being nested into every check or receipt.
 
 For the first-class path, each returned `TestResult` is the native oracle
 evaluation for one compiler-inventoried test. The adapter carries those typed
-values through `mncs.test.suite.v1::empty` and `observe` in the same retained
+values through `mncs.test.suite::empty` and `observe` in the same retained
 session; it does not fold assertions or recompute a native verdict. The
 result's `summary.authority` is `native_suite` for this path. Legacy adapter
 projections remain only for compatibility manifests and external failures.

@@ -9,8 +9,8 @@ test.
 mncs 0.17;
 module examples.addition_tests;
 
-use mncs.test.assertions.v1;
-use mncs.test.suite.v1;
+use mncs.test.assertions;
+use mncs.test.suite;
 
 test addition_is_stable() -> (result: TestResult) {
     return from_assertion(equals_i64(12, 5 +% 7, 4101));
@@ -39,7 +39,7 @@ The compiler inventory supplies the stable declaration/test-case identities,
 source span, signature, effects, capabilities, and production subject
 identity. The Rust toolchain adds selection, execution, result formatting, and
 evidence transport around native module calls. It folds returned `TestResult`
-values through the native `mncs.test.suite.v1` module in the retained
+values through the native `mncs.test.suite` module in the retained
 session. Python remains only an explicit compatibility/oracle path. Use
 `equals_i64`,
 `equals_bool`, and bounded byte

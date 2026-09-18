@@ -1,15 +1,15 @@
 mncs 0.16;
 
-// mncs.test.suite.v1 — deterministic native aggregation.
+// mncs.test.suite — deterministic native aggregation.
 //
 // A suite is a bounded sequence of TestResult values.  Aggregation is kept
 // in MNCS so the semantic verdict is not reimplemented by Python, shell, or
 // a CI action.  The host adapter may check that its transport projection
 // agrees with this returned record, but it never recomputes the verdict from
 // individual assertions.
-module mncs.test.suite.v1;
+module mncs.test.suite;
 
-use mncs.test.assertions.v1;
+use mncs.test.assertions;
 
 record SuiteSummary {
     verdict: Verdict,

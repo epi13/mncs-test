@@ -3,9 +3,9 @@ mncs 0.18;
 // A bounded provider implementation used by the real failure-lineage path.
 // It is intentionally small: the provider owns a typed FAIL result, while
 // Actions and Debug remain unaware of its implementation.
-module mncs.test.provider_failure.v1;
+module mncs.test.provider_failure;
 
-use mncs.test.assertions.v1;
+use mncs.test.assertions;
 use mncs.test.provider_protocol.v1 as protocol;
 
 record ProviderExecutionMaterial {
@@ -27,7 +27,7 @@ fn provider_identity() -> (result: [byte; 32]) {
 }
 
 fn interface_identity() -> (result: [byte; 32]) {
-    return [248, 196, 234, 203, 185, 248, 169, 177, 32, 192, 38, 54, 172, 38, 246, 123, 224, 40, 155, 254, 62, 119, 15, 151, 61, 80, 110, 132, 161, 143, 209, 87];
+    return [235, 205, 155, 155, 66, 29, 151, 66, 4, 243, 251, 241, 112, 237, 123, 225, 140, 46, 198, 234, 101, 83, 23, 178, 244, 226, 92, 242, 115, 98, 244, 214];
 }
 
 fn revision_identity() -> (result: [byte; 32]) {

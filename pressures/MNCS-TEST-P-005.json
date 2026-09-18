@@ -13,7 +13,7 @@
   "disposition": "contained",
   "workaround": "Compiler inventory supplies static declarations; native assertion/property/snapshot modules remain explicit and advanced callback features stay constrained rather than synthesized through a host registry.",
   "status": "open",
-  "relevant_files": ["native/mncs/test/assertions/v1.mncs", "native/mncs/test/suite/v1.mncs", "tests/self_suite.mncs", "mncs-test.toml"],
+  "relevant_files": ["native/mncs/test/assertions.mncs", "native/mncs/test/suite.mncs", "tests/self_suite.mncs", "mncs-test.toml"],
   "relevant_tests": ["tests/test_runner.py::test_self_suite", "tests/test_runner.py::test_compiler_inventory_discovery"],
   "relevant_commits": ["mncs-test:b170470", "mncs-test:e396217", "mncs-language:ea5e594"],
   "commons_observations": ["MNCS-LANG-770B42F56E6C--OBS-3FA64B8381FC", "MNCS-LANG-770B42F56E6C--OBS-BB06009097B5"]

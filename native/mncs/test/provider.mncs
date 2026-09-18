@@ -1,16 +1,16 @@
 mncs 0.18;
 
-// mncs.test.provider.v2 — production typed provider boundary.
+// mncs.test.provider — production typed provider boundary.
 //
-// Compiler inventory dispatch is generated into v2_inventory.mncs.
+// Compiler inventory dispatch is generated into provider_inventory.mncs.
 // Actions supplies only a typed bounded selection and never names a
 // host function or a nearby test.
-module mncs.test.provider.v2;
+module mncs.test.provider;
 
-use mncs.test.assertions.v1;
+use mncs.test.assertions;
 use mncs.test.provider_protocol.v1 as protocol;
 use mncs.core.sequences.v1 as sequences;
-use mncs.test.provider.v2_inventory as generated;
+use mncs.test.provider_inventory as generated;
 use mncs.std.application.v1;
 
 record ProviderExecutionMaterial {
@@ -48,7 +48,7 @@ fn provider_identity() -> (result: [byte; 32]) {
 }
 
 fn interface_identity() -> (result: [byte; 32]) {
-    return [5, 42, 22, 169, 138, 85, 229, 86, 155, 67, 181, 63, 215, 22, 222, 186, 14, 140, 217, 134, 193, 35, 128, 75, 21, 196, 32, 131, 7, 255, 114, 234];
+    return [223, 95, 103, 95, 199, 47, 56, 136, 224, 176, 84, 205, 227, 245, 220, 15, 45, 42, 191, 29, 18, 111, 18, 150, 42, 41, 220, 79, 240, 84, 36, 179];
 }
 
 fn revision_identity() -> (result: [byte; 32]) {

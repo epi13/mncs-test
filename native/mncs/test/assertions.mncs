@@ -1,6 +1,6 @@
 mncs 0.16;
 
-// mncs.test.assertions.v1 — the semantic core of mncs-test assertions.
+// mncs.test.assertions — the semantic core of mncs-test assertions.
 //
 // Assertions are ordinary MNCS values.  They do not print, throw, inspect
 // host state, or decide a process exit code.  A test program constructs an
@@ -13,7 +13,7 @@ mncs 0.16;
 // identity, but does not yet expose the source variant spelling at the
 // process boundary.  The codes make this first consumer protocol explicit
 // and stable while retaining the typed MNCS value internally.
-module mncs.test.assertions.v1;
+module mncs.test.assertions;
 
 enum Verdict { PASS, FAIL, SKIP, UNSUPPORTED }
 enum FailureKind { NoFailure, Assertion, Setup, Compile, Runtime, Timeout, Unsupported, Infrastructure }

@@ -1,16 +1,19 @@
 {
   "schema_version": "mncs.native-application/1",
   "application_identity": "mncs-test.provider",
-  "source": "../native/mncs/test/provider/v1.mncs",
-  "module": "mncs.test.provider.v1",
-  "entry_function": "provider_app",
+  "source": "../native/mncs/test/provider.mncs",
+  "module": "mncs.test.provider",
+  "entry_function": "provider_batch_app",
   "profile": "0.18",
-  "interface_identity": "052a16a98a55e5569b43b53fd716deba0e8cd986c123804b15c4208307ff72ea",
+  "interface_identity": "df5f675fc72f3888e0b054cde3f5dc0f2d2abf1d126f12962a29dc4ff05424b3",
   "libraries": [
     "../../mncs-language/library",
     "../native",
     ".."
   ],
   "environment_keys": [],
-  "required_capabilities": []
+  "required_capabilities": [
+    "provider_artifact",
+    "provider_digest"
+  ]
 }

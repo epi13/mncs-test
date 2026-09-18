@@ -1,6 +1,6 @@
 mncs 0.16;
 
-// mncs.test.snapshot.v1 — a deterministic witness model.
+// mncs.test.snapshot — a deterministic witness model.
 //
 // Snapshot publication is intentionally not automatic.  A caller computes
 // a bounded witness from MNCS values and the host adapter compares the
@@ -8,7 +8,7 @@ mncs 0.16;
 // length and a simple weighted checksum; stronger content digests can be
 // composed with mncs.std.sha256.v1 when a suite has the required bounded
 // byte representation.
-module mncs.test.snapshot.v1;
+module mncs.test.snapshot;
 
 record Witness {
     length: u64,

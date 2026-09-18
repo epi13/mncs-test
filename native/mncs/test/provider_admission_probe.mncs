@@ -3,10 +3,10 @@ mncs 0.18;
 // Focused runtime dogfood for the generic authoritative provider boundary.
 // The provider is selected by its descriptor and admitted into this native
 // application session; this source contains no concrete provider import.
-module mncs.test.provider_admission_probe.v1;
+module mncs.test.provider_admission_probe;
 
 use mncs.std.application.v1;
-use mncs.test.assertions.v1;
+use mncs.test.assertions;
 use mncs.test.provider_protocol.v1 as protocol;
 
 fn provider_admission_probe_app(context: ApplicationContext) -> (result: ApplicationExit)
@@ -21,7 +21,7 @@ fn provider_admission_probe_app(context: ApplicationContext) -> (result: Applica
         inventory_identity: [245, 194, 197, 102, 75, 36, 226, 126, 253, 190, 95, 78, 120, 172, 136, 142, 150, 101, 91, 85, 6, 49, 248, 177, 156, 170, 151, 49, 145, 39, 21, 219],
         selected_test_identities: empty_selection,
         selection_count: 0,
-        interface_identity: [5, 159, 9, 203, 198, 71, 245, 98, 214, 104, 233, 160, 25, 93, 201, 86, 137, 250, 129, 244, 21, 185, 158, 54, 244, 143, 45, 25, 23, 28, 72, 245],
+        interface_identity: [78, 29, 255, 41, 102, 214, 36, 71, 184, 100, 252, 235, 203, 210, 103, 202, 81, 0, 95, 201, 102, 211, 150, 134, 208, 95, 214, 178, 149, 19, 41, 34],
         provider_revision_identity: [132, 219, 32, 242, 198, 128, 171, 25, 56, 71, 146, 40, 126, 35, 146, 151, 221, 32, 119, 111, 74, 43, 158, 52, 181, 88, 89, 115, 218, 219, 15, 0]
     };
     let run: protocol.ProviderRun = provider_call(provider_id, request);

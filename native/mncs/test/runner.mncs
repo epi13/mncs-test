@@ -1,12 +1,12 @@
 mncs 0.16;
 
-// mncs.test.runner.v1 — the canonical execution-policy vocabulary.
+// mncs.test.runner — the canonical execution-policy vocabulary.
 //
 // The compiler/runtime remains the trusted bootstrap implementation, but a
 // test application must be able to state its lifecycle in MNCS.  This module
 // makes the native path and its no-fallback rule data, rather than an
 // undocumented convention in a host launcher.
-module mncs.test.runner.v1;
+module mncs.test.runner;
 
 enum ExecutionMode { NativeCanonical, NativeShadow, HostCompatibility }
 

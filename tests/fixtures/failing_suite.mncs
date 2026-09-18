@@ -2,8 +2,8 @@ mncs 0.16;
 
 module tests.fixtures.failing_suite;
 
-use mncs.test.assertions.v1;
-use mncs.test.suite.v1;
+use mncs.test.assertions;
+use mncs.test.suite;
 
 fn failing_assertion() -> (result: TestResult) {
     return from_assertion(equals_i64(7, 6, 9001));

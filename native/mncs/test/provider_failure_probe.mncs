@@ -3,10 +3,10 @@ mncs 0.18;
 // Second-provider dogfood: the generic runtime admits this provider through
 // the same nominal protocol, while this consumer remains independent of its
 // implementation module.
-module mncs.test.provider_failure_probe.v1;
+module mncs.test.provider_failure_probe;
 
 use mncs.std.application.v1;
-use mncs.test.assertions.v1;
+use mncs.test.assertions;
 use mncs.test.provider_protocol.v1 as protocol;
 
 fn provider_failure_probe_app(context: ApplicationContext) -> (result: ApplicationExit)
@@ -21,7 +21,7 @@ fn provider_failure_probe_app(context: ApplicationContext) -> (result: Applicati
         inventory_identity: [204; 32],
         selected_test_identities: empty_selection,
         selection_count: 0,
-        interface_identity: [248, 196, 234, 203, 185, 248, 169, 177, 32, 192, 38, 54, 172, 38, 246, 123, 224, 40, 155, 254, 62, 119, 15, 151, 61, 80, 110, 132, 161, 143, 209, 87],
+        interface_identity: [44, 47, 153, 233, 71, 126, 85, 223, 11, 29, 157, 30, 65, 82, 21, 68, 83, 207, 23, 125, 84, 199, 123, 30, 119, 42, 18, 202, 175, 189, 65, 138],
         provider_revision_identity: [187; 32]
     };
     let run: protocol.ProviderRun = provider_call(provider_id, request);

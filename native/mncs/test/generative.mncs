@@ -1,13 +1,13 @@
 mncs 0.16;
 
-// mncs.test.generative.v1 — deterministic bounded property-test substrate.
+// mncs.test.generative — deterministic bounded property-test substrate.
 //
 // The generator is deliberately a pure MNCS value stream.  It shares the
 // MMIX LCG constants used by mncs-language's conformance tooling, records
 // every seed/case index, and exposes a simple shrink direction.  The
 // external adapter supplies no generated values and evaluates no property;
 // it only launches the compiled property entrypoint with an explicit seed.
-module mncs.test.generative.v1;
+module mncs.test.generative;
 
 record PropertyCase {
     seed: u64,

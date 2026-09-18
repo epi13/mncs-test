@@ -9,9 +9,9 @@
       "surface": "compiler-inventory-to-runner",
       "selector": {
         "manifest": "mncs-test.toml",
-        "inventory_identity": "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
+        "inventory_identity": "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
         "test_identities": [
-          "mncs:0.2:test-case:tests.self_suite::task_lifecycle::acd1365f993616c64578e506fc793f07297b9049c77a9a1f0a3c3da188892dae"
+          "mncs:0.2:test-case:tests.self_suite::task_lifecycle::b1ac42033bff08ddd2bdcbf98e5ff268458922c58a1f69a036906afe56734f75"
         ]
       }
     },
@@ -22,10 +22,10 @@
       "surface": "selected-consumer-behavior",
       "selector": {
         "manifest": "mncs-test.toml",
-        "inventory_identity": "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
+        "inventory_identity": "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
         "test_identities": [
-          "mncs:0.2:test-case:tests.self_suite::arithmetic::f678e5ec3041e45e78e5ebefe4e87172fd2fbdd385846a2641a8e9cfd212b911",
-          "mncs:0.2:test-case:tests.self_suite::boolean::aed88ee42cd04283f1a415c36c95a3ef6e1db7c20cc63d6b7b28104f90f28500"
+          "mncs:0.2:test-case:tests.self_suite::arithmetic::ca0c84b11bb187d84ef7dc2af5bc784c917fde67c036c9affeeea5a72d50a2fb",
+          "mncs:0.2:test-case:tests.self_suite::boolean::d0ba630684abae18f3c11b74c7a3340691d19fec4bae2e5f6bc4df1c1f5eb82b"
         ]
       }
     }

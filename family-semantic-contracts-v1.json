@@ -7,7 +7,7 @@
       "contract_identity": "mncs.test-result/1",
       "contract_revision": "1",
       "exported_identity": "mncs-test:test-result",
-      "evidence": "native/mncs/test/suite/v1.mncs",
+      "evidence": "native/mncs/test/suite.mncs",
       "canonical_entrypoint": "mncs test",
       "status": "native_canonical"
     }

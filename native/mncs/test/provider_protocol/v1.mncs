@@ -6,7 +6,7 @@ mncs 0.18;
 // provider module.
 module mncs.test.provider_protocol.v1;
 
-use mncs.test.assertions.v1;
+use mncs.test.assertions;
 
 record ProviderRequest {
     inventory_identity: [byte; 32],

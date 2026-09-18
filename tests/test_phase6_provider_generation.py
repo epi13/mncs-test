@@ -63,7 +63,7 @@ def test_native_provider_dispatches_inventory_test_and_separates_check_identity(
             [
                 str(MNCS),
                 "run-app",
-                str(ROOT / "native-applications/test-provider-batch.json"),
+                str(ROOT / "native-applications/test-provider.json"),
                 "--grant-structured",
                 "provider_artifact",
                 "--grant-structured",
@@ -91,7 +91,7 @@ def test_native_provider_dispatches_inventory_test_and_separates_check_identity(
 
 def test_native_application_refuses_mismatched_interface_descriptor() -> None:
     descriptor = json.loads(
-        (ROOT / "native-applications/test-provider-batch.json").read_text(
+        (ROOT / "native-applications/test-provider.json").read_text(
             encoding="utf-8"
         )
     )

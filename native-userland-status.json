@@ -5,19 +5,19 @@
   "canonical_entrypoint": "mncs test",
   "native_sources": {
     "mncs-test.toml": "tests/self_suite.mncs",
-    "mncs-test-provider": "native/mncs/test/provider/v2.mncs",
-    "mncs-test-provider-generated-inventory": "native/mncs/test/provider/v2_inventory.mncs"
+    "mncs-test-provider": "native/mncs/test/provider.mncs",
+    "mncs-test-provider-generated-inventory": "native/mncs/test/provider_inventory.mncs"
   },
   "native_application_descriptors": {
-    "mncs-test-provider": "native-applications/test-provider-batch.json"
+    "mncs-test-provider": "native-applications/test-provider.json"
   },
   "canonical_launcher": "bin/mncs-test",
   "semantic_modules": [
-    "native/mncs/test/assertions/v1.mncs",
-    "native/mncs/test/generative/v1.mncs",
-    "native/mncs/test/runner/v1.mncs",
-    "native/mncs/test/snapshot/v1.mncs",
-    "native/mncs/test/suite/v1.mncs"
+      "native/mncs/test/assertions.mncs",
+      "native/mncs/test/generative.mncs",
+      "native/mncs/test/runner.mncs",
+      "native/mncs/test/snapshot.mncs",
+      "native/mncs/test/suite.mncs"
   ],
   "trusted_bootstrap": [
     "Rust MNCS compiler/runtime/toolchain"
@@ -44,7 +44,7 @@
       "canonical": false
     },
     {
-      "path": "tools/generate_provider_v2.py",
+      "path": "tools/generate_provider.py",
       "role": "compiler_inventory_bound_native_source_generator",
       "canonical": false
     }
@@ -59,8 +59,8 @@
     "compiler_owned_backend_artifact": true,
     "retained_embed_session": true,
     "native_semantic_projections": [
-      "mncs.test.assertions.v1.project_test",
-      "mncs.test.suite.v1.project"
+      "mncs.test.assertions.project_test",
+      "mncs.test.suite.project"
     ],
     "remaining_rust_application_projection": [
       "external TestResult JSON envelope",
@@ -70,7 +70,7 @@
     "host_subprocesses_per_native_test": 0,
     "python_runner_calls": 0,
     "verification_plan_ingestion": "native_structured_document_and_exact_inventory_join",
-    "provider_interface": "mncs.test.provider.v2::run_selected_batch",
+  "provider_interface": "mncs.test.provider::run_selected_batch",
     "provider_selection_bound": 8,
     "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
     "provider_inventory_binding": "compiler test-inventory → generated native dispatch module and checked metadata",

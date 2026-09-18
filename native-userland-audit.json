@@ -10,8 +10,8 @@
     "retained-session suite aggregation"
   ],
   "native_semantic_projection": {
-    "test": "mncs.test.assertions.v1.project_test",
-    "suite": "mncs.test.suite.v1.project",
+    "test": "mncs.test.assertions.project_test",
+    "suite": "mncs.test.suite.project",
     "rust_boundary_only": [
       "external TestResult JSON envelope",
       "external CheckResult compatibility envelope",
@@ -30,7 +30,7 @@
     {"area": "manifest parsing", "classification": "test_oracle_tooling", "canonical_owner": "tools/mncs_test.py compatibility adapter"},
     {"area": "source discovery and compiler inventory", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "Rust toolchain compiler API"},
     {"area": "exact test identity selection", "classification": "compiler_inventory_bootstrap_with_native_plan_admission", "canonical_owner": "mncs test entrypoint and compiler-owned inventory"},
-    {"area": "TestResult construction and failure classification", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "mncs.test.assertions.v1 and mncs.test.suite.v1"},
+    {"area": "TestResult construction and failure classification", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "mncs.test.assertions and mncs.test.suite"},
     {"area": "CheckResult semantic inputs", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "native suite projection; Rust retains only external compatibility envelope"},
     {"area": "compiler invocation", "classification": "compiler_owned_typed_api", "canonical_owner": "Rust bootstrap toolchain"},
     {"area": "test function execution and suite aggregation", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "retained MNCS runtime session"},

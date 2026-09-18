@@ -16,7 +16,7 @@ def main() -> int:
     parser.add_argument("--source", type=Path, default=Path("tests/self_suite.mncs"))
     parser.add_argument("--library", action="append", type=Path, default=[])
     args = parser.parse_args()
-    generator = Path(__file__).with_name("generate_provider_v2.py")
+    generator = Path(__file__).with_name("generate_provider.py")
     completed = subprocess.run(
         [
             sys.executable,

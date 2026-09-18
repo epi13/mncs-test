@@ -1,11 +1,11 @@
 {
   "schema_version": "mncs.native-application/1",
   "application_identity": "mncs-test.provider-failure-probe",
-  "source": "../native/mncs/test/provider_failure_probe/v1.mncs",
-  "module": "mncs.test.provider_failure_probe.v1",
+  "source": "../native/mncs/test/provider_failure_probe.mncs",
+  "module": "mncs.test.provider_failure_probe",
   "entry_function": "provider_failure_probe_app",
   "profile": "0.18",
-  "interface_identity": "006de40ba39f2a93367f20c5a1ae1a62bca3d53709c35ce80d46d2b11002e52f",
+  "interface_identity": "2c2f99e9477e55df0b1d9d1e4152154453cf177d54c77b1e772a12caafbd418a",
   "libraries": [
     "../../mncs-language/library",
     "../native",

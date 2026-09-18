@@ -29,7 +29,7 @@ boundaries that are not test semantics:
 
 The adapter receives a native result, validates its shape, and carries it
 forward. A first-class test's returned verdict is the native oracle evaluation;
-the adapter carries those values through `mncs.test.suite.v1::empty` and
+the adapter carries those values through `mncs.test.suite::empty` and
 `observe` in the retained session, so the native `SuiteSummary` remains the
 summary authority. Legacy adapter projections remain only for compatibility
 manifests and external failures.
@@ -61,7 +61,7 @@ For a first-class source, `mncs test` obtains `mncs.test-inventory/1` from the
 compiler front end, compiles once with tests included, opens one verified
 `mncs-embed` Session, and sends the selected calls through that retained
 session. Each returned value remains a distinct execution observation. The
-toolchain then calls native `mncs.test.suite.v1::empty`/`observe` through the
+toolchain then calls native `mncs.test.suite::empty`/`observe` through the
 same session to obtain the semantic summary. If the native toolchain is not
 available, the command fails closed. A legacy manifest retains its behavior
 only through `bin/mncs-test-compat`.

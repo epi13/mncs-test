@@ -1395,7 +1395,7 @@ def native_suite_fold(
 
     if not test_results:
         return None, {
-            "authority": "mncs.test.suite.v1",
+            "authority": "mncs.test.suite",
             "status": "not_run",
             "reason": "no selected first-class test results",
         }
@@ -1403,7 +1403,7 @@ def native_suite_fold(
     for index, item in enumerate(test_results):
         if item.get("execution_status") != "returned":
             return None, {
-                "authority": "mncs.test.suite.v1",
+                "authority": "mncs.test.suite",
                 "status": "unavailable",
                 "reason": f"test result {index} did not return a native TestResult value",
             }
@@ -1411,7 +1411,7 @@ def native_suite_fold(
         returned = execution.get("returned") if isinstance(execution, dict) else None
         if not isinstance(returned, list) or len(returned) != 1:
             return None, {
-                "authority": "mncs.test.suite.v1",
+                "authority": "mncs.test.suite",
                 "status": "unavailable",
                 "reason": f"test result {index} has no single native TestResult value",
             }
@@ -1421,7 +1421,7 @@ def native_suite_fold(
         empty_output = session.call_batch(
             [
                 {
-                    "module": "mncs.test.suite.v1",
+                    "module": "mncs.test.suite",
                     "function": "empty",
                     "args": [],
                     "step_budget": step_budget,
@@ -1431,7 +1431,7 @@ def native_suite_fold(
         empty_returned = empty_output.get("returned") if isinstance(empty_output, dict) else None
         if empty_output.get("status") != "returned" or not isinstance(empty_returned, list) or len(empty_returned) != 1:
             return None, {
-                "authority": "mncs.test.suite.v1",
+                "authority": "mncs.test.suite",
                 "status": "unavailable",
                 "reason": "suite.empty did not return a native SuiteSummary value",
                 "output": empty_output,
@@ -1443,7 +1443,7 @@ def native_suite_fold(
             summary_output = session.call_batch(
                 [
                     {
-                        "module": "mncs.test.suite.v1",
+                        "module": "mncs.test.suite",
                         "function": "observe",
                         "args": [summary_value, value],
                         "step_budget": step_budget,
@@ -1454,7 +1454,7 @@ def native_suite_fold(
             returned = summary_output.get("returned") if isinstance(summary_output, dict) else None
             if summary_output.get("status") != "returned" or not isinstance(returned, list) or len(returned) != 1:
                 return None, {
-                    "authority": "mncs.test.suite.v1",
+                    "authority": "mncs.test.suite",
                     "status": "unavailable",
                     "reason": "suite.observe did not return a native SuiteSummary value",
                     "call_index": calls - 1,
@@ -1464,13 +1464,13 @@ def native_suite_fold(
         summary = native_suite_summary(summary_output)
         if summary is None:
             return None, {
-                "authority": "mncs.test.suite.v1",
+                "authority": "mncs.test.suite",
                 "status": "unavailable",
                 "reason": "suite.observe returned a malformed SuiteSummary value",
             }
         return summary, {
-            "authority": "mncs.test.suite.v1",
-            "module": "mncs.test.suite.v1",
+            "authority": "mncs.test.suite",
+            "module": "mncs.test.suite",
             "initializer": "empty",
             "observer": "observe",
             "status": "returned",
@@ -1478,7 +1478,7 @@ def native_suite_fold(
         }
     except (AdapterError, IndexError) as error:
         return None, {
-            "authority": "mncs.test.suite.v1",
+            "authority": "mncs.test.suite",
             "status": "unavailable",
             "reason": str(error),
         }

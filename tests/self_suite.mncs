@@ -5,11 +5,11 @@ mncs 0.17;
 // per-entry registration table.
 module tests.self_suite;
 
-use mncs.test.assertions.v1;
-use mncs.test.suite.v1;
-use mncs.test.generative.v1;
-use mncs.test.snapshot.v1;
-use mncs.test.runner.v1;
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.test.generative;
+use mncs.test.snapshot;
+use mncs.test.runner;
 use mncs.std.task.v1;
 
 test arithmetic() -> (result: TestResult) {

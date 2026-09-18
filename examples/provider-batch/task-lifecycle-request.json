@@ -1,10 +1,10 @@
 {
   "schema_version": "mncs.test-provider-request/1",
-  "inventory_identity": "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
+  "inventory_identity": "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
   "selected_test_identities": [
-    "mncs:0.2:test-case:tests.self_suite::task_lifecycle::acd1365f993616c64578e506fc793f07297b9049c77a9a1f0a3c3da188892dae"
+    "mncs:0.2:test-case:tests.self_suite::task_lifecycle::b1ac42033bff08ddd2bdcbf98e5ff268458922c58a1f69a036906afe56734f75"
   ],
   "selection_count": 1,
-  "interface_identity": "052a16a98a55e5569b43b53fd716deba0e8cd986c123804b15c4208307ff72ea",
-  "provider_revision_identity": "444f80977083182120ed13a235b2edfcb3156ad19d7aad386366f456d0eb252c"
+  "interface_identity": "df5f675fc72f3888e0b054cde3f5dc0f2d2abf1d126f12962a29dc4ff05424b3",
+  "provider_revision_identity": "e42b92c9675dea4d6b44ae50aebedcbbbb668ae39eace4ac2681fa43c8f908c0"
 }
