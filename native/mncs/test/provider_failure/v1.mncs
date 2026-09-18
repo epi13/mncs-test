@@ -1,0 +1,119 @@
+mncs 0.18;
+
+// A bounded provider implementation used by the real failure-lineage path.
+// It is intentionally small: the provider owns a typed FAIL result, while
+// Actions and Debug remain unaware of its implementation.
+module mncs.test.provider_failure.v1;
+
+use mncs.test.assertions.v1;
+use mncs.test.provider_protocol.v1 as protocol;
+
+record ProviderExecutionMaterial {
+    inventory_identity: [byte; 32],
+    selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selection_count: u64,
+    interface_identity: [byte; 32],
+    provider_revision_identity: [byte; 32]
+}
+
+record ProviderEvidenceMaterial {
+    execution_identity: [byte; 32],
+    native_result: TestResult,
+    selected_test_identities: [[byte; up_to 1024]; up_to 8]
+}
+
+fn provider_identity() -> (result: [byte; 32]) {
+    return [154, 15, 43, 79, 128, 118, 74, 20, 172, 54, 43, 112, 43, 95, 8, 149, 194, 97, 104, 45, 42, 215, 53, 70, 139, 27, 58, 191, 64, 219, 14, 39];
+}
+
+fn interface_identity() -> (result: [byte; 32]) {
+    return [248, 196, 234, 203, 185, 248, 169, 177, 32, 192, 38, 54, 172, 38, 246, 123, 224, 40, 155, 254, 62, 119, 15, 151, 61, 80, 110, 132, 161, 143, 209, 87];
+}
+
+fn revision_identity() -> (result: [byte; 32]) {
+    return [187; 32];
+}
+
+fn inventory_identity() -> (result: [byte; 32]) {
+    return [204; 32];
+}
+
+fn check_identity() -> (result: [byte; up_to 256]) {
+    return [109, 110, 99, 115, 45, 116, 101, 115, 116, 58, 102, 97, 105, 108, 117, 114, 101, 45, 99, 104, 101, 99, 107];
+}
+
+fn copy_digest(view: [byte; up_to 64]) -> (result: [byte; 32]) {
+    let seed: [byte; 32] = [0; 32];
+    return copy_span(seed, 0, view, 0, 32);
+}
+
+fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.ProviderRun)
+    capability provider_digest
+    effect structured_digest authorized_by provider_digest
+{
+    let selected_result: TestResult = TestResult {
+        verdict: Verdict.FAIL,
+        verdict_code: 1,
+        failure_kind: FailureKind.Assertion,
+        failure_code: 7001,
+        assertions: 1,
+        failures: 1,
+        expected: 7,
+        actual: 6,
+        assertion_code: 7001
+    };
+    let execution_identity: [byte; 32] = copy_digest(structured_digest(ProviderExecutionMaterial {
+        inventory_identity: request.inventory_identity,
+        selected_test_identities: request.selected_test_identities,
+        selection_count: request.selection_count,
+        interface_identity: request.interface_identity,
+        provider_revision_identity: request.provider_revision_identity
+    }));
+    let evidence_identity: [byte; 32] = copy_digest(structured_digest(ProviderEvidenceMaterial {
+        execution_identity: execution_identity,
+        native_result: selected_result,
+        selected_test_identities: request.selected_test_identities
+    }));
+    let result_without_identity: protocol.ProviderTestResult = protocol.ProviderTestResult {
+        result_identity: [0; 32],
+        provider_identity: provider_identity(),
+        provider_revision_identity: revision_identity(),
+        interface_identity: interface_identity(),
+        inventory_identity: inventory_identity(),
+        execution_identity: execution_identity,
+        evidence_identity: evidence_identity,
+        selected_test_identities: request.selected_test_identities,
+        selection_count: request.selection_count,
+        native_result: selected_result
+    };
+    let result_identity: [byte; 32] = copy_digest(structured_digest(
+        protocol.provider_test_result_identity_material(result_without_identity)
+    ));
+    let test_result: protocol.ProviderTestResult = protocol.ProviderTestResult {
+        ..result_without_identity,
+        result_identity: result_identity
+    };
+    let check_without_identity: protocol.ProviderCheckResult = protocol.ProviderCheckResult {
+        result_identity: [0; 32],
+        check_identity: check_identity(),
+        provider_identity: provider_identity(),
+        provider_revision_identity: revision_identity(),
+        interface_identity: interface_identity(),
+        inventory_identity: inventory_identity(),
+        test_result_identity: result_identity,
+        execution_identity: execution_identity,
+        evidence_identity: evidence_identity,
+        verdict: Verdict.FAIL
+    };
+    let check_result_identity: [byte; 32] = copy_digest(structured_digest(
+        protocol.provider_check_result_identity_material(check_without_identity)
+    ));
+    let check_result: protocol.ProviderCheckResult = protocol.ProviderCheckResult {
+        ..check_without_identity,
+        result_identity: check_result_identity
+    };
+    return protocol.ProviderRun {
+        test_result: test_result,
+        check_result: check_result
+    };
+}

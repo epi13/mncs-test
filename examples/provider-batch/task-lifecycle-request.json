@@ -2,10 +2,9 @@
   "schema_version": "mncs.test-provider-request/1",
   "inventory_identity": "f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db",
   "selected_test_identities": [
-    "mncs:0.2:test-case:tests.self_suite::arithmetic::f678e5ec3041e45e78e5ebefe4e87172fd2fbdd385846a2641a8e9cfd212b911",
-    "mncs:0.2:test-case:tests.self_suite::arithmetic::f678e5ec3041e45e78e5ebefe4e87172fd2fbdd385846a2641a8e9cfd212b911"
+    "mncs:0.2:test-case:tests.self_suite::task_lifecycle::acd1365f993616c64578e506fc793f07297b9049c77a9a1f0a3c3da188892dae"
   ],
-  "selection_count": 2,
+  "selection_count": 1,
   "interface_identity": "052a16a98a55e5569b43b53fd716deba0e8cd986c123804b15c4208307ff72ea",
   "provider_revision_identity": "444f80977083182120ed13a235b2edfcb3156ad19d7aad386366f456d0eb252c"
 }

@@ -8,17 +8,10 @@ mncs 0.18;
 module mncs.test.provider.v2;
 
 use mncs.test.assertions.v1;
+use mncs.test.provider_protocol.v1 as protocol;
 use mncs.core.sequences.v1 as sequences;
 use mncs.test.provider.v2_inventory as generated;
 use mncs.std.application.v1;
-
-record ProviderRequest {
-    inventory_identity: [byte; 32],
-    selected_test_identities: [[byte; up_to 1024]; up_to 8],
-    selection_count: u64,
-    interface_identity: [byte; 32],
-    provider_revision_identity: [byte; 32]
-}
 
 record ProviderExecutionMaterial {
     inventory_identity: [byte; 32],
@@ -32,64 +25,6 @@ record ProviderEvidenceMaterial {
     execution_identity: [byte; 32],
     native_result: TestResult,
     selected_test_identities: [[byte; up_to 1024]; up_to 8]
-}
-
-record ProviderResultMaterial {
-    provider_identity: [byte; 32],
-    provider_revision_identity: [byte; 32],
-    interface_identity: [byte; 32],
-    inventory_identity: [byte; 32],
-    execution_identity: [byte; 32],
-    evidence_identity: [byte; 32],
-    selected_test_identities: [[byte; up_to 1024]; up_to 8],
-    selection_count: u64,
-    native_result: TestResult
-}
-
-record ProviderTestResult {
-    result_identity: [byte; 32],
-    provider_identity: [byte; 32],
-    provider_revision_identity: [byte; 32],
-    interface_identity: [byte; 32],
-    inventory_identity: [byte; 32],
-    execution_identity: [byte; 32],
-    evidence_identity: [byte; 32],
-    selected_test_identities: [[byte; up_to 1024]; up_to 8],
-    selection_count: u64,
-    native_result: TestResult
-}
-
-// The provider's check identity is distinct from the test-result identity.
-// `check_identity` selects the family check surface; this material binds that
-// surface to the provider execution and the test result it checked.
-record ProviderCheckResultMaterial {
-    check_identity: [byte; up_to 256],
-    provider_identity: [byte; 32],
-    provider_revision_identity: [byte; 32],
-    interface_identity: [byte; 32],
-    inventory_identity: [byte; 32],
-    test_result_identity: [byte; 32],
-    execution_identity: [byte; 32],
-    evidence_identity: [byte; 32],
-    verdict: Verdict
-}
-
-record ProviderCheckResult {
-    result_identity: [byte; 32],
-    check_identity: [byte; up_to 256],
-    provider_identity: [byte; 32],
-    provider_revision_identity: [byte; 32],
-    interface_identity: [byte; 32],
-    inventory_identity: [byte; 32],
-    test_result_identity: [byte; 32],
-    execution_identity: [byte; 32],
-    evidence_identity: [byte; 32],
-    verdict: Verdict
-}
-
-record ProviderRun {
-    test_result: ProviderTestResult,
-    check_result: ProviderCheckResult
 }
 
 record ProviderAccumulator {
@@ -113,7 +48,7 @@ fn provider_identity() -> (result: [byte; 32]) {
 }
 
 fn interface_identity() -> (result: [byte; 32]) {
-    return [130, 1, 235, 250, 62, 203, 119, 80, 23, 238, 77, 244, 113, 234, 154, 187, 173, 45, 76, 14, 137, 101, 36, 0, 179, 172, 67, 15, 246, 243, 21, 144];
+    return [5, 42, 22, 169, 138, 85, 229, 86, 155, 67, 181, 63, 215, 22, 222, 186, 14, 140, 217, 134, 193, 35, 128, 75, 21, 196, 32, 131, 7, 255, 114, 234];
 }
 
 fn revision_identity() -> (result: [byte; 32]) {
@@ -160,7 +95,7 @@ fn known_identity(value: [byte; up_to 1024]) -> (result: bool) {
     return generated.known_identity(value);
 }
 
-fn inventory_matches(request: ProviderRequest) -> (result: bool) {
+fn inventory_matches(request: protocol.ProviderRequest) -> (result: bool) {
     return equal_exact32(request.inventory_identity, inventory_identity())
         && equal_exact32(request.interface_identity, interface_identity())
         && equal_exact32(request.provider_revision_identity, revision_identity());
@@ -173,7 +108,7 @@ fn duplicate_with(candidate: [byte; up_to 1024], values: [[byte; up_to 1024]; up
     return duplicate;
 }
 
-fn duplicate_selection(request: ProviderRequest) -> (result: bool) {
+fn duplicate_selection(request: protocol.ProviderRequest) -> (result: bool) {
     iterate i over request.selected_test_identities carrying duplicate: bool = false {
         let later: [byte; up_to 1024] = request.selected_test_identities[i];
         next duplicate = duplicate || duplicate_with(later, request.selected_test_identities, i);
@@ -273,7 +208,7 @@ fn fold_selected(values: [[byte; up_to 1024]; up_to 64]) -> (result: ProviderAcc
     return accumulator;
 }
 
-fn invalid_accumulator(request: ProviderRequest) -> (result: ProviderAccumulator) {
+fn invalid_accumulator(request: protocol.ProviderRequest) -> (result: ProviderAccumulator) {
     return ProviderAccumulator {
         ..empty_accumulator(),
         verdict: Verdict.UNSUPPORTED,
@@ -283,7 +218,7 @@ fn invalid_accumulator(request: ProviderRequest) -> (result: ProviderAccumulator
     };
 }
 
-fn run_selected_batch(request: ProviderRequest) -> (result: ProviderRun)
+fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.ProviderRun)
     capability provider_digest
     effect structured_digest authorized_by provider_digest
 {
@@ -311,30 +246,8 @@ fn run_selected_batch(request: ProviderRequest) -> (result: ProviderRun)
         native_result: selected_result,
         selected_test_identities: request.selected_test_identities
     }));
-    let result_identity: [byte; 32] = copy_digest(structured_digest(ProviderResultMaterial {
-        provider_identity: provider_identity(),
-        provider_revision_identity: request.provider_revision_identity,
-        interface_identity: interface_identity(),
-        inventory_identity: request.inventory_identity,
-        execution_identity: execution_identity,
-        evidence_identity: evidence_identity,
-        selected_test_identities: request.selected_test_identities,
-        selection_count: request.selection_count,
-        native_result: selected_result
-    }));
-    let check_result_identity: [byte; 32] = copy_digest(structured_digest(ProviderCheckResultMaterial {
-        check_identity: check_identity(),
-        provider_identity: provider_identity(),
-        provider_revision_identity: request.provider_revision_identity,
-        interface_identity: interface_identity(),
-        inventory_identity: request.inventory_identity,
-        test_result_identity: result_identity,
-        execution_identity: execution_identity,
-        evidence_identity: evidence_identity,
-        verdict: selected_result.verdict
-    }));
-    let test_result: ProviderTestResult = ProviderTestResult {
-        result_identity: result_identity,
+    let test_result_without_identity: protocol.ProviderTestResult = protocol.ProviderTestResult {
+        result_identity: [0; 32],
         provider_identity: provider_identity(),
         provider_revision_identity: request.provider_revision_identity,
         interface_identity: interface_identity(),
@@ -345,8 +258,13 @@ fn run_selected_batch(request: ProviderRequest) -> (result: ProviderRun)
         selection_count: request.selection_count,
         native_result: selected_result
     };
-    let check_result: ProviderCheckResult = ProviderCheckResult {
-        result_identity: check_result_identity,
+    let result_identity: [byte; 32] = copy_digest(structured_digest(protocol.provider_test_result_identity_material(test_result_without_identity)));
+    let test_result: protocol.ProviderTestResult = protocol.ProviderTestResult {
+        ..test_result_without_identity,
+        result_identity: result_identity
+    };
+    let check_result_without_identity: protocol.ProviderCheckResult = protocol.ProviderCheckResult {
+        result_identity: [0; 32],
         check_identity: check_identity(),
         provider_identity: provider_identity(),
         provider_revision_identity: request.provider_revision_identity,
@@ -357,7 +275,12 @@ fn run_selected_batch(request: ProviderRequest) -> (result: ProviderRun)
         evidence_identity: evidence_identity,
         verdict: selected_result.verdict
     };
-    return ProviderRun { test_result: test_result, check_result: check_result };
+    let check_result_identity: [byte; 32] = copy_digest(structured_digest(protocol.provider_check_result_identity_material(check_result_without_identity)));
+    let check_result: protocol.ProviderCheckResult = protocol.ProviderCheckResult {
+        ..check_result_without_identity,
+        result_identity: check_result_identity
+    };
+    return protocol.ProviderRun { test_result: test_result, check_result: check_result };
 }
 
 fn provider_batch_app(context: ApplicationContext) -> (result: ApplicationExit)
@@ -370,10 +293,10 @@ fn provider_batch_app(context: ApplicationContext) -> (result: ApplicationExit)
     if !context_is_bounded(context) || context.argv_count < 3 {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 112, 114, 111, 118, 105, 100, 101, 114, 32, 97, 114, 103, 115], 2);
     }
-    let request: ProviderRequest = structured_read(context.argv[0], provider_request_schema());
-    let run: ProviderRun = run_selected_batch(request);
-    let published_result: u64 = structured_write(context.argv[1], provider_result_schema(), run.test_result);
-    let published_check: u64 = structured_write(context.argv[2], provider_check_schema(), run.check_result);
+    let request: protocol.ProviderRequest = structured_read(context.argv[0], protocol.provider_request_schema());
+    let run: protocol.ProviderRun = run_selected_batch(request);
+    let published_result: u64 = structured_write(context.argv[1], protocol.provider_result_schema(), run.test_result);
+    let published_check: u64 = structured_write(context.argv[2], protocol.provider_check_schema(), run.check_result);
     if published_result == 0 || published_check == 0 {
         return failure([112, 114, 111, 118, 105, 100, 101, 114, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
     }

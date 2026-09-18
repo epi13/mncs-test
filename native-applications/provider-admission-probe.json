@@ -1,0 +1,18 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.provider-admission-probe",
+  "source": "../native/mncs/test/provider_admission_probe/v1.mncs",
+  "module": "mncs.test.provider_admission_probe.v1",
+  "entry_function": "provider_admission_probe_app",
+  "profile": "0.18",
+  "interface_identity": "5841aed02535a7bc258f5762ae4fccdbd297346507055251e119c1ac2cc69846",
+  "libraries": [
+    "../../mncs-language/library",
+    "../native",
+    ".."
+  ],
+  "environment_keys": [],
+  "required_capabilities": [
+    "provider_admission"
+  ]
+}
