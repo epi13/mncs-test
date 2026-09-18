@@ -1,0 +1,39 @@
+mncs 0.18;
+
+// Focused runtime dogfood for the generic authoritative provider boundary.
+// The provider is selected by its descriptor and admitted into this native
+// application session; this source contains no concrete provider import.
+module mncs.test.provider_admission_probe.v1;
+
+use mncs.std.application.v1;
+use mncs.test.assertions.v1;
+use mncs.test.provider_protocol.v1 as protocol;
+
+fn provider_admission_probe_app(context: ApplicationContext) -> (result: ApplicationExit)
+    capability provider_admission
+    capability provider_call
+    effect provider_call authorized_by provider_call
+{
+    let empty_test: [byte; up_to 1024] = [0; 0];
+    let empty_selection: [[byte; up_to 1024]; up_to 8] = [empty_test; 0];
+    let provider_id: [byte; 32] = [72, 50, 15, 137, 143, 152, 72, 72, 180, 39, 92, 74, 219, 70, 94, 183, 100, 39, 176, 53, 227, 96, 104, 39, 117, 94, 36, 93, 106, 66, 46, 1];
+    let request: protocol.ProviderRequest = protocol.ProviderRequest {
+        inventory_identity: [245, 194, 197, 102, 75, 36, 226, 126, 253, 190, 95, 78, 120, 172, 136, 142, 150, 101, 91, 85, 6, 49, 248, 177, 156, 170, 151, 49, 145, 39, 21, 219],
+        selected_test_identities: empty_selection,
+        selection_count: 0,
+        interface_identity: [5, 159, 9, 203, 198, 71, 245, 98, 214, 104, 233, 160, 25, 93, 201, 86, 137, 250, 129, 244, 21, 185, 158, 54, 244, 143, 45, 25, 23, 28, 72, 245],
+        provider_revision_identity: [132, 219, 32, 242, 198, 128, 171, 25, 56, 71, 146, 40, 126, 35, 146, 151, 221, 32, 119, 111, 74, 43, 158, 52, 181, 88, 89, 115, 218, 219, 15, 0]
+    };
+    let run: protocol.ProviderRun = provider_call(provider_id, request);
+    let unsupported: bool = match run.test_result.native_result.verdict {
+        PASS => false,
+        FAIL => false,
+        SKIP => false,
+        UNSUPPORTED => true
+    };
+    return select(
+        unsupported,
+        success([]),
+        failure([112, 114, 111, 118, 105, 100, 101, 114, 32, 97, 100, 109, 105, 115, 115, 105, 111, 110, 32, 112, 114, 111, 98, 101, 32, 102, 97, 105, 108, 101, 100], 3)
+    );
+}

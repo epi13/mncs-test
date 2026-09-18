@@ -3,7 +3,7 @@ mncs 0.18;
 // GENERATED FILE: do not edit by hand.
 // generator: mncs-test:provider-generator:v2-inventory/1
 // compiler inventory identity: f5c2c5664b24e27efdbe5f4e78ac888e96655b550631f8b19caa9731912715db
-// provider revision identity: b103258f35603e1b081ecec86cd1e093978c8b26915384129d6634b4b84dd5f2
+// provider revision identity: 444f80977083182120ed13a235b2edfcb3156ad19d7aad386366f456d0eb252c
 // source: tests/self_suite.mncs; regenerate with tools/generate_provider_v2.py
 module mncs.test.provider.v2_inventory;
 
@@ -16,7 +16,7 @@ fn inventory_identity() -> (result: [byte; 32]) {
 }
 
 fn revision_identity() -> (result: [byte; 32]) {
-    return [177, 3, 37, 143, 53, 96, 62, 27, 8, 30, 206, 200, 108, 209, 224, 147, 151, 140, 139, 38, 145, 83, 132, 18, 157, 102, 52, 180, 184, 77, 213, 242];
+    return [68, 79, 128, 151, 112, 131, 24, 33, 32, 237, 19, 162, 53, 178, 237, 252, 179, 21, 106, 209, 157, 122, 173, 56, 99, 102, 244, 86, 208, 235, 37, 44];
 }
 
 fn matches_0_arithmetic(value: [byte; up_to 1024]) -> (result: bool) {

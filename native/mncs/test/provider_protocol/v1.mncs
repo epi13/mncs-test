@@ -1,0 +1,119 @@
+mncs 0.18;
+
+// mncs.test.provider_protocol.v1 — the family-owned typed verification
+// provider protocol. Provider implementations may vary, but a consumer
+// binds to these nominal request/result records rather than to one concrete
+// provider module.
+module mncs.test.provider_protocol.v1;
+
+use mncs.test.assertions.v1;
+
+record ProviderRequest {
+    inventory_identity: [byte; 32],
+    selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selection_count: u64,
+    interface_identity: [byte; 32],
+    provider_revision_identity: [byte; 32]
+}
+
+record ProviderTestResult {
+    result_identity: [byte; 32],
+    provider_identity: [byte; 32],
+    provider_revision_identity: [byte; 32],
+    interface_identity: [byte; 32],
+    inventory_identity: [byte; 32],
+    execution_identity: [byte; 32],
+    evidence_identity: [byte; 32],
+    selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selection_count: u64,
+    native_result: TestResult
+}
+
+record ProviderCheckResult {
+    result_identity: [byte; 32],
+    check_identity: [byte; up_to 256],
+    provider_identity: [byte; 32],
+    provider_revision_identity: [byte; 32],
+    interface_identity: [byte; 32],
+    inventory_identity: [byte; 32],
+    test_result_identity: [byte; 32],
+    execution_identity: [byte; 32],
+    evidence_identity: [byte; 32],
+    verdict: Verdict
+}
+
+record ProviderRun {
+    test_result: ProviderTestResult,
+    check_result: ProviderCheckResult
+}
+
+// Provider-owned identities are protocol-owned, not implementation-owned.
+// Every admitted provider must derive these exact materials so a consumer can
+// validate a result/check without importing the provider implementation.
+record ProviderTestResultIdentityMaterial {
+    provider_identity: [byte; 32],
+    provider_revision_identity: [byte; 32],
+    interface_identity: [byte; 32],
+    inventory_identity: [byte; 32],
+    execution_identity: [byte; 32],
+    evidence_identity: [byte; 32],
+    selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selection_count: u64,
+    native_result: TestResult
+}
+
+record ProviderCheckResultIdentityMaterial {
+    check_identity: [byte; up_to 256],
+    provider_identity: [byte; 32],
+    provider_revision_identity: [byte; 32],
+    interface_identity: [byte; 32],
+    inventory_identity: [byte; 32],
+    test_result_identity: [byte; 32],
+    execution_identity: [byte; 32],
+    evidence_identity: [byte; 32],
+    verdict: Verdict
+}
+
+fn provider_test_result_identity_material(
+    value: ProviderTestResult
+) -> (result: ProviderTestResultIdentityMaterial) {
+    return ProviderTestResultIdentityMaterial {
+        provider_identity: value.provider_identity,
+        provider_revision_identity: value.provider_revision_identity,
+        interface_identity: value.interface_identity,
+        inventory_identity: value.inventory_identity,
+        execution_identity: value.execution_identity,
+        evidence_identity: value.evidence_identity,
+        selected_test_identities: value.selected_test_identities,
+        selection_count: value.selection_count,
+        native_result: value.native_result
+    };
+}
+
+fn provider_check_result_identity_material(
+    value: ProviderCheckResult
+) -> (result: ProviderCheckResultIdentityMaterial) {
+    return ProviderCheckResultIdentityMaterial {
+        check_identity: value.check_identity,
+        provider_identity: value.provider_identity,
+        provider_revision_identity: value.provider_revision_identity,
+        interface_identity: value.interface_identity,
+        inventory_identity: value.inventory_identity,
+        test_result_identity: value.test_result_identity,
+        execution_identity: value.execution_identity,
+        evidence_identity: value.evidence_identity,
+        verdict: value.verdict
+    };
+}
+
+fn provider_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn provider_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 114, 101, 115, 117, 108, 116, 47, 49];
+}
+
+fn provider_check_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 118, 105, 100, 101, 114, 45, 99, 104, 101, 99, 107, 47, 49];
+}
