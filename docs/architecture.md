@@ -3,7 +3,7 @@
 ## Layering
 
 ```text
-MNCS `test` declaration (Profile 0.17)
+MNCS `test` declaration (current Profile 0.18; introduced in 0.17)
         ↓ AST/model identity + compiler test inventory
 Rust toolchain selects compiler-inventoried TestCase identities
         ↓ one compiled artifact + retained Session batch

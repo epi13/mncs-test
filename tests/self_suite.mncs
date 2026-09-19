@@ -1,4 +1,4 @@
-mncs 0.17;
+mncs 0.18;
 
 // The canonical mncs-test self-suite.  Test identity comes from the MNCS
 // compiler's first-class declaration inventory; the runner supplies no

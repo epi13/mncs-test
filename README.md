@@ -3,8 +3,9 @@
 Native testing, verification, and conformance framework for MNCS and the
 broader MNCS project family.
 
-`mncs-test` is the first MNCS-native application in the family. In source
-Profile 0.17, a `test` declaration is a language-owned declaration kind. The
+`mncs-test` is the first MNCS-native application in the family. In the current
+Profile 0.18 (introduced as a declaration kind in Profile 0.17), a `test`
+declaration is language-owned. The
 Rust MNCS compiler/runtime/toolchain is the trusted bootstrap that emits the
 structural inventory and backend artifact; native `mncs.test.*` modules own
 assertion, suite, runner-policy, property, and snapshot semantics. The
@@ -50,7 +51,7 @@ default JSON output or an explicitly requested `--check-result` artifact.
 Runtime tests use the first-class declaration directly:
 
 ```mncs
-mncs 0.17;
+mncs 0.18;
 module examples.addition_tests;
 
 use mncs.test.assertions;

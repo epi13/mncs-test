@@ -15,7 +15,7 @@
   "consumes": [
     {
       "contract_identity": "mncs.compiler.test-inventory/1",
-      "contract_revision": "0.17",
+      "contract_revision": "0.18",
       "consumer_identity": "mncs-test:test-inventory",
       "evidence": "native-userland-status.json",
       "canonical_entrypoint": "mncs test",

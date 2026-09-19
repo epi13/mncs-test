@@ -1,12 +1,12 @@
 # Writing native tests
 
-Use Profile 0.17 and import the framework records from the repository's
+Use the current Profile 0.18 and import the framework records from the repository's
 library root. The declaration itself is the test registration; do not add an
 ordinary `fn test_*`, a suite aggregation, or one manifest entry per runtime
 test.
 
 ```mncs
-mncs 0.17;
+mncs 0.18;
 module examples.addition_tests;
 
 use mncs.test.assertions;
@@ -24,7 +24,7 @@ schema_version = "mncs.test-manifest/1"
 name = "addition"
 source = "addition_tests.mncs"
 module = "examples.addition_tests"
-profile = "0.17"
+profile = "0.18"
 libraries = ["native"]
 ```
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 1,
+  "revision": 2,
   "manifest_location": "in-repository",
   "authority": {
     "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport, generation, and differential adapters."
@@ -10,8 +10,9 @@
     "layout": "mncs.repository-layout/1",
     "surfaces": [
       {"path": "native/mncs/test/", "class": "canonical", "authority": "mncs-test"},
-      {"path": "native/mncs/test/provider_inventory.mncs", "class": "generated", "note": "Compiler-inventory-bound compatibility projection while generic invocation remains unavailable."},
-      {"path": "tools/", "class": "host-boundary", "note": "Manifest/file discovery, compiler process invocation, and transparent typed generation."},
+      {"path": "native/mncs/test/provider_inventory.mncs", "class": "generated", "note": "Compiler-inventory-bound compatibility projection while generic invocation remains unavailable.", "classification": {"authority": "none", "lifecycle": "generated", "boundary_kind": "none", "semantic_role": "generated"}},
+      {"path": "tools/", "class": "host-boundary", "note": "Manifest/file discovery and compiler transport adapters; generated callable glue is classified separately below."},
+      {"path": "tools/generate_provider.py", "class": "migration-shadow", "note": "Transparent compiler-inventory-bound typed dispatch generator; removal criterion is a generic identity-bound invocation surface.", "classification": {"authority": "none", "lifecycle": "temporary", "boundary_kind": "compiler-bootstrap", "semantic_role": "migration-shadow"}},
       {"path": "pressures/MNCS-TEST-P-007.json", "class": "reference", "authority": "MNCS-Commons", "note": "Local evidence linked to the canonical Commons pressure."}
     ]
   },

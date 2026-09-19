@@ -241,7 +241,7 @@ class RunnerTests(unittest.TestCase):
             "schema_version": "mncs.family-check-request/1",
             "check_identity": "mncs-test:test-inventory-join",
             "contract_identity": "mncs.compiler.test-inventory/1",
-            "contract_revision": "0.17",
+            "contract_revision": "0.18",
             "verification_plan_id": "a" * 64,
             "family_graph_identity": "b" * 64,
             "edge_fingerprint": "c" * 64,
