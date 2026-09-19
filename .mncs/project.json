@@ -1,0 +1,29 @@
+{
+  "schema_version": "mncs-family.repository-manifest/v0alpha1",
+  "repository": "mncs-test",
+  "revision": 1,
+  "manifest_location": "in-repository",
+  "authority": {
+    "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport, generation, and differential adapters."
+  },
+  "organization": {
+    "layout": "mncs.repository-layout/1",
+    "surfaces": [
+      {"path": "native/mncs/test/", "class": "canonical", "authority": "mncs-test"},
+      {"path": "native/mncs/test/provider_inventory.mncs", "class": "generated", "note": "Compiler-inventory-bound compatibility projection while generic invocation remains unavailable."},
+      {"path": "tools/", "class": "host-boundary", "note": "Manifest/file discovery, compiler process invocation, and transparent typed generation."},
+      {"path": "pressures/MNCS-TEST-P-007.json", "class": "reference", "authority": "MNCS-Commons", "note": "Local evidence linked to the canonical Commons pressure."}
+    ]
+  },
+  "contracts": {
+    "provides": [
+      {"contract": "test-provider", "version": "1", "kind": "native-test-provider", "stability": "experimental", "fingerprint_sources": ["native/mncs/test/", "schemas/"]}
+    ],
+    "consumes": [
+      {"contract": "mncs-language.compiler-inventory", "envelope": {"op": "any"}, "required": true}
+    ],
+    "tests": [
+      {"test": "native-test-provider", "covers": ["test-provider"], "obligation": "self", "command": {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]}}
+    ]
+  }
+}
