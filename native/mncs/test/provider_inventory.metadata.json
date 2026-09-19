@@ -1,15 +1,16 @@
 {
   "generator": "mncs-test:provider-generator:inventory/1",
   "input": {
+    "declaration_inventory_identity": "sha256:49f9a9a5e9a394a028a529b5d18300472a41ab679650e6f4fbfdc0d4f0f2b951",
     "inventory_identity": "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
     "source": "tests/self_suite.mncs",
-    "source_artifact_identity": "mncs:source:artifact:2441b4278fe62ca30652c43bb3ae576ae8a422d31cd340abfc6c9593e6809b70"
+    "source_artifact_identity": "mncs:source:artifact:b1d8683f6ac738318f94f92779ae5817fdb511767500a3d577a20178cee69fac"
   },
   "output": {
     "path": "native/mncs/test/provider_inventory.mncs",
-    "source_sha256": "4fa44a494ab74fe99be8334285e2db69501cba8889de45b75384f939e13a7891"
+    "source_sha256": "782cb63422ad8e80db917bcfb6e20cf310adb279a8ecb5c2af230557f992734a"
   },
   "provider_policy_identity": "c874346b28ded8d751c32107e01a4863e6c497540bdcb26433d1f4fac34e0a7f",
-  "provider_revision_identity": "e42b92c9675dea4d6b44ae50aebedcbbbb668ae39eace4ac2681fa43c8f908c0",
+  "provider_revision_identity": "528ed1d8780f12e46b1914f0826da696ddd7e201289c701db32cabe69db2a391",
   "schema_version": "mncs-test.generated-provider/1"
 }

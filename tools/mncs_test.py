@@ -485,24 +485,70 @@ def compiler_inventory(
     timeout_seconds: int,
     artifacts: ArtifactStore,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Ask the authoritative compiler for the source test inventory."""
+    """Ask the authoritative compiler for the generic callable inventory.
+
+    The returned compatibility envelope keeps the existing runner contract,
+    but its facts are projected from compiler declarations rather than from a
+    Test-specific compiler query.
+    """
 
     process = run_process(
-        [mncs, "test-inventory", str(source_path)],
+        [mncs, "declaration-inventory", str(source_path)],
         cwd=cwd,
         environment=environment,
         timeout_seconds=timeout_seconds,
         artifacts=artifacts,
-        artifact_key="compiler-test-inventory",
+        artifact_key="compiler-declaration-inventory",
     )
     decoded = parse_json_output(process["stdout"])
     if process.get("transport_error") or process["timed_out"] or process.get("returncode") != 0:
         return None, {"process": process, "document": decoded}
-    if not isinstance(decoded, dict) or decoded.get("schema_version") != INVENTORY_SCHEMA:
+    if not isinstance(decoded, dict) or decoded.get("schema_version") != "mncs.declaration-inventory/1":
         return None, {"process": process, "document": decoded}
-    inventory = decoded.get("inventory")
-    if decoded.get("valid") is not True or not isinstance(inventory, dict):
+    declaration_inventory = decoded.get("inventory")
+    if decoded.get("valid") is not True or not isinstance(declaration_inventory, dict):
         return None, {"process": process, "document": decoded}
+    callables = declaration_inventory.get("callables", [])
+    if not isinstance(callables, list):
+        return None, {"process": process, "document": decoded}
+    tests = []
+    for callable_ in callables:
+        if not isinstance(callable_, dict) or callable_.get("callable_kind") != "test":
+            continue
+        if not callable_.get("test_case_identity"):
+            return None, {"process": process, "document": decoded}
+        tests.append(
+            {
+                "declaration_identity": callable_.get("declaration_identity"),
+                "test_case_identity": callable_.get("test_case_identity"),
+                "function_identity": callable_.get("callable_identity"),
+                "module": callable_.get("module"),
+                "name": callable_.get("name"),
+                "qualified_name": callable_.get("qualified_name"),
+                "source_span": callable_.get("source_span"),
+                "profile": callable_.get("profile"),
+                "generic_params": callable_.get("generic_params", []),
+                "inputs": callable_.get("inputs", []),
+                "outputs": callable_.get("outputs", []),
+                "effects": callable_.get("effects", []),
+                "capabilities": callable_.get("capabilities", []),
+                "semantic_fingerprint": callable_.get("test_case_identity"),
+                "subject_identity": declaration_inventory.get("subject_identity"),
+                "subject_fingerprint": declaration_inventory.get("subject_fingerprint"),
+            }
+        )
+    tests.sort(key=lambda item: (item.get("declaration_identity", ""), item.get("name", "")))
+    inventory = {
+        "schema_version": INVENTORY_SCHEMA,
+        "scope": declaration_inventory.get("scope"),
+        "module": declaration_inventory.get("module"),
+        "source_artifact_identity": declaration_inventory.get("source_artifact_identity"),
+        "source_profile": declaration_inventory.get("source_profile"),
+        "subject_identity": declaration_inventory.get("subject_identity"),
+        "subject_fingerprint": declaration_inventory.get("subject_fingerprint"),
+        "declaration_inventory_identity": declaration_inventory.get("inventory_identity"),
+        "tests": tests,
+    }
     return inventory, {"process": process, "document": decoded}
 
 

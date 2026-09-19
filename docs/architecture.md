@@ -57,8 +57,10 @@ scan source text.
 
 ## Execution sequence
 
-For a first-class source, `mncs test` obtains `mncs.test-inventory/1` from the
-compiler front end, compiles once with tests included, opens one verified
+For a first-class source, `mncs test` obtains the generic
+`mncs.declaration-inventory/1` from the compiler front end and projects its
+test callables into the retained `mncs.test-inventory/1` runner envelope. It
+then compiles once with tests included, opens one verified
 `mncs-embed` Session, and sends the selected calls through that retained
 session. Each returned value remains a distinct execution observation. The
 toolchain then calls native `mncs.test.suite::empty`/`observe` through the

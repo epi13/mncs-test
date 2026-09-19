@@ -14,7 +14,7 @@ import generate_family_verification_checks as generator  # noqa: E402
 class FamilyVerificationGenerationTests(unittest.TestCase):
     def test_refreshes_every_behavioral_selector_from_one_inventory(self) -> None:
         inventory = {
-            "schema_version": "mncs.test-inventory/1",
+            "schema_version": "mncs.test-inventory/compatibility/1",
             "scope": "source_module",
             "tests": [
                 {"test_case_identity": "mncs:test-case:inventory"},

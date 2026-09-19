@@ -73,7 +73,8 @@
   "provider_interface": "mncs.test.provider::run_selected_batch",
     "provider_selection_bound": 8,
     "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
-    "provider_inventory_binding": "compiler test-inventory → generated native dispatch module and checked metadata",
+  "provider_inventory_binding": "compiler declaration-inventory → compatibility projection → generated native dispatch module and checked metadata",
+  "provider_inventory_generation_pressure": "generic callable identity binding with heterogeneous typed signatures is not yet expressible; generation remains transparent typed glue",
     "provider_revision_binding": "inventory identity + compiler source artifact identity + provider policy identity + generator identity"
   }
 }

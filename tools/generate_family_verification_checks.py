@@ -22,7 +22,8 @@ from typing import Any
 
 
 CHECKS_SCHEMA = "commons.mncs.family-verification-checks/v1"
-INVENTORY_SCHEMA = "mncs.test-inventory/1"
+DECLARATION_INVENTORY_SCHEMA = "mncs.declaration-inventory/1"
+COMPATIBILITY_INVENTORY_SCHEMA = "mncs.test-inventory/compatibility/1"
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -61,6 +62,52 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def compatibility_inventory(document: dict[str, Any]) -> dict[str, Any]:
+    """Project generic compiler declarations into the legacy selector envelope."""
+
+    declaration_inventory = document["inventory"]
+    tests = []
+    for callable_ in declaration_inventory.get("callables", []):
+        if not isinstance(callable_, dict) or callable_.get("callable_kind") != "test":
+            continue
+        if not callable_.get("test_case_identity"):
+            raise ValueError(
+                "compiler declaration inventory exposed a test without a test-case identity"
+            )
+        tests.append(
+            {
+                "declaration_identity": callable_.get("declaration_identity"),
+                "test_case_identity": callable_.get("test_case_identity"),
+                "function_identity": callable_.get("callable_identity"),
+                "module": callable_.get("module"),
+                "name": callable_.get("name"),
+                "qualified_name": callable_.get("qualified_name"),
+                "source_span": callable_.get("source_span"),
+                "profile": callable_.get("profile"),
+                "generic_params": callable_.get("generic_params", []),
+                "inputs": callable_.get("inputs", []),
+                "outputs": callable_.get("outputs", []),
+                "effects": callable_.get("effects", []),
+                "capabilities": callable_.get("capabilities", []),
+                "semantic_fingerprint": callable_.get("test_case_identity"),
+                "subject_identity": declaration_inventory.get("subject_identity"),
+                "subject_fingerprint": declaration_inventory.get("subject_fingerprint"),
+            }
+        )
+    tests.sort(key=lambda item: (item.get("declaration_identity", ""), item.get("name", "")))
+    return {
+        "schema_version": COMPATIBILITY_INVENTORY_SCHEMA,
+        "scope": declaration_inventory.get("scope"),
+        "module": declaration_inventory.get("module"),
+        "source_artifact_identity": declaration_inventory.get("source_artifact_identity"),
+        "source_profile": declaration_inventory.get("source_profile"),
+        "subject_identity": declaration_inventory.get("subject_identity"),
+        "subject_fingerprint": declaration_inventory.get("subject_fingerprint"),
+        "declaration_inventory_identity": declaration_inventory.get("inventory_identity"),
+        "tests": tests,
+    }
+
+
 def inventory_for(
     *,
     mncs: str,
@@ -73,7 +120,7 @@ def inventory_for(
             str(path.resolve()) for path in libraries
         )
     completed = subprocess.run(
-        [mncs, "test-inventory", str(source.resolve())],
+        [mncs, "declaration-inventory", str(source.resolve())],
         capture_output=True,
         text=True,
         check=False,
@@ -84,12 +131,12 @@ def inventory_for(
         document = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise ValueError(
-            f"compiler test-inventory emitted non-JSON output: "
+            f"compiler declaration-inventory emitted non-JSON output: "
             f"{completed.stderr.strip() or completed.stdout.strip()}"
         ) from error
     if (
         completed.returncode != 0
-        or document.get("schema_version") != INVENTORY_SCHEMA
+        or document.get("schema_version") != DECLARATION_INVENTORY_SCHEMA
         or document.get("valid") is not True
         or not isinstance(document.get("inventory"), dict)
     ):
@@ -97,7 +144,7 @@ def inventory_for(
             f"compiler did not establish a valid test inventory: "
             f"{completed.stderr.strip() or document}"
         )
-    return document["inventory"]
+    return compatibility_inventory(document)
 
 
 def regenerate(

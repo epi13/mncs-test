@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Generate the compiler-inventory-bound mncs-test provider surface.
 
-The compiler's test inventory is the only input to test-case dispatch.  The
-provider module remains handwritten policy (batch validation, result
-folding, and artifact publication); this generator owns the repetitive
-identity-to-test binding so a declaration cannot be added to the inventory
-without regenerating the executable provider surface.
+The generic compiler declaration/callable inventory is the only input to
+test-case dispatch. The provider module remains handwritten policy (batch
+validation, result folding, and artifact publication); this generator owns
+the repetitive identity-to-test binding so a declaration cannot be added to
+the inventory without regenerating the executable provider surface.
+
+Generation remains because MNCS does not yet provide reflective invocation of
+an arbitrary callable identity with a heterogeneous typed signature. The
+remaining generated surface is therefore a transparent typed binding, not a
+second source of test discovery or provider policy.
 """
 
 from __future__ import annotations
@@ -97,7 +102,7 @@ def inventory_from_compiler(
             str(path.resolve()) for path in libraries
         )
     completed = subprocess.run(
-        [str(binary), "test-inventory", str(source)],
+        [str(binary), "declaration-inventory", str(source)],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -105,11 +110,56 @@ def inventory_from_compiler(
         check=False,
     )
     if completed.returncode != 0:
-        raise SystemExit(completed.stderr or "compiler test inventory failed")
+        raise SystemExit(completed.stderr or "compiler declaration inventory failed")
     document = json.loads(completed.stdout)
-    if not document.get("valid") or not isinstance(document.get("inventory"), dict):
+    if (
+        document.get("schema_version") != "mncs.declaration-inventory/1"
+        or not document.get("valid")
+        or not isinstance(document.get("inventory"), dict)
+    ):
         raise SystemExit(json.dumps(document, sort_keys=True))
-    return document["inventory"]
+    declaration_inventory = document["inventory"]
+    callables = declaration_inventory.get("callables", [])
+    tests = []
+    for callable_ in callables:
+        if not isinstance(callable_, dict) or callable_.get("callable_kind") != "test":
+            continue
+        if not callable_.get("test_case_identity"):
+            raise SystemExit(
+                "compiler declaration inventory exposed a test without a test-case identity"
+            )
+        tests.append(
+            {
+                "declaration_identity": callable_["declaration_identity"],
+                "test_case_identity": callable_["test_case_identity"],
+                "function_identity": callable_["callable_identity"],
+                "module": callable_["module"],
+                "name": callable_["name"],
+                "qualified_name": callable_["qualified_name"],
+                "source_span": callable_["source_span"],
+                "profile": callable_["profile"],
+                "generic_params": callable_["generic_params"],
+                "inputs": callable_["inputs"],
+                "outputs": callable_["outputs"],
+                "effects": callable_["effects"],
+                "capabilities": callable_["capabilities"],
+                "subject_identity": declaration_inventory["subject_identity"],
+                "subject_fingerprint": declaration_inventory["subject_fingerprint"],
+                "semantic_fingerprint": callable_["test_case_identity"],
+            }
+        )
+    tests.sort(key=lambda item: (item["declaration_identity"], item["qualified_name"]))
+    return {
+        "schema_version": "mncs.test-inventory/compatibility/1",
+        "scope": declaration_inventory["scope"],
+        "module": declaration_inventory["module"],
+        "source_artifact_identity": declaration_inventory["source_artifact_identity"],
+        "source_profile": declaration_inventory["source_profile"],
+        "subject_identity": declaration_inventory["subject_identity"],
+        "subject_fingerprint": declaration_inventory["subject_fingerprint"],
+        "declaration_inventory_identity": declaration_inventory["inventory_identity"],
+        "tests": tests,
+    }
 
 
 def generate_source(inventory: dict[str, object], identity: str, revision: str) -> str:
@@ -249,6 +299,7 @@ def main() -> int:
         "input": {
             "source": str(args.source),
             "source_artifact_identity": inventory["source_artifact_identity"],
+            "declaration_inventory_identity": inventory["declaration_inventory_identity"],
             "inventory_identity": identity,
         },
         "provider_revision_identity": revision,

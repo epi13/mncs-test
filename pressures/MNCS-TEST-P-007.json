@@ -1,0 +1,18 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-007",
+  "title": "Generic declaration inventory lacks reflective typed invocation",
+  "commons_pressure_id": "MNCS-LANG-5E290D20B90B",
+  "target_layer": "language/runtime",
+  "observed_need": "Bind an authoritative compiler callable identity to a bounded typed invocation without generating consumer-specific dispatch source.",
+  "current_language_behavior": "mncs declaration-inventory exposes declaration, callable, test-case, source, profile, signature, effect, and capability identities. MNCS application code cannot yet invoke an arbitrary heterogeneous callable by that identity.",
+  "why_insufficient": "provider.mncs must consume a static generated typed binding for the seven self-suite tests; removing the generator would replace explicit glue with hidden host dispatch policy.",
+  "minimal_reproducer": "tools/generate_provider.py consumes mncs declaration-inventory and emits native/mncs/test/provider_inventory.mncs; a generic callable identity plus typed argument material has no native invocation boundary.",
+  "desired_direction": "A generic exported-callable binding and typed invocation capability with signature validation, identity admission, and fail-closed mismatch behavior.",
+  "severity": "major",
+  "disposition": "recorded_generic_language_pressure",
+  "workaround": "Keep deterministic source generation as a thin compiler-inventory-bound adapter. It may enumerate and encode signatures but cannot add tests, evaluate assertions, or aggregate results.",
+  "status": "open",
+  "relevant_files": ["tools/generate_provider.py", "native/mncs/test/provider_inventory.mncs", "tools/mncs_test.py"],
+  "relevant_tests": ["tests/test_phase6_provider_generation.py", "tests/test_runner.py::test_compiler_inventory_discovery"]
+}

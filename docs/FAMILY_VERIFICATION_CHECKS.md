@@ -4,7 +4,8 @@
 stable family check identity to a trusted runner.  For the behavioral
 `mncs-test:verification-plan-contract` check, the selected test identities are
 explicit architectural intent; the `inventory_identity` is generated from the
-language compiler's bounded `mncs.test-inventory/1` result.
+language compiler's generic `mncs.declaration-inventory/1` result, projected
+only into the legacy selector envelope used by this contract.
 
 Refresh the compiler-bound fact after changing the compiler, test source, or
 selected test identities:
