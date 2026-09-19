@@ -18,3 +18,10 @@ The current Profile 0.18 verification is preserved in Commons observation
 `sha256:8dab5b8f673a2d79d27f1f90eebb14500483e9942cd1b06b105458bf96385294`
 and compiler inventory identity
 `sha256:e610453d5b7581c7da81eb8c1258a4beaeb02d4551e568b7b9684fc69a9d4186`.
+
+The Profile 0.18 `provider_call` capability was checked during this campaign.
+It is a generic admitted-provider boundary whose runtime receives one typed
+request and an expected result type; the host provider registry still selects
+an admitted provider's fixed entry module/function. It therefore does not
+provide callable-identity lookup with heterogeneous argument binding and does
+not retire the transparent inventory-bound adapter.
