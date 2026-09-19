@@ -1,4 +1,6 @@
-.mncs/
+.mncs/*
+!.mncs/
+!.mncs/project.json
 __pycache__/
 *.py[cod]
 .pytest_cache/

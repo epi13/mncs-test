@@ -4,6 +4,11 @@
 surface belongs in `native/mncs/test`; the Python and shell files in this
 repository are deliberately narrow transport adapters.
 
+Establish the bounded family context and current compiler/capability identity
+before broad search. Query Commons for an existing pressure before recording
+another one; the open callable-inventory pressure is
+`MNCS-LANG-5E290D20B90B` / `MNCS-TEST-P-007`.
+
 Before adding host code, check the current `mncs-language` profile and
 standard library. If the missing capability is semantic rather than a
 platform boundary, record a pressure under `pressures/` and route its Commons
