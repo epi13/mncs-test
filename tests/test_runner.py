@@ -12,6 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "tools" / "mncs_test.py"
 LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", REPO.parent / "mncs-language"))
+COMMONS = Path(os.environ.get("MNCS_COMMONS_REPO", REPO.parent / "MNCS-Commons"))
 MNCS = Path(os.environ.get("MNCS", LANGUAGE / "target" / "debug" / "mncs"))
 EMBED_LIBRARY = Path(
     os.environ.get("MNCS_EMBED_LIBRARY", LANGUAGE / "target" / "debug" / "libmncs_embed.so")
@@ -558,7 +559,14 @@ class RunnerTests(unittest.TestCase):
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_native_modules_validate(self):
         environment = dict(os.environ)
-        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join((str(REPO / "native"), str(REPO), str(LANGUAGE / "library")))
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
+            (
+                str(REPO / "native"),
+                str(REPO),
+                str(LANGUAGE / "library"),
+                str(COMMONS / "src" / "mncs_commons" / "mesh"),
+            )
+        )
         for source in sorted((REPO / "native" / "mncs" / "test").rglob("*.mncs")):
             completed = subprocess.run(
                 [str(MNCS), "validate", str(source)],
