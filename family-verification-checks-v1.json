@@ -28,6 +28,19 @@
           "mncs:0.2:test-case:tests.self_suite::boolean::d0ba630684abae18f3c11b74c7a3340691d19fec4bae2e5f6bc4df1c1f5eb82b"
         ]
       }
+    },
+    {
+      "identity": "mncs-test:verification-obligation-plan-contract",
+      "contract_identity": "mncs.verification-obligation-plan/1",
+      "runner": "mncs-test",
+      "surface": "exact-obligation-selection",
+      "selector": {
+        "manifest": "mncs-test.toml",
+        "inventory_identity": "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
+        "test_identities": [
+          "mncs:0.2:test-case:tests.self_suite::arithmetic::ca0c84b11bb187d84ef7dc2af5bc784c917fde67c036c9affeeea5a72d50a2fb"
+        ]
+      }
     }
   ]
 }

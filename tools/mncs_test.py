@@ -21,11 +21,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 from typing import Any, Iterable
 
-from family_contract import validate_inventory, validate_plan
+from family_contract import validate_inventory, validate_obligation_plan, validate_plan
 
 
 RESULT_SCHEMA = "mncs.test-result/1"
@@ -35,6 +36,7 @@ DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
+OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
 RUNNER_VERSION = "0.2.0"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
@@ -668,6 +670,7 @@ def run_process(
     artifacts: ArtifactStore,
     artifact_key: str,
 ) -> dict[str, Any]:
+    started = time.perf_counter()
     command_record = {"argv": argv, "cwd": str(cwd), "timeout_seconds": timeout_seconds}
     command_path = artifacts.write(
         f"commands/{artifact_key}.json", json_bytes(command_record), "command"
@@ -694,6 +697,7 @@ def run_process(
             "stdout_artifact": stdout_path,
             "stderr_artifact": stderr_path,
             "command_artifact": command_path,
+            "timing": {"wall_time_ms": round((time.perf_counter() - started) * 1000, 3), "phase": "process"},
         }
     except (OSError, ValueError) as error:
         return {
@@ -707,6 +711,7 @@ def run_process(
                 f"stderr/{artifact_key}.err", str(error).encode("utf-8"), "stderr"
             ),
             "command_artifact": command_path,
+            "timing": {"wall_time_ms": round((time.perf_counter() - started) * 1000, 3), "phase": "process"},
         }
     stdout_path = artifacts.write(f"stdout/{artifact_key}.out", completed.stdout, "stdout")
     stderr_path = artifacts.write(f"stderr/{artifact_key}.err", completed.stderr, "stderr")
@@ -718,6 +723,7 @@ def run_process(
         "stdout_artifact": stdout_path,
         "stderr_artifact": stderr_path,
         "command_artifact": command_path,
+        "timing": {"wall_time_ms": round((time.perf_counter() - started) * 1000, 3), "phase": "process"},
     }
 
 
@@ -732,8 +738,11 @@ class EmbedSession:
         import ctypes
 
         self._ctypes = ctypes
+        self.timings: list[dict[str, Any]] = []
         self.library_path = library_path
+        library_started = time.perf_counter()
         self.library = ctypes.CDLL(str(library_path))
+        self.timings.append({"phase": "artifact_load", "wall_time_ms": round((time.perf_counter() - library_started) * 1000, 3)})
         uchar_p = ctypes.POINTER(ctypes.c_ubyte)
         self.library.mncs_session_open.argtypes = [uchar_p, ctypes.c_size_t]
         self.library.mncs_session_open.restype = ctypes.c_void_p
@@ -752,7 +761,9 @@ class EmbedSession:
         self.artifact_bytes = artifact_bytes
         buffer = (ctypes.c_ubyte * len(artifact_bytes)).from_buffer_copy(artifact_bytes)
         self._artifact_buffer = buffer
+        session_started = time.perf_counter()
         self.handle = self.library.mncs_session_open(buffer, len(artifact_bytes))
+        self.timings.append({"phase": "session_open", "wall_time_ms": round((time.perf_counter() - session_started) * 1000, 3)})
         if not self.handle:
             raise AdapterError(self.last_error())
 
@@ -774,14 +785,24 @@ class EmbedSession:
             self.library.mncs_response_free(handle)
 
     def info(self) -> dict[str, Any]:
-        return self._response(self.library.mncs_session_info(self.handle))
+        started = time.perf_counter()
+        value = self._response(self.library.mncs_session_info(self.handle))
+        self.timings.append({"phase": "session_info", "wall_time_ms": round((time.perf_counter() - started) * 1000, 3)})
+        return value
 
     def call_batch(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        started = time.perf_counter()
         encoded = compact_json(requests).encode("utf-8")
         response = self.library.mncs_session_call_batch(self.handle, encoded)
         value = self._response(response)
         if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
             raise AdapterError("mncs-embed batch response is not an array of call outputs")
+        self.timings.append({
+            "phase": "native_call_batch",
+            "wall_time_ms": round((time.perf_counter() - started) * 1000, 3),
+            "request_count": len(requests),
+            "request_bytes": len(encoded),
+        })
         return value
 
     def close(self) -> None:
@@ -853,6 +874,7 @@ def compile_embed_artifact(
         "compile": {
             "returncode": process.get("returncode"),
             "timed_out": process.get("timed_out", False),
+            "timing": process.get("timing"),
             "stdout_artifact": process.get("stdout_artifact"),
             "stderr_artifact": process.get("stderr_artifact"),
             "command_artifact": process.get("command_artifact"),
@@ -862,6 +884,7 @@ def compile_embed_artifact(
         detail["reason"] = "compiler could not produce a reusable backend artifact"
         return None, detail
     backend_path = output_dir / "backend.json"
+    backend_read_started = time.perf_counter()
     if not backend_path.is_file():
         detail["reason"] = "compiler reported success without backend.json"
         return None, detail
@@ -871,6 +894,7 @@ def compile_embed_artifact(
     except (OSError, json.JSONDecodeError) as error:
         detail["reason"] = f"backend artifact is not readable JSON: {error}"
         return None, detail
+    detail["backend_load_wall_time_ms"] = round((time.perf_counter() - backend_read_started) * 1000, 3)
     detail["backend_artifact"] = artifacts.record_existing(backend_path, "backend-artifact")
     if isinstance(backend, dict):
         detail["artifact_identity"] = backend.get("identity")
@@ -888,6 +912,7 @@ def compile_embed_artifact(
         detail["mode"] = "retained-embed-batch"
         detail["library"] = str(candidate)
         detail["session"] = session.info()
+        detail["session_timings"] = list(session.timings)
         return session, detail
     detail.setdefault("reason", "mncs-embed library was not found")
     return None, detail
@@ -1381,6 +1406,7 @@ def execute_batch(
         request_artifacts.append(request_artifact)
     try:
         decoded = session.call_batch(transport_requests)
+        transport["timing"] = session.timings[-1] if session.timings else None
     except AdapterError as error:
         results = []
         for index, test in enumerate(tests):
@@ -1756,6 +1782,46 @@ def load_verification_plan(
     return value
 
 
+def load_obligation_plan(
+    path: Path,
+    *,
+    source_path: Path,
+    verification_plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Load the RAVEL obligation/evidence projection without executing it."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read obligation plan {path}: {error}") from error
+    try:
+        value = validate_obligation_plan(value)
+    except (RuntimeError, ValueError) as error:
+        raise ManifestError(str(error)) from error
+    if verification_plan is not None and value.get("verification_plan_id") != verification_plan.get("plan_id"):
+        raise ManifestError("obligation plan is bound to a different verification plan")
+    if value.get("source", {}).get("sha256") != sha256_file(source_path):
+        raise ManifestError("obligation plan source identity is stale")
+    value["_source_path"] = str(source_path.resolve())
+    value["_selected_obligation_identities"] = sorted(
+        item.get("identity")
+        for item in value.get("obligations", [])
+        if isinstance(item, dict) and isinstance(item.get("identity"), str)
+    )
+    value["_reused_obligation_identities"] = sorted(
+        item.get("identity")
+        for item in value.get("obligations", [])
+        if isinstance(item, dict) and item.get("status") == "current"
+    )
+    value["_new_execution_obligation_identities"] = sorted(
+        item.get("identity")
+        for item in value.get("obligations", [])
+        if isinstance(item, dict)
+        and item.get("status") in {"new_execution_required", "stale", "selection_unresolved", "escalation_required", "contradictory"}
+    )
+    return value
+
+
 def apply_verification_plan(
     tests: list[dict[str, Any]], plan: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -1783,6 +1849,45 @@ def apply_verification_plan(
             "verification plan is stale: compiler inventory test count changed"
         )
     return selected
+
+
+def apply_obligation_plan(
+    tests: list[dict[str, Any]], obligation_plan: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Map exact obligation identities to current first-class tests.
+
+    Reused obligations are deliberately removed from execution. The returned
+    summary is evidence metadata; it never turns a reused receipt into a new
+    PASS claim.
+    """
+
+    by_id = {str(test.get("id")): test for test in tests if test.get("id")}
+    required_test_ids: set[str] = set()
+    unresolved: list[str] = []
+    for item in obligation_plan.get("obligations", []):
+        if not isinstance(item, dict) or item.get("status") == "current":
+            continue
+        identities = item.get("test_case_identities", [])
+        if not isinstance(identities, list) or not identities:
+            unresolved.append(str(item.get("identity", "unknown")))
+            continue
+        required_test_ids.update(str(identity) for identity in identities)
+    missing = sorted(required_test_ids - set(by_id))
+    if missing:
+        raise ManifestError(
+            "obligation plan names tests absent from the current compiler inventory: "
+            + ", ".join(missing)
+        )
+    selected = [test for test in tests if str(test.get("id")) in required_test_ids]
+    return selected, {
+        "selected_obligation_identities": list(obligation_plan.get("_selected_obligation_identities", [])),
+        "reused_obligation_identities": list(obligation_plan.get("_reused_obligation_identities", [])),
+        "new_execution_obligation_identities": list(obligation_plan.get("_new_execution_obligation_identities", [])),
+        "selection_unresolved": unresolved,
+        "evidence": list(obligation_plan.get("evidence", [])),
+        "sufficient_to_stop": bool(obligation_plan.get("stop", {}).get("sufficient_to_stop")),
+        "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
+    }
 
 
 def selection_summary(
@@ -1838,6 +1943,9 @@ def make_result(
     allow_unsupported: bool,
     verification_plan: dict[str, Any] | None = None,
     verification_plan_ref: dict[str, Any] | None = None,
+    obligation_plan: dict[str, Any] | None = None,
+    obligation_plan_ref: dict[str, Any] | None = None,
+    obligation_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_path = Path(manifest["source_path"])
     if suite_summary is not None:
@@ -1883,6 +1991,7 @@ def make_result(
         "subject_identity": (test_inventory or {}).get("subject_identity"),
         "subject_fingerprint": (test_inventory or {}).get("subject_fingerprint"),
         "verification_plan": (verification_plan or {}).get("plan_id"),
+        "obligation_plan": (obligation_plan or {}).get("obligation_plan_id"),
         "execution": {
             key: (execution or {}).get(key)
             for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
@@ -1959,9 +2068,20 @@ def make_result(
         plan=verification_plan,
         plan_ref=verification_plan_ref,
     )
+    if obligation_selection is None and obligation_plan is not None:
+        obligation_selection = {
+            "selected_obligation_identities": obligation_plan.get("_selected_obligation_identities", []),
+            "reused_obligation_identities": obligation_plan.get("_reused_obligation_identities", []),
+            "new_execution_obligation_identities": obligation_plan.get("_new_execution_obligation_identities", []),
+            "selection_unresolved": [],
+            "sufficient_to_stop": obligation_plan.get("stop", {}).get("sufficient_to_stop", False),
+            "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
+        }
     reproduction_command = ["mncs-test", "run", "--manifest", str(manifest["manifest_path"])]
     if verification_plan_ref is not None and verification_plan_ref.get("path"):
         reproduction_command.extend(["--verification-plan", str(verification_plan_ref["path"])])
+    if obligation_plan_ref is not None and obligation_plan_ref.get("path"):
+        reproduction_command.extend(["--obligation-plan", str(obligation_plan_ref["path"])])
     result: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA,
         "protocol_version": 1,
@@ -1982,6 +2102,22 @@ def make_result(
         },
         "summary": summary,
         "selection": selected_summary,
+        "verification_obligations": {
+            "schema_version": OBLIGATION_PLAN_SCHEMA,
+            "plan_id": (obligation_plan or {}).get("obligation_plan_id"),
+            "selected": (obligation_selection or {}).get("selected_obligation_identities", []),
+            "executed": [
+                item
+                for item in (obligation_selection or {}).get("selected_obligation_identities", [])
+                if item not in set((obligation_selection or {}).get("reused_obligation_identities", []))
+                and item not in set((obligation_selection or {}).get("selection_unresolved", []))
+            ],
+            "reused": (obligation_selection or {}).get("reused_obligation_identities", []),
+            "new_execution_required": (obligation_selection or {}).get("new_execution_obligation_identities", []),
+            "selection_unresolved": (obligation_selection or {}).get("selection_unresolved", []),
+            "evidence": (obligation_selection or {}).get("evidence", []),
+            "sufficient_to_stop": bool((obligation_selection or {}).get("sufficient_to_stop", False)),
+        },
         "tests": test_results,
         "suite": suite_result,
         "native_suite_summary": native_suite_payload,
@@ -2060,6 +2196,8 @@ def make_result(
     }
     if message:
         result["failure"] = {"class": failure_class, "message": message, **(failure_details or {})}
+    if obligation_plan_ref is not None:
+        result["verification_obligations"]["plan_ref"] = obligation_plan_ref
     return result
 
 
@@ -2476,6 +2614,7 @@ def select_exact_test_identities(
 
 
 def run_manifest(args: argparse.Namespace) -> int:
+    run_started = time.perf_counter()
     cwd = Path.cwd().resolve()
     result_path, check_path, artifact_root = result_paths(args, cwd)
     manifest_path = resolve_path(args.manifest, cwd)
@@ -2485,6 +2624,9 @@ def run_manifest(args: argparse.Namespace) -> int:
         mncs = resolve_mncs(args.mncs, cwd)
         verification_plan: dict[str, Any] | None = None
         verification_plan_ref: dict[str, Any] | None = None
+        obligation_plan: dict[str, Any] | None = None
+        obligation_plan_ref: dict[str, Any] | None = None
+        obligation_selection: dict[str, Any] | None = None
         if args.verification_plan:
             verification_plan_path = resolve_path(args.verification_plan, cwd, must_exist=True)
             verification_plan = load_verification_plan(
@@ -2503,6 +2645,24 @@ def run_manifest(args: argparse.Namespace) -> int:
                 raise ManifestError("--filter cannot be combined with --verification-plan; the plan owns exact selection")
             if args.test_identity:
                 raise ManifestError("--test-identity cannot be combined with --verification-plan; the plan owns exact selection")
+        if args.obligation_plan:
+            obligation_plan_path = resolve_path(args.obligation_plan, cwd, must_exist=True)
+            obligation_plan = load_obligation_plan(
+                obligation_plan_path,
+                source_path=Path(manifest["source_path"]),
+                verification_plan=verification_plan,
+            )
+            obligation_plan_ref = {
+                "kind": "mncs-verification-obligation-plan",
+                "path": relative_path(obligation_plan_path, cwd),
+                "sha256": sha256_file(obligation_plan_path),
+                "plan_id": obligation_plan["obligation_plan_id"],
+                "schema_revision": OBLIGATION_PLAN_SCHEMA,
+            }
+            if args.filter:
+                raise ManifestError("--filter cannot be combined with --obligation-plan; the obligation plan owns exact selection")
+            if args.test_identity:
+                raise ManifestError("--test-identity cannot be combined with --obligation-plan; the obligation plan owns exact selection")
         library_paths = list(manifest["library_paths"])
         for raw_path in args.library or []:
             for component in raw_path.split(os.pathsep):
@@ -2543,6 +2703,8 @@ def run_manifest(args: argparse.Namespace) -> int:
                     if verification_plan.get("source", {}).get("subject_identity") not in (None, test_inventory.get("subject_identity")):
                         raise ManifestError("verification plan subject identity does not match the current compiler inventory")
                     configured_tests = apply_verification_plan(configured_tests, verification_plan)
+                if obligation_plan is not None:
+                    configured_tests, obligation_selection = apply_obligation_plan(configured_tests, obligation_plan)
                 elif args.test_identity:
                     configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
                 else:
@@ -2581,6 +2743,8 @@ def run_manifest(args: argparse.Namespace) -> int:
         else:
             if verification_plan is not None:
                 configured_tests = apply_verification_plan(configured_tests, verification_plan)
+            if obligation_plan is not None:
+                configured_tests, obligation_selection = apply_obligation_plan(configured_tests, obligation_plan)
             elif args.test_identity:
                 configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
             else:
@@ -2593,9 +2757,11 @@ def run_manifest(args: argparse.Namespace) -> int:
             if not configured_tests:
                 execution = {
                     **(execution or {}),
-                    "mode": "compiler-inventory-empty-selection",
+                    "mode": "obligation-evidence-reuse" if obligation_plan is not None else "compiler-inventory-empty-selection",
                     "batch_size": 0,
                 }
+                if obligation_selection is not None:
+                    execution["obligation_selection"] = obligation_selection
             else:
                 session, execution_detail = compile_embed_artifact(
                     source_path=Path(manifest["source_path"]),
@@ -2634,6 +2800,7 @@ def run_manifest(args: argparse.Namespace) -> int:
                             step_budget=args.step_budget or manifest["step_budget"],
                         )
                         execution["native_aggregation"] = native_aggregation
+                        execution["session_timings"] = list(session.timings)
                     finally:
                         session.close()
                 else:
@@ -2776,6 +2943,15 @@ def run_manifest(args: argparse.Namespace) -> int:
                     failure_class = "unsupported"
                     message = str(item.get("failure", {}).get("message", "unsupported capability"))
                     break
+        if (
+            classification == "success"
+            and obligation_selection is not None
+            and obligation_selection.get("selection_unresolved")
+        ):
+            unresolved = ", ".join(obligation_selection["selection_unresolved"])
+            classification = "unsupported"
+            failure_class = "selection_unresolved"
+            message = f"selected verification obligations have no executable mncs-test identity: {unresolved}"
         result = make_result(
             manifest=manifest_for_run,
             source_text=source_text,
@@ -2795,11 +2971,23 @@ def run_manifest(args: argparse.Namespace) -> int:
             allow_unsupported=args.allow_unsupported,
             verification_plan=verification_plan,
             verification_plan_ref=verification_plan_ref,
+            obligation_plan=obligation_plan,
+            obligation_plan_ref=obligation_plan_ref,
+            obligation_selection=obligation_selection,
         )
     except ManifestError as error:
         result = minimal_result(classification="invalid_invocation", message=str(error), cwd=cwd)
     except AdapterError as error:
         result = minimal_result(classification="infrastructure_failure", message=str(error), cwd=cwd)
+    result.setdefault("timing", {})["total_wall_time_ms"] = round((time.perf_counter() - run_started) * 1000, 3)
+    result["timing"]["attribution"] = {
+        "process_wall_time": "execution.process.timing.wall_time_ms when a compiler/provider process ran",
+        "native_call_wall_time": "execution.session_timings entries with phase native_call_batch",
+        "artifact_load": "execution.session_timings entries with phase artifact_load",
+        "session_open": "execution.session_timings entries with phase session_open",
+        "transport": "transport.timing on each native execution result",
+        "unattributed": "total minus recorded phase observations",
+    }
     if result_path:
         result_digest = write_output(result_path, result)
     else:
@@ -2948,6 +3136,10 @@ def parser() -> argparse.ArgumentParser:
         "--verification-plan",
         "--plan",
         help="digest-bound mncs.verification-plan/1 selecting exact compiler test identities",
+    )
+    run.add_argument(
+        "--obligation-plan",
+        help="identity-bound mncs.verification-obligation-plan/1 selecting obligations and reusable evidence",
     )
     run.add_argument("--result", default=".mncs/mncs-test-result.json")
     run.add_argument("--check-result", default=".mncs/mncs-test-check.json")
