@@ -7,11 +7,13 @@
     "compiler-owned test inventory selection",
     "native TestResult construction and failure classification",
     "native test and suite semantic projections",
-    "retained-session suite aggregation"
+    "retained-session suite aggregation",
+    "obligation-plan lifecycle/status-to-test selection"
   ],
   "native_semantic_projection": {
     "test": "mncs.test.assertions.project_test",
     "suite": "mncs.test.suite.project",
+    "obligation_selection": "mncs.test.obligation_selection::selection_app",
     "rust_boundary_only": [
       "external TestResult JSON envelope",
       "external CheckResult compatibility envelope",
@@ -21,15 +23,15 @@
   "verification_plan_ingestion": {
     "status": "native_structural_admission",
     "entrypoint": "mncs test --verification-plan FILE",
-    "selection_authority": "compiler-owned inventory join; native test modules own result semantics",
+    "selection_authority": "native obligation-selection kernel joins RAVEL statuses to compiler-owned test identities",
     "shell_projection": false,
     "jq_required": false,
-    "remaining_blocker": "Commons-owned plan construction and dynamic structured-value semantics remain external to the runner"
+    "remaining_blocker": "Commons-owned plan construction and dynamic structured-value semantics remain external to the runner; generated provider dispatch still awaits generic callable identity invocation"
   },
   "responsibilities": [
     {"area": "manifest parsing", "classification": "test_oracle_tooling", "canonical_owner": "tools/mncs_test.py compatibility adapter"},
     {"area": "source discovery and compiler inventory", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "Rust toolchain compiler API"},
-    {"area": "exact test identity selection", "classification": "compiler_inventory_bootstrap_with_native_plan_admission", "canonical_owner": "mncs test entrypoint and compiler-owned inventory"},
+    {"area": "exact test identity selection", "classification": "native_obligation_selection_kernel_with_compiler_inventory_transport", "canonical_owner": "mncs.test.obligation_selection plus compiler-owned inventory"},
     {"area": "TestResult construction and failure classification", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "mncs.test.assertions and mncs.test.suite"},
     {"area": "CheckResult semantic inputs", "classification": "already_naturally_expressible_in_mncs", "canonical_owner": "native suite projection; Rust retains only external compatibility envelope"},
     {"area": "compiler invocation", "classification": "compiler_owned_typed_api", "canonical_owner": "Rust bootstrap toolchain"},
@@ -45,10 +47,10 @@
     "MNCS-LANG-52A5E0C72A39"
   ],
   "remaining_host_paths": [
-    {"path": "tools/mncs_test.py", "role": "differential oracle and explicit compatibility adapter"},
+    {"path": "tools/mncs_test.py", "role": "JSON/process transport, inventory projection, differential oracle, and explicit compatibility adapter"},
     {"path": "bin/mncs-test-compat", "role": "explicit host compatibility entrypoint"},
     {"path": "tools/generate_cases.py", "role": "test corpus generation utility"}
   ],
   "migration_order": 1,
-  "next_native_slice": "native family-check and external process capability pressure"
+  "next_native_slice": "generic callable identity invocation to retire generated provider dispatch"
 }

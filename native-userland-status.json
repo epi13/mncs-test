@@ -6,16 +6,19 @@
   "native_sources": {
     "mncs-test.toml": "tests/self_suite.mncs",
     "mncs-test-provider": "native/mncs/test/provider.mncs",
+    "mncs-test-obligation-selection": "native/mncs/test/obligation_selection.mncs",
     "mncs-test-provider-generated-inventory": "native/mncs/test/provider_inventory.mncs"
   },
   "native_application_descriptors": {
-    "mncs-test-provider": "native-applications/test-provider.json"
+    "mncs-test-provider": "native-applications/test-provider.json",
+    "mncs-test-obligation-selection": "native-applications/obligation-selection.json"
   },
   "canonical_launcher": "bin/mncs-test",
   "semantic_modules": [
       "native/mncs/test/assertions.mncs",
       "native/mncs/test/generative.mncs",
       "native/mncs/test/runner.mncs",
+      "native/mncs/test/obligation_selection.mncs",
       "native/mncs/test/snapshot.mncs",
       "native/mncs/test/suite.mncs"
   ],
@@ -60,7 +63,8 @@
     "retained_embed_session": true,
     "native_semantic_projections": [
       "mncs.test.assertions.project_test",
-      "mncs.test.suite.project"
+      "mncs.test.suite.project",
+      "mncs.test.obligation_selection.select"
     ],
     "remaining_rust_application_projection": [
       "external TestResult JSON envelope",
@@ -70,11 +74,13 @@
     "host_subprocesses_per_native_test": 0,
     "python_runner_calls": 0,
     "verification_plan_ingestion": "native_structured_document_and_exact_inventory_join",
-  "provider_interface": "mncs.test.provider::run_selected_batch",
+    "obligation_plan_selection": "native_structured_document_and_compiler_inventory_join",
+    "provider_interface": "mncs.test.provider::run_selected_batch",
+    "obligation_selection_interface": "mncs.test.obligation_selection::selection_app",
     "provider_selection_bound": 8,
     "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
-  "provider_inventory_binding": "compiler declaration-inventory → compatibility projection → generated native dispatch module and checked metadata",
-  "provider_inventory_generation_pressure": "generic callable identity binding with heterogeneous typed signatures is not yet expressible; generation remains transparent typed glue",
+    "provider_inventory_binding": "compiler declaration-inventory → compatibility projection → generated native dispatch module and checked metadata",
+    "provider_inventory_generation_pressure": "generic callable identity binding with heterogeneous typed signatures is not yet expressible; generation remains transparent typed glue",
     "provider_revision_binding": "inventory identity + compiler source artifact identity + provider policy identity + generator identity"
   }
 }

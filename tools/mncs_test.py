@@ -41,6 +41,8 @@ RUNNER_VERSION = "0.2.0"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
+NATIVE_OBLIGATION_SELECTION_MAX_ITEMS = 16
+NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH = 128
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -1851,15 +1853,10 @@ def apply_verification_plan(
     return selected
 
 
-def apply_obligation_plan(
+def _apply_obligation_plan_oracle(
     tests: list[dict[str, Any]], obligation_plan: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Map exact obligation identities to current first-class tests.
-
-    Reused obligations are deliberately removed from execution. The returned
-    summary is evidence metadata; it never turns a reused receipt into a new
-    PASS claim.
-    """
+    """Historical Python projection retained for explicit differential tests."""
 
     by_id = {str(test.get("id")): test for test in tests if test.get("id")}
     required_test_ids: set[str] = set()
@@ -1884,6 +1881,158 @@ def apply_obligation_plan(
         "reused_obligation_identities": list(obligation_plan.get("_reused_obligation_identities", [])),
         "new_execution_obligation_identities": list(obligation_plan.get("_new_execution_obligation_identities", [])),
         "selection_unresolved": unresolved,
+        "evidence": list(obligation_plan.get("evidence", [])),
+        "sufficient_to_stop": bool(obligation_plan.get("stop", {}).get("sufficient_to_stop")),
+        "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
+    }
+
+
+def _native_selection_identities(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ManifestError(f"native obligation selection returned malformed {label}")
+    return list(value)
+
+
+def apply_obligation_plan(
+    tests: list[dict[str, Any]],
+    obligation_plan: dict[str, Any],
+    *,
+    mncs: str | None = None,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+    timeout_seconds: int = 180,
+    native: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply an identity-bound plan through the native Test selection kernel.
+
+    The Python path is available only with ``native=False`` for differential
+    testing. Normal runner invocations provide the compiler binary and use the
+    MNCS application; Python retains only JSON/process transport and the
+    final inventory projection.
+    """
+
+    if not native:
+        return _apply_obligation_plan_oracle(tests, obligation_plan)
+    if not mncs or cwd is None or environment is None:
+        raise ManifestError("native obligation selection requires mncs, cwd, and environment")
+
+    request = {
+        "schema_version": "mncs.test-obligation-selection-request/1",
+        "plan_identity": str(obligation_plan.get("obligation_plan_id", "")),
+        "obligations": [
+            {
+                "identity": str(item.get("identity", "")),
+                "status": str(item.get("status", "")),
+                "test_case_identities": [
+                    str(identity)
+                    for identity in item.get("test_case_identities", [])
+                    if isinstance(identity, str)
+                ],
+            }
+            for item in obligation_plan.get("obligations", [])
+            if isinstance(item, dict)
+        ],
+        "available_test_identities": [
+            str(test["id"])
+            for test in tests
+            if isinstance(test, dict) and isinstance(test.get("id"), str) and test["id"]
+        ],
+    }
+    if len(request["obligations"]) > NATIVE_OBLIGATION_SELECTION_MAX_ITEMS:
+        raise ManifestError(
+            "native obligation selection bound exceeded: at most "
+            f"{NATIVE_OBLIGATION_SELECTION_MAX_ITEMS} selected obligations"
+        )
+    if len(request["available_test_identities"]) > NATIVE_OBLIGATION_SELECTION_MAX_ITEMS:
+        raise ManifestError(
+            "native obligation selection bound exceeded: at most "
+            f"{NATIVE_OBLIGATION_SELECTION_MAX_ITEMS} compiler test identities"
+        )
+    identity_values = [
+        item["identity"]
+        for item in request["obligations"]
+    ] + request["available_test_identities"] + [
+        identity
+        for item in request["obligations"]
+        for identity in item["test_case_identities"]
+    ]
+    if any(len(identity.encode("utf-8")) > NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH for identity in identity_values):
+        raise ManifestError(
+            "native obligation selection identity bound exceeded: at most "
+            f"{NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH} UTF-8 bytes"
+        )
+    descriptor = Path(__file__).resolve().parents[1] / "native-applications" / "obligation-selection.json"
+    if not descriptor.is_file():
+        raise ManifestError(f"native obligation selection descriptor is unavailable: {descriptor}")
+    cwd = cwd.resolve()
+    try:
+        with tempfile.TemporaryDirectory(prefix=".mncs-test-obligation-selection-", dir=cwd) as directory:
+            directory_path = Path(directory)
+            request_path = directory_path / "request.json"
+            result_path = directory_path / "result.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            relative_request = request_path.relative_to(cwd).as_posix()
+            relative_result = result_path.relative_to(cwd).as_posix()
+            completed = subprocess.run(
+                [
+                    mncs,
+                    "run-app",
+                    str(descriptor),
+                    "--grant-structured",
+                    "test_artifact",
+                    "--step-budget",
+                    "1048576",
+                    "--",
+                    relative_request,
+                    relative_result,
+                ],
+                cwd=str(cwd),
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+            if completed.returncode != 0:
+                detail = completed.stderr.strip() or completed.stdout.strip()
+                raise ManifestError(
+                    f"native obligation selection failed (exit {completed.returncode}): {detail}"
+                )
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ManifestError(f"native obligation selection returned no valid result: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise ManifestError(
+            f"native obligation selection exceeded {timeout_seconds}s"
+        ) from error
+
+    if not isinstance(result, dict) or result.get("schema_version") != "mncs.test-obligation-selection/1":
+        raise ManifestError("native obligation selection returned an invalid result schema")
+    missing = _native_selection_identities(result.get("missing_test_identities"), "missing test identities")
+    if missing:
+        raise ManifestError(
+            "obligation plan names tests absent from the current compiler inventory: "
+            + ", ".join(sorted(missing))
+        )
+    by_id = {str(test.get("id")): test for test in tests if test.get("id")}
+    selected_ids = _native_selection_identities(result.get("selected_test_identities"), "selected test identities")
+    selected = [test for test in tests if str(test.get("id")) in set(selected_ids)]
+    if any(identity not in by_id for identity in selected_ids):
+        raise ManifestError("native obligation selection returned a test absent from the current inventory")
+    return selected, {
+        "selected_obligation_identities": _native_selection_identities(
+            result.get("selected_obligation_identities"), "selected obligation identities"
+        ),
+        "reused_obligation_identities": _native_selection_identities(
+            result.get("reused_obligation_identities"), "reused obligation identities"
+        ),
+        "new_execution_obligation_identities": _native_selection_identities(
+            result.get("new_execution_obligation_identities"), "new execution obligation identities"
+        ),
+        "selection_unresolved": _native_selection_identities(
+            result.get("selection_unresolved"), "unresolved obligations"
+        ),
         "evidence": list(obligation_plan.get("evidence", [])),
         "sufficient_to_stop": bool(obligation_plan.get("stop", {}).get("sufficient_to_stop")),
         "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
@@ -2704,7 +2853,14 @@ def run_manifest(args: argparse.Namespace) -> int:
                         raise ManifestError("verification plan subject identity does not match the current compiler inventory")
                     configured_tests = apply_verification_plan(configured_tests, verification_plan)
                 if obligation_plan is not None:
-                    configured_tests, obligation_selection = apply_obligation_plan(configured_tests, obligation_plan)
+                    configured_tests, obligation_selection = apply_obligation_plan(
+                        configured_tests,
+                        obligation_plan,
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                        timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                    )
                 elif args.test_identity:
                     configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
                 else:
@@ -2744,7 +2900,14 @@ def run_manifest(args: argparse.Namespace) -> int:
             if verification_plan is not None:
                 configured_tests = apply_verification_plan(configured_tests, verification_plan)
             if obligation_plan is not None:
-                configured_tests, obligation_selection = apply_obligation_plan(configured_tests, obligation_plan)
+                configured_tests, obligation_selection = apply_obligation_plan(
+                    configured_tests,
+                    obligation_plan,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                )
             elif args.test_identity:
                 configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
             else:

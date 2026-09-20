@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.test-obligation-selection-request/1",
+  "plan_identity": "plan-native",
+  "obligations": [
+    {
+      "identity": "obligation-current",
+      "status": "current",
+      "test_case_identities": ["case-a"]
+    },
+    {
+      "identity": "obligation-new",
+      "status": "new_execution_required",
+      "test_case_identities": ["case-b"]
+    }
+  ],
+  "available_test_identities": ["case-a", "case-b"]
+}

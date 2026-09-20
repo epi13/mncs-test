@@ -32,7 +32,7 @@
       "lifecycle": "permanent",
       "scope": "consumer",
       "subjects": ["mncs.verification-obligation-plan/1"],
-      "invalidation_dependencies": ["tools/mncs_test.py", "tools/family_contract.py"],
+      "invalidation_dependencies": ["native/mncs/test/obligation_selection.mncs", "native-applications/obligation-selection.json", "tools/mncs_test.py", "tools/family_contract.py"],
       "executor": {
         "provider": "mncs-test",
         "kind": "compile_experiment",
