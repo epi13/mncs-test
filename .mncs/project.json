@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 3,
+  "revision": 4,
   "manifest_location": "in-repository",
   "authority": {
     "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport, generation, and differential adapters."
@@ -16,12 +16,18 @@
       {"path": "pressures/MNCS-TEST-P-007.json", "class": "reference", "authority": "MNCS-Commons", "note": "Local evidence linked to the canonical Commons pressure.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "reference"}}
     ]
   },
+  "verification": {
+    "schema_version": "mncs-family.verification-obligation-inventory/v1",
+    "obligation_inventory": ".mncs/verification-obligations.json"
+  },
   "contracts": {
     "provides": [
       {"contract": "test-provider", "version": "1", "kind": "native-test-provider", "stability": "experimental", "fingerprint_sources": ["native/mncs/test/", "schemas/"]}
     ],
     "consumes": [
       {"contract": "mncs-language.compiler-inventory", "envelope": {"op": "any"}, "required": true}
+      ,{"contract": "ravel.verification-plan", "envelope": {"op": "any"}, "required": true}
+      ,{"contract": "ravel.verification-obligation-plan", "envelope": {"op": "any"}, "required": false}
     ],
     "tests": [
       {"test": "native-test-provider", "covers": ["test-provider"], "obligation": "self", "command": {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]}}

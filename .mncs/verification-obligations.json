@@ -1,0 +1,48 @@
+{
+  "schema_version": "mncs-family.verification-obligation-inventory/v1",
+  "repository": "mncs-test",
+  "revision": 1,
+  "obligations": [
+    {
+      "identity": "mncs-test.native-provider.execution",
+      "title": "Selected test obligations execute through the native provider session",
+      "guarantee_domain": "runtime",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "consumer",
+      "subjects": ["mncs.test-result/1", "mncs-test:test-provider"],
+      "invalidation_dependencies": ["native/mncs/test/", "ravel.verification-obligation-plan"],
+      "executor": {
+        "provider": "mncs-test",
+        "kind": "native_first_class_test",
+        "entrypoint": "mncs-test run",
+        "declaration_identities": ["*"]
+      },
+      "evidence_identity": {
+        "subject_fields": ["subject_identity", "subject_fingerprint"],
+        "definition_fields": ["test_case_identity", "obligation_plan_id"],
+        "execution_fields": ["execution_identity", "observation_identity", "run_id"]
+      }
+    },
+    {
+      "identity": "mncs-test.obligation-evidence-reuse",
+      "title": "Current identity-bound evidence can be reused without execution",
+      "guarantee_domain": "integration",
+      "evidence_role": "conformance",
+      "lifecycle": "permanent",
+      "scope": "consumer",
+      "subjects": ["mncs.verification-obligation-plan/1"],
+      "invalidation_dependencies": ["tools/mncs_test.py", "tools/family_contract.py"],
+      "executor": {
+        "provider": "mncs-test",
+        "kind": "compile_experiment",
+        "entrypoint": "tests/test_obligation_selection.py"
+      },
+      "evidence_identity": {
+        "subject_fields": ["subject_identity", "subject_fingerprint"],
+        "definition_fields": ["inventory_identity", "obligation_plan_id"],
+        "execution_fields": ["result_identity"]
+      }
+    }
+  ]
+}

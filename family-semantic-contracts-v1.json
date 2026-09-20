@@ -38,6 +38,18 @@
         "surface": "selected-consumer-behavior",
         "evidence": "family-verification-checks-v1.json"
       }
+    },
+    {
+      "contract_identity": "mncs.verification-obligation-plan/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-test:verification-obligation-plan",
+      "evidence": "tools/mncs_test.py",
+      "verification": {
+        "check_identity": "mncs-test:verification-obligation-plan-contract",
+        "executor": "mncs-test",
+        "surface": "exact-obligation-selection",
+        "evidence": "family-verification-checks-v1.json"
+      }
     }
   ]
 }
