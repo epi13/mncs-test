@@ -22,17 +22,16 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from pathlib import Path
 from typing import Any, Iterable
 
+import tomllib
 from family_contract import (
     validate_inventory,
     validate_obligation_inventory,
     validate_obligation_plan,
     validate_plan,
 )
-
 
 RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
@@ -409,6 +408,43 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
     libraries = raw.get("libraries", [])
     if not isinstance(libraries, list) or not all(isinstance(item, str) and item for item in libraries):
         raise ManifestError("libraries must be an array of non-empty strings")
+    raw_grant_sets = raw.get("host_grant_sets", [])
+    if not isinstance(raw_grant_sets, list):
+        raise ManifestError("host_grant_sets must be an array when present")
+    grant_set_ids: set[str] = set()
+    host_grant_sets: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_grant_sets):
+        if not isinstance(item, dict) or set(item) != {"test_case_identity", "grants"}:
+            raise ManifestError(f"host_grant_sets[{index}] must contain only test_case_identity and grants")
+        test_identity = item.get("test_case_identity")
+        grants = item.get("grants")
+        if not isinstance(test_identity, str) or not test_identity or test_identity in grant_set_ids:
+            raise ManifestError(f"host_grant_sets[{index}].test_case_identity must be unique and non-empty")
+        if not isinstance(grants, list) or not grants:
+            raise ManifestError(f"host_grant_sets[{index}].grants must be a non-empty array")
+        normalized_grants: list[dict[str, Any]] = []
+        seen_grants: set[tuple[str, str]] = set()
+        for grant_index, grant in enumerate(grants):
+            if not isinstance(grant, dict) or set(grant) - {"capability", "locator", "bytes"}:
+                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}] is malformed")
+            capability = grant.get("capability")
+            locator = grant.get("locator", "")
+            grant_bytes = grant.get("bytes", [])
+            if not isinstance(capability, str) or not capability or not isinstance(locator, str):
+                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}] needs capability and locator strings")
+            if (
+                not isinstance(grant_bytes, list)
+                or len(grant_bytes) > 4096
+                or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255 for value in grant_bytes)
+            ):
+                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}].bytes must be a bounded byte array")
+            identity = (capability, locator)
+            if identity in seen_grants:
+                raise ManifestError(f"host_grant_sets[{index}] contains a duplicate capability and locator")
+            seen_grants.add(identity)
+            normalized_grants.append({"capability": capability, "locator": locator, "bytes": grant_bytes})
+        grant_set_ids.add(test_identity)
+        host_grant_sets.append({"test_case_identity": test_identity, "grants": normalized_grants})
     tests = raw.get("tests", [])
     if not isinstance(tests, list):
         raise ManifestError("tests must be an array when present")
@@ -461,6 +497,7 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
     result["source_path"] = source_path
     result["library_paths"] = library_paths
     result["tests"] = normalized_tests
+    result["host_grant_sets"] = host_grant_sets
     result.setdefault("profile", profile)
     result.setdefault("step_budget", 100000)
     result.setdefault("timeout_seconds", 60)
@@ -942,6 +979,7 @@ def canonical_execution_request(
     step_budget: int,
     type_arguments: Any = None,
     include_type_arguments: bool = False,
+    host_grants: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the stable request document shared with debugger consumers.
 
@@ -958,6 +996,8 @@ def canonical_execution_request(
     }
     if include_type_arguments:
         request["type_arguments"] = type_arguments
+    if host_grants:
+        request["host_grants"] = host_grants
     return request
 
 
@@ -969,6 +1009,7 @@ def embed_execution_request(
     step_budget: int,
     type_arguments: Any = None,
     include_type_arguments: bool = False,
+    host_grants: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build only the request shape accepted by the retained embed ABI."""
 
@@ -980,6 +1021,8 @@ def embed_execution_request(
     }
     if include_type_arguments:
         request["type_arguments"] = type_arguments
+    if host_grants:
+        request["grants"] = host_grants
     return request
 
 
@@ -1383,6 +1426,9 @@ def execute_batch(
     request_artifacts: list[dict[str, Any]] = []
     for index, test in enumerate(tests):
         step_budget = int(test.get("step_budget", default_step_budget))
+        host_grants = test.get("host_grants", [])
+        if not isinstance(host_grants, list):
+            raise ManifestError(f"test {test.get('id')} has malformed host grants")
         request = canonical_execution_request(
             module=module,
             function=test["entry"],
@@ -1390,6 +1436,7 @@ def execute_batch(
             step_budget=step_budget,
             type_arguments=test.get("type_arguments"),
             include_type_arguments="type_arguments" in test,
+            host_grants=host_grants,
         )
         request_documents.append(request)
         transport_requests.append(
@@ -1400,6 +1447,7 @@ def execute_batch(
                 step_budget=step_budget,
                 type_arguments=test.get("type_arguments"),
                 include_type_arguments="type_arguments" in test,
+                host_grants=host_grants,
             )
         )
         request_path = artifacts.root / "requests" / f"batch-{index:03d}-{safe_artifact_key(test['id'])}.json"
@@ -1919,6 +1967,81 @@ def _cargo_package_paths(metadata: dict[str, Any], package_name: str) -> list[st
     return sorted(paths)
 
 
+def _cargo_test_target_declarations(
+    metadata: dict[str, Any], package_name: str, parent_name: str, argv: list[str]
+) -> list[dict[str, str | list[str]]]:
+    packages = metadata.get("packages")
+    workspace_ids = set(metadata.get("workspace_members", []))
+    named = [
+        item for item in packages if isinstance(item, dict)
+        and item.get("name") == package_name and item.get("id") in workspace_ids
+    ] if isinstance(packages, list) else []
+    if len(named) != 1:
+        return []
+    workspace_root = Path(str(metadata.get("workspace_root", ""))).resolve()
+    output: list[dict[str, str | list[str]]] = []
+    for target in named[0].get("targets", []):
+        if not isinstance(target, dict) or (target.get("test") is not True and target.get("doctest") is not True):
+            continue
+        kinds = target.get("kind", [])
+        name = target.get("name")
+        source_path = target.get("src_path")
+        if not isinstance(kinds, list) or not isinstance(name, str) or not isinstance(source_path, str):
+            continue
+        source = Path(source_path).resolve()
+        try:
+            relative_source = source.relative_to(workspace_root).as_posix()
+        except ValueError:
+            continue
+        if target.get("test") is True:
+            target_kind = next((kind for kind in ("lib", "bin", "test", "example") if kind in kinds), None)
+            if target_kind is not None:
+                selector = {
+                    "lib": ["--lib"],
+                    "bin": ["--bin", name],
+                    "test": ["--test", name],
+                    "example": ["--example", name],
+                }[target_kind]
+                output.append({
+                    "name": f"{parent_name}.cargo.{target_kind}.{name}",
+                    "target_identity": f"{package_name}:{target_kind}:{name}",
+                    "source_path": relative_source,
+                    "argv": [*argv, *selector],
+                })
+        if "lib" in kinds and target.get("doctest") is True:
+            output.append({
+                "name": f"{parent_name}.cargo.doc.{name}",
+                "target_identity": f"{package_name}:doc:{name}",
+                "source_path": relative_source,
+                "argv": [*argv, "--doc"],
+            })
+    output.sort(key=lambda item: str(item["target_identity"]))
+    return output
+
+
+def _cargo_test_target_paths(
+    metadata: dict[str, Any], package_name: str, target_source_path: str
+) -> list[str] | None:
+    package_paths = _cargo_package_paths(metadata, package_name)
+    if package_paths is None:
+        return None
+    workspace_root = Path(str(metadata.get("workspace_root", ""))).resolve()
+    paths: set[str] = set()
+    for package_path in package_paths:
+        candidate = workspace_root / package_path
+        if package_path in {"Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo"}:
+            paths.add(package_path)
+            continue
+        if (candidate / "Cargo.toml").is_file():
+            paths.add((Path(package_path) / "Cargo.toml").as_posix())
+        if (candidate / "src").is_dir():
+            paths.add((Path(package_path) / "src").as_posix())
+        if (candidate / "build.rs").is_file():
+            paths.add((Path(package_path) / "build.rs").as_posix())
+    paths.add(target_source_path)
+    return sorted(paths)
+
+
 def _prepare_repository_obligation_context(
     obligation_plan: dict[str, Any], manifest_path: Path
 ) -> dict[str, Any]:
@@ -1930,6 +2053,11 @@ def _prepare_repository_obligation_context(
     manifest_root = _repository_root_for_path(manifest_path)
     if root is None or manifest_root != root:
         raise ManifestError("repository-canonical plan and mncs-test manifest must belong to the same declared repository")
+    test_manifest = load_manifest(manifest_path)
+    try:
+        test_manifest_relative = manifest_path.resolve().relative_to(root).as_posix()
+    except ValueError as error:
+        raise ManifestError("repository-canonical test manifest is outside the declared repository") from error
     project_path = root / ".mncs" / "project.json"
     inventory_path = root / ".mncs" / "verification-obligations.json"
     try:
@@ -1959,6 +2087,8 @@ def _prepare_repository_obligation_context(
         raise ManifestError("repository project test declarations are malformed")
     tests_by_identity: dict[str, dict[str, Any]] = {}
     declared_tests: list[dict[str, Any]] = []
+    required_project_test_ids: list[str] = []
+    cargo_metadata: dict[str, Any] | None = None
     for test in project_tests:
         if not isinstance(test, dict) or test.get("obligation") != "self":
             continue
@@ -1968,14 +2098,52 @@ def _prepare_repository_obligation_context(
         if not isinstance(name, str) or not isinstance(argv, list) or not argv:
             raise ManifestError("repository self-test declarations need a name and argv")
         identity = f"{repository_identity}.project-test.{name}"
-        if identity in tests_by_identity:
-            raise ManifestError(f"duplicate repository self-test identity: {identity}")
-        tests_by_identity[identity] = test
         declared_tests.append({"identity": identity, "name": name, "command": argv})
+        timeout_seconds = command.get("timeout_seconds", test.get("timeout_seconds")) if isinstance(command, dict) else None
+        target_mode = command.get("target_mode") if isinstance(command, dict) else None
+        if target_mode is None:
+            if identity in tests_by_identity:
+                raise ManifestError(f"duplicate repository self-test identity: {identity}")
+            tests_by_identity[identity] = {
+                "test": name,
+                "project_test": test,
+                "command": command,
+            }
+            required_project_test_ids.append(identity)
+            continue
+        if target_mode != "cargo_test_targets" or argv[0] != "cargo" or not isinstance(timeout_seconds, int):
+            raise ManifestError(f"repository self-test {identity} has an unsupported target_mode")
+        if cargo_metadata is None:
+            try:
+                metadata_process = subprocess.run(
+                    ["cargo", "metadata", "--format-version", "1"],
+                    cwd=root, capture_output=True, text=True, check=False,
+                    timeout=120, stdin=subprocess.DEVNULL,
+                )
+                cargo_metadata = json.loads(metadata_process.stdout) if metadata_process.returncode == 0 else None
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+                cargo_metadata = None
+        package = _cargo_package_from_argv(argv)
+        targets = _cargo_test_target_declarations(cargo_metadata or {}, package or "", name, argv)
+        if not targets:
+            raise ManifestError(f"repository self-test {identity} has no Cargo test targets to expand")
+        for target in targets:
+            child_name = str(target["name"])
+            child_identity = f"{repository_identity}.project-test.{child_name}"
+            if child_identity in tests_by_identity:
+                raise ManifestError(f"duplicate repository self-test identity: {child_identity}")
+            tests_by_identity[child_identity] = {
+                "test": child_name,
+                "project_test": test,
+                "command": {"argv": target["argv"], "timeout_seconds": timeout_seconds},
+                "cargo_target_identity": target["target_identity"],
+                "cargo_target_source_path": target["source_path"],
+            }
+            required_project_test_ids.append(child_identity)
     canonical_inventory_ids = [
         item["identity"] for item in inventory["obligations"] if item.get("scope") == "repository_canonical"
     ]
-    expected_required = canonical_inventory_ids + [item["identity"] for item in declared_tests]
+    expected_required = canonical_inventory_ids + required_project_test_ids
     if expected_required != repository.get("required_obligation_identities"):
         raise ManifestError("repository-canonical obligation set is stale or incomplete")
     source_inventories = repository.get("compiler_test_inventories", [])
@@ -2018,6 +2186,9 @@ def _prepare_repository_obligation_context(
         "providers": providers,
         "runner_identity": runner_identity,
         "source_inventories": source_inventories,
+        "cargo_metadata": cargo_metadata,
+        "test_manifest": test_manifest,
+        "test_manifest_relative": test_manifest_relative,
     }
 
 
@@ -2077,30 +2248,24 @@ def _verify_repository_obligation_identities(
         declared = provider.get("fingerprint_sources", [])
         if isinstance(declared, list):
             fingerprint_sources[provider["contract"]] = [item for item in declared if isinstance(item, str)]
-    try:
-        metadata_process = subprocess.run(
-            ["cargo", "metadata", "--format-version", "1"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-            stdin=subprocess.DEVNULL,
-        )
-        metadata = json.loads(metadata_process.stdout) if metadata_process.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        metadata = None
+    metadata = context.get("cargo_metadata")
+    tool_versions: dict[str, str] = {}
 
-    for identity, test in context["tests_by_identity"].items():
+    for identity, declaration in context["tests_by_identity"].items():
         selected = selected_by_identity.get(identity)
         if selected is None:
             raise ManifestError(f"repository-canonical plan omitted declared project test {identity}")
-        command = test.get("command")
+        test = declaration["project_test"]
+        command = declaration.get("command")
         argv = command.get("argv") if isinstance(command, dict) else None
-        timeout_seconds = command.get("timeout_seconds", test.get("timeout_seconds")) if isinstance(command, dict) else None
+        timeout_seconds = command.get("timeout_seconds") if isinstance(command, dict) else None
         if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
             raise ManifestError(f"project test {identity} has no explicit argv executor")
-        tool_version = _repository_tool_identity(argv, cwd=root)
+        tool_version = tool_versions.get(argv[0])
+        if tool_version is None:
+            tool_version = _repository_tool_identity(argv, cwd=root)
+            if tool_version is not None:
+                tool_versions[argv[0]] = tool_version
         if tool_version is None:
             raise ManifestError(f"project test {identity} executor version is unavailable")
         dependencies = sorted({
@@ -2117,7 +2282,12 @@ def _verify_repository_obligation_identities(
         dependencies = sorted(set(dependencies))
         if argv[0] == "cargo":
             package = _cargo_package_from_argv(argv)
-            paths = _cargo_package_paths(metadata, package) if metadata and package else None
+            target_source = declaration.get("cargo_target_source_path")
+            paths = (
+                _cargo_test_target_paths(metadata, package, str(target_source))
+                if metadata and package and isinstance(target_source, str)
+                else _cargo_package_paths(metadata, package) if metadata and package else None
+            )
             if paths is None:
                 raise ManifestError(f"project test {identity} has no bounded Cargo package target")
             dependencies = sorted(set(dependencies + paths))
@@ -2127,15 +2297,17 @@ def _verify_repository_obligation_identities(
         executor = {
             "provider": "mncs-test",
             "kind": "external_integration",
-            "entrypoint": f"project-test:{test['test']}",
+            "entrypoint": f"project-test:{declaration['test']}",
             "argv": argv,
             "working_directory": ".",
             "timeout_seconds": timeout_seconds,
-            "target_identity": _cargo_package_from_argv(argv) or test["test"],
+            "target_identity": declaration.get("cargo_target_identity") or _cargo_package_from_argv(argv) or declaration["test"],
             "verifier_identity": tool_version,
         }
         definition = {"project_test": test, "repository": repository["identity"], "runner_identity": context["runner_identity"]}
-        subject = f"mncs.repository-test:{repository['identity']}:{test['test']}"
+        if declaration.get("cargo_target_identity"):
+            definition["cargo_target_identity"] = declaration["cargo_target_identity"]
+        subject = f"mncs.repository-test:{repository['identity']}:{declaration['test']}"
         expected = {
             "definition_identity": _digest_identity(definition),
             "subject_identity": subject,
@@ -2165,6 +2337,23 @@ def _verify_repository_obligation_identities(
             raise ManifestError(f"unsupported declared repository executor for {identity}")
         source_paths = executor.get("source_paths", [])
         library_paths = executor.get("library_paths", [])
+        grant_sets = context["test_manifest"].get("host_grant_sets", [])
+        grants_by_test = {
+            item["test_case_identity"]: item["grants"]
+            for item in grant_sets
+            if isinstance(item, dict)
+            and isinstance(item.get("test_case_identity"), str)
+            and isinstance(item.get("grants"), list)
+        }
+        stale_grants = sorted(set(grants_by_test) - set(current_test_ids))
+        if stale_grants:
+            raise ManifestError(
+                f"native host grant selectors are absent from the current compiler inventory: {', '.join(stale_grants)}"
+            )
+        host_grants = [
+            {"test_case_identity": test_identity, "grants": grants_by_test[test_identity]}
+            for test_identity in current_test_ids if test_identity in grants_by_test
+        ]
         selected_executor = selected.get("executor", {})
         if (
             source_paths != [source_relative]
@@ -2172,10 +2361,11 @@ def _verify_repository_obligation_identities(
             or selected_executor.get("source_paths") != source_paths
             or selected_executor.get("library_paths") != library_paths
             or selected_executor.get("test_case_identities") != current_test_ids
+            or selected_executor.get("host_grants", []) != host_grants
         ):
             raise ManifestError(f"native obligation {identity} is not bound to the current exact source test identities")
         local_invalidation, local_complete = _repository_file_fingerprint(
-            root, obligation.get("invalidation_dependencies", [])
+            root, [*obligation.get("invalidation_dependencies", []), context["test_manifest_relative"]]
         )
         external_names: list[str] = []
         for raw_library in library_paths:
@@ -2199,6 +2389,7 @@ def _verify_repository_obligation_identities(
             "source_paths": source_paths,
             "library_paths": library_paths,
             "test_case_identities": selected_executor.get("test_case_identities"),
+            "host_grants": host_grants,
             "verifier_identity": verifier,
         })
         subject = obligation.get("subjects", [identity])[0]
@@ -2632,6 +2823,25 @@ def apply_obligation_plan(
     if not mncs or cwd is None or environment is None:
         raise ManifestError("native obligation selection requires mncs, cwd, and environment")
 
+    all_obligations = [
+        item for item in obligation_plan.get("obligations", []) if isinstance(item, dict)
+    ]
+    native_obligations = [
+        item for item in all_obligations
+        if item.get("executor", {}).get("kind") == "native_first_class_test"
+        or not isinstance(item.get("executor"), dict)
+    ]
+    required_test_ids = sorted({
+        identity
+        for item in native_obligations
+        for identity in item.get("test_case_identities", [])
+        if isinstance(identity, str)
+    })
+    available_test_ids = {
+        str(test["id"])
+        for test in tests
+        if isinstance(test, dict) and isinstance(test.get("id"), str) and test["id"]
+    }
     request = {
         "schema_version": "mncs.test-obligation-selection-request/1",
         "plan_identity": str(obligation_plan.get("obligation_plan_id", "")),
@@ -2650,13 +2860,10 @@ def apply_obligation_plan(
                     if isinstance(identity, str)
                 ],
             }
-            for item in obligation_plan.get("obligations", [])
-            if isinstance(item, dict)
+            for item in native_obligations
         ],
         "available_test_identities": [
-            str(test["id"])
-            for test in tests
-            if isinstance(test, dict) and isinstance(test.get("id"), str) and test["id"]
+            identity for identity in required_test_ids if identity in available_test_ids
         ],
     }
     if len(request["obligations"]) > NATIVE_OBLIGATION_SELECTION_MAX_ITEMS:
@@ -2741,23 +2948,83 @@ def apply_obligation_plan(
     selected = [test for test in tests if str(test.get("id")) in set(selected_ids)]
     if any(identity not in by_id for identity in selected_ids):
         raise ManifestError("native obligation selection returned a test absent from the current inventory")
+    repository = obligation_plan.get("repository", {})
+    plan_selected = (
+        repository.get("selected_obligation_identities", [])
+        if isinstance(repository, dict)
+        else obligation_plan.get("_selected_obligation_identities", [])
+    )
+    selected_obligations = [
+        item.get("identity") for item in all_obligations if isinstance(item.get("identity"), str)
+    ]
+    selected_all = list(plan_selected) if isinstance(plan_selected, list) and plan_selected else selected_obligations
+    reused_all = [item["identity"] for item in all_obligations if item.get("status") == "current"]
+    needs_execution = {
+        "new_execution_required", "stale", "selection_unresolved", "escalation_required", "contradictory"
+    }
+    new_all = [item["identity"] for item in all_obligations if item.get("status") in needs_execution]
+    native_unresolved = _native_selection_identities(
+        result.get("selection_unresolved"), "unresolved obligations"
+    )
+    selected_native_obligations = _native_selection_identities(
+        result.get("selected_obligation_identities"), "selected obligation identities"
+    )
+    if set(selected_native_obligations) != {
+        str(item.get("identity")) for item in native_obligations if isinstance(item.get("identity"), str)
+    }:
+        raise ManifestError("native test selector returned a different selected first-class obligation set")
     return selected, {
-        "selected_obligation_identities": _native_selection_identities(
-            result.get("selected_obligation_identities"), "selected obligation identities"
-        ),
-        "reused_obligation_identities": _native_selection_identities(
-            result.get("reused_obligation_identities"), "reused obligation identities"
-        ),
-        "new_execution_obligation_identities": _native_selection_identities(
-            result.get("new_execution_obligation_identities"), "new execution obligation identities"
-        ),
-        "selection_unresolved": _native_selection_identities(
-            result.get("selection_unresolved"), "unresolved obligations"
-        ),
+        "selected_obligation_identities": selected_all,
+        "reused_obligation_identities": reused_all,
+        "new_execution_obligation_identities": new_all,
+        "selection_unresolved": native_unresolved,
         "evidence": list(obligation_plan.get("evidence", [])),
         "sufficient_to_stop": bool(obligation_plan.get("stop", {}).get("sufficient_to_stop")),
         "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
     }
+
+
+def _apply_host_grants(
+    tests: list[dict[str, Any]],
+    manifest: dict[str, Any],
+    obligation_plan: dict[str, Any] | None,
+) -> None:
+    grants_by_test = {
+        item["test_case_identity"]: item["grants"]
+        for item in manifest.get("host_grant_sets", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("test_case_identity"), str)
+        and isinstance(item.get("grants"), list)
+    }
+    repository = obligation_plan.get("repository") if isinstance(obligation_plan, dict) else None
+    repository_canonical = (
+        isinstance(repository, dict) and repository.get("scope") == "repository_canonical"
+    )
+    if repository_canonical and obligation_plan is not None:
+        planned: dict[str, list[dict[str, Any]]] = {}
+        for obligation in obligation_plan.get("obligations", []):
+            if not isinstance(obligation, dict) or obligation.get("status") == "current":
+                continue
+            executor = obligation.get("executor")
+            if not isinstance(executor, dict) or executor.get("kind") != "native_first_class_test":
+                continue
+            for item in executor.get("host_grants", []):
+                if not isinstance(item, dict) or not isinstance(item.get("test_case_identity"), str):
+                    raise ManifestError("repository plan has malformed native host grant identities")
+                identity = item["test_case_identity"]
+                values = item.get("grants")
+                if not isinstance(values, list):
+                    raise ManifestError("repository plan has duplicate or malformed native host grants")
+                if grants_by_test.get(identity) != values:
+                    raise ManifestError(f"repository plan host grants are stale for first-class test {identity}")
+                if identity in planned and planned[identity] != values:
+                    raise ManifestError(f"repository plan has conflicting host grants for first-class test {identity}")
+                planned[identity] = values
+        grants_by_test = planned
+    for test in tests:
+        identity = test.get("id")
+        if isinstance(identity, str) and identity in grants_by_test:
+            test["host_grants"] = grants_by_test[identity]
 
 
 def selection_summary(
@@ -3697,6 +3964,8 @@ def run_manifest(args: argparse.Namespace) -> int:
                 configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
             else:
                 configured_tests = select_tests(configured_tests, args.filter or [])
+
+        _apply_host_grants(configured_tests, manifest, obligation_plan)
 
         manifest_for_run = dict(manifest)
         manifest_for_run["tests"] = configured_tests

@@ -1,20 +1,24 @@
 from __future__ import annotations
 
-import sys
 import os
+import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from mncs_test import (  # noqa: E402
+from mncs_test import (
     ArtifactStore,
+    _apply_host_grants,
+    _cargo_test_target_declarations,
     apply_obligation_plan,
+    canonical_execution_request,
+    embed_execution_request,
+    execute_batch,
     execute_repository_host_obligations,
     execute_repository_native_obligations,
+    validate_manifest,
 )
-
 
 LANGUAGE_ROOT = ROOT.parent / "mncs-language"
 COMMONS_ROOT = ROOT.parent / "MNCS-Commons"
@@ -109,6 +113,129 @@ def test_native_selection_kernel_matches_the_oracle_projection() -> None:
     assert native_summary["selected_obligation_identities"] == ["obligation-current", "obligation-new"]
     assert native_summary["reused_obligation_identities"] == oracle_summary["reused_obligation_identities"]
     assert native_summary["new_execution_obligation_identities"] == oracle_summary["new_execution_obligation_identities"]
+
+
+def test_native_selection_keeps_external_repository_obligations_out_of_its_small_bound() -> None:
+    external = [
+        {
+            "identity": f"repo.cargo-target-{index}",
+            "status": "new_execution_required",
+            "test_case_identities": [],
+            "executor": {"kind": "external_integration", "entrypoint": f"cargo-target-{index}"},
+        }
+        for index in range(24)
+    ]
+    native = {
+        "identity": "repo.native-process-test",
+        "status": "new_execution_required",
+        "test_case_identities": ["case-native"],
+        "executor": {"kind": "native_first_class_test"},
+    }
+    plan = {
+        "obligation_plan_id": "mixed-repository-plan",
+        "repository": {"selected_obligation_identities": [item["identity"] for item in [*external, native]]},
+        "obligations": [*external, native],
+        "evidence": [],
+        "stop": {"sufficient_to_stop": False},
+    }
+    selected, summary = apply_obligation_plan(
+        [{"id": "case-native", "entry": "native_test"}],
+        plan,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=compiler_environment(),
+    )
+    assert [test["id"] for test in selected] == ["case-native"]
+    assert summary["selected_obligation_identities"] == [item["identity"] for item in [*external, native]]
+    assert len(summary["new_execution_obligation_identities"]) == 25
+
+
+def test_repository_manifest_grant_is_exactly_selected_and_transported(tmp_path: Path) -> None:
+    identity = "mncs:0.2:test-case:process::cancel"
+    other_identity = "mncs:0.2:test-case:process::observe"
+    grant = {"capability": "process_capability", "locator": "/usr/bin/sleep", "bytes": []}
+    source = tmp_path / "process.mncs"
+    source.write_text("module fixture.process;\n", encoding="utf-8")
+    manifest = validate_manifest(
+        {
+            "schema_version": "mncs.test-manifest/1",
+            "name": "fixture-process",
+            "source": str(source),
+            "module": "fixture.process",
+            "host_grant_sets": [{"test_case_identity": identity, "grants": [grant]}],
+        },
+        tmp_path / "mncs-test.toml",
+    )
+    selected = [
+        {"id": identity, "entry": "cancel", "kind": "unit", "tags": []},
+        {"id": other_identity, "entry": "observe", "kind": "unit", "tags": []},
+    ]
+    _apply_host_grants(selected, manifest, None)
+    assert selected[0]["host_grants"] == [grant]
+    assert "host_grants" not in selected[1]
+    focused = [{"id": identity, "entry": "cancel", "kind": "unit", "tags": []}]
+    _apply_host_grants(focused, manifest, {"scope": "changed_item"})
+    assert focused[0]["host_grants"] == [grant]
+    assert canonical_execution_request(
+        module="fixture.process", function="cancel", arguments=[], step_budget=10,
+        host_grants=selected[0]["host_grants"],
+    )["host_grants"] == [grant]
+    assert embed_execution_request(
+        module="fixture.process", function="cancel", arguments=[], step_budget=10,
+        host_grants=selected[0]["host_grants"],
+    )["grants"] == [grant]
+
+    class Session:
+        def __init__(self):
+            self.timings = []
+
+        def call_batch(self, requests):
+            self.requests = requests
+            return [{"status": "unsupported"} for _ in requests]
+
+    session = Session()
+    execute_batch(
+        tests=[selected[0]],
+        source_path=source,
+        source_text=source.read_text(encoding="utf-8"),
+        module="fixture.process",
+        session=session,
+        default_step_budget=10,
+        artifacts=ArtifactStore(tmp_path / "artifacts"),
+        transport={},
+    )
+    assert session.requests[0]["grants"] == [grant]
+
+
+def test_cargo_test_target_expansion_emits_stable_exact_commands() -> None:
+    metadata = {
+        "workspace_root": "/workspace",
+        "workspace_members": ["path+file:///workspace#fixture@0.1.0"],
+        "packages": [{
+            "id": "path+file:///workspace#fixture@0.1.0",
+            "name": "fixture",
+            "targets": [
+                {"name": "fixture", "kind": ["lib"], "src_path": "/workspace/src/lib.rs", "test": True, "doctest": True},
+                {"name": "parser", "kind": ["test"], "src_path": "/workspace/tests/parser.rs", "test": True, "doctest": False},
+                {"name": "fixture-tool", "kind": ["bin"], "src_path": "/workspace/src/bin/fixture-tool.rs", "test": True, "doctest": False},
+            ],
+        }],
+    }
+    targets = _cargo_test_target_declarations(
+        metadata, "fixture", "fixture-tests", ["cargo", "test", "--package", "fixture"]
+    )
+    assert [target["target_identity"] for target in targets] == [
+        "fixture:bin:fixture-tool",
+        "fixture:doc:fixture",
+        "fixture:lib:fixture",
+        "fixture:test:parser",
+    ]
+    assert [target["argv"][4:] for target in targets] == [
+        ["--bin", "fixture-tool"],
+        ["--doc"],
+        ["--lib"],
+        ["--test", "parser"],
+    ]
 
 
 def test_external_obligation_is_not_reported_as_missing_native_test() -> None:
