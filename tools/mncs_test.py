@@ -2302,6 +2302,7 @@ def _verify_repository_obligation_identities(
             "working_directory": ".",
             "timeout_seconds": timeout_seconds,
             "target_identity": declaration.get("cargo_target_identity") or _cargo_package_from_argv(argv) or declaration["test"],
+            "library_paths": [],
             "verifier_identity": tool_version,
         }
         definition = {"project_test": test, "repository": repository["identity"], "runner_identity": context["runner_identity"]}
