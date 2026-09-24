@@ -11,31 +11,61 @@ mncs 0.18;
 module mncs.test.obligation_selection;
 
 use mncs.std.application.v1;
-use mncs.core.sequences.v1 as sequences;
 use mncs.commons.family.obligations.v1 as contracts;
 
+record SelectionIdentityBuilder {
+    values: [[byte; up_to 1024]; 16],
+    length: u64
+}
+
 record SelectionObligation {
-    identity: [byte; up_to 128],
+    identity: [byte; up_to 1024],
     status: contracts.ObligationStatus,
-    test_case_identities: [[byte; up_to 128]; up_to 16]
+    requires_native_test: bool,
+    test_case_identities: [[byte; up_to 1024]; up_to 16]
 }
 
 record SelectionRequest {
     schema_version: [byte; up_to 64],
     plan_identity: [byte; up_to 128],
     obligations: [SelectionObligation; up_to 16],
-    available_test_identities: [[byte; up_to 128]; up_to 16]
+    available_test_identities: [[byte; up_to 1024]; up_to 16]
 }
 
 record SelectionResult {
     schema_version: [byte; up_to 64],
     plan_identity: [byte; up_to 128],
-    selected_test_identities: [[byte; up_to 128]; up_to 16],
-    selected_obligation_identities: [[byte; up_to 128]; up_to 16],
-    reused_obligation_identities: [[byte; up_to 128]; up_to 16],
-    new_execution_obligation_identities: [[byte; up_to 128]; up_to 16],
-    selection_unresolved: [[byte; up_to 128]; up_to 16],
-    missing_test_identities: [[byte; up_to 128]; up_to 16]
+    selected_test_identities: [[byte; up_to 1024]; up_to 16],
+    selected_obligation_identities: [[byte; up_to 1024]; up_to 16],
+    reused_obligation_identities: [[byte; up_to 1024]; up_to 16],
+    new_execution_obligation_identities: [[byte; up_to 1024]; up_to 16],
+    selection_unresolved: [[byte; up_to 1024]; up_to 16],
+    missing_test_identities: [[byte; up_to 1024]; up_to 16]
+}
+
+fn identity_builder_empty() -> (result: SelectionIdentityBuilder) {
+    return SelectionIdentityBuilder {
+        values: [[0; 0]; 16],
+        length: 0
+    };
+}
+
+fn identity_builder_push(
+    builder: SelectionIdentityBuilder,
+    value: [byte; up_to 1024],
+    include: bool
+) -> (result: SelectionIdentityBuilder) {
+    if !include || builder.length >= 16 {
+        return builder;
+    }
+    return SelectionIdentityBuilder {
+        values: replace(builder.values, builder.length, value),
+        length: builder.length +% 1
+    };
+}
+
+fn identity_builder_finish(builder: SelectionIdentityBuilder) -> (result: [[byte; up_to 1024]; up_to 16]) {
+    return builder.values[0..builder.length];
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
@@ -47,8 +77,8 @@ fn result_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn contains(
-    values: [[byte; up_to 128]; up_to 16],
-    candidate: [byte; up_to 128]
+    values: [[byte; up_to 1024]; up_to 16],
+    candidate: [byte; up_to 1024]
 ) -> (result: bool) {
     iterate i over values carrying found: bool = false {
         next found = found || same_identity(values[i], candidate);
@@ -57,8 +87,8 @@ fn contains(
 }
 
 fn same_identity(
-    left: [byte; up_to 128],
-    right: [byte; up_to 128]
+    left: [byte; up_to 1024],
+    right: [byte; up_to 1024]
 ) -> (result: bool) {
     if left.len != right.len {
         return false;
@@ -70,8 +100,8 @@ fn same_identity(
 }
 
 fn contains_builder(
-    builder: sequences.ByteViewBuilder16,
-    candidate: [byte; up_to 128]
+    builder: SelectionIdentityBuilder,
+    candidate: [byte; up_to 1024]
 ) -> (result: bool) {
     iterate i over builder.values carrying found: bool = false {
         next found = found || (i < builder.length && same_identity(builder.values[i], candidate));
@@ -80,11 +110,11 @@ fn contains_builder(
 }
 
 fn push_unique(
-    builder: sequences.ByteViewBuilder16,
-    value: [byte; up_to 128],
+    builder: SelectionIdentityBuilder,
+    value: [byte; up_to 1024],
     include: bool
-) -> (result: sequences.ByteViewBuilder16) {
-    return sequences.byte_view_builder16_push(
+) -> (result: SelectionIdentityBuilder) {
+    return identity_builder_push(
         builder,
         value,
         include && value.len > 0 && !contains_builder(builder, value)
@@ -119,9 +149,9 @@ fn needs_execution(value: contracts.ObligationStatus) -> (result: bool) {
 
 fn selected_identities(
     request: SelectionRequest
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over request.obligations carrying builder: sequences.ByteViewBuilder16 = seed {
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over request.obligations carrying builder: SelectionIdentityBuilder = seed {
         next builder = push_unique(builder, request.obligations[i].identity, true);
     }
     return builder;
@@ -129,9 +159,9 @@ fn selected_identities(
 
 fn reused_identities(
     request: SelectionRequest
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over request.obligations carrying builder: sequences.ByteViewBuilder16 = seed {
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over request.obligations carrying builder: SelectionIdentityBuilder = seed {
         next builder = push_unique(builder, request.obligations[i].identity, is_current(request.obligations[i].status));
     }
     return builder;
@@ -139,9 +169,9 @@ fn reused_identities(
 
 fn new_execution_identities(
     request: SelectionRequest
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over request.obligations carrying builder: sequences.ByteViewBuilder16 = seed {
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over request.obligations carrying builder: SelectionIdentityBuilder = seed {
         next builder = push_unique(builder, request.obligations[i].identity, needs_execution(request.obligations[i].status));
     }
     return builder;
@@ -149,12 +179,12 @@ fn new_execution_identities(
 
 fn required_tests(
     request: SelectionRequest
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over request.obligations carrying builder: sequences.ByteViewBuilder16 = seed {
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over request.obligations carrying builder: SelectionIdentityBuilder = seed {
         let obligation: SelectionObligation = request.obligations[i];
         let include: bool = !is_current(obligation.status);
-        iterate j over obligation.test_case_identities carrying nested: sequences.ByteViewBuilder16 = builder {
+        iterate j over obligation.test_case_identities carrying nested: SelectionIdentityBuilder = builder {
             next nested = push_unique(nested, obligation.test_case_identities[j], include);
         }
         next builder = nested;
@@ -164,11 +194,13 @@ fn required_tests(
 
 fn unresolved_obligations(
     request: SelectionRequest
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over request.obligations carrying builder: sequences.ByteViewBuilder16 = seed {
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over request.obligations carrying builder: SelectionIdentityBuilder = seed {
         let obligation: SelectionObligation = request.obligations[i];
-        let unresolved: bool = !is_current(obligation.status) && obligation.test_case_identities.len == 0;
+        let unresolved: bool = !is_current(obligation.status)
+            && obligation.requires_native_test
+            && obligation.test_case_identities.len == 0;
         next builder = push_unique(builder, obligation.identity, unresolved);
     }
     return builder;
@@ -176,10 +208,10 @@ fn unresolved_obligations(
 
 fn selected_tests_in_inventory(
     request: SelectionRequest,
-    required: sequences.ByteViewBuilder16
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over request.available_test_identities carrying builder: sequences.ByteViewBuilder16 = seed {
+    required: SelectionIdentityBuilder
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over request.available_test_identities carrying builder: SelectionIdentityBuilder = seed {
         next builder = push_unique(builder, request.available_test_identities[i], contains_builder(required, request.available_test_identities[i]));
     }
     return builder;
@@ -187,11 +219,11 @@ fn selected_tests_in_inventory(
 
 fn missing_tests(
     request: SelectionRequest,
-    required: sequences.ByteViewBuilder16
-) -> (result: sequences.ByteViewBuilder16) {
-    let seed: sequences.ByteViewBuilder16 = sequences.byte_view_builder16_empty();
-    iterate i over required.values carrying builder: sequences.ByteViewBuilder16 = seed {
-        let required_identity: [byte; up_to 128] = required.values[i];
+    required: SelectionIdentityBuilder
+) -> (result: SelectionIdentityBuilder) {
+    let seed: SelectionIdentityBuilder = identity_builder_empty();
+    iterate i over required.values carrying builder: SelectionIdentityBuilder = seed {
+        let required_identity: [byte; up_to 1024] = required.values[i];
         let in_range: bool = i < required.length;
         let present: bool = contains(request.available_test_identities, required_identity);
         next builder = push_unique(builder, required_identity, in_range && !present);
@@ -200,21 +232,21 @@ fn missing_tests(
 }
 
 fn build_result(request: SelectionRequest) -> (result: SelectionResult) {
-    let required: sequences.ByteViewBuilder16 = required_tests(request);
-    let selected: sequences.ByteViewBuilder16 = selected_tests_in_inventory(request, required);
-    let selected_obligations: [[byte; up_to 128]; up_to 16] = sequences.byte_view_builder16_finish(selected_identities(request));
-    let reused: [[byte; up_to 128]; up_to 16] = sequences.byte_view_builder16_finish(reused_identities(request));
-    let new_execution: [[byte; up_to 128]; up_to 16] = sequences.byte_view_builder16_finish(new_execution_identities(request));
-    let unresolved: [[byte; up_to 128]; up_to 16] = sequences.byte_view_builder16_finish(unresolved_obligations(request));
+    let required: SelectionIdentityBuilder = required_tests(request);
+    let selected: SelectionIdentityBuilder = selected_tests_in_inventory(request, required);
+    let selected_obligations: [[byte; up_to 1024]; up_to 16] = identity_builder_finish(selected_identities(request));
+    let reused: [[byte; up_to 1024]; up_to 16] = identity_builder_finish(reused_identities(request));
+    let new_execution: [[byte; up_to 1024]; up_to 16] = identity_builder_finish(new_execution_identities(request));
+    let unresolved: [[byte; up_to 1024]; up_to 16] = identity_builder_finish(unresolved_obligations(request));
     return SelectionResult {
         schema_version: request.schema_version,
         plan_identity: request.plan_identity,
-        selected_test_identities: sequences.byte_view_builder16_finish(selected),
+        selected_test_identities: identity_builder_finish(selected),
         selected_obligation_identities: selected_obligations,
         reused_obligation_identities: reused,
         new_execution_obligation_identities: new_execution,
         selection_unresolved: unresolved,
-        missing_test_identities: sequences.byte_view_builder16_finish(missing_tests(request, required))
+        missing_test_identities: identity_builder_finish(missing_tests(request, required))
     };
 }
 
