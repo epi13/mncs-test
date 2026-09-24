@@ -3,7 +3,7 @@
   "id": "MNCS-TEST-P-007",
   "title": "Provider inventory still needs a generated data projection",
   "commons_pressure_id": "MNCS-LANG-4F28CEEA0AD8",
-  "latest_commons_observation_id": "MNCS-LANG-4F28CEEA0AD8--OBS-4163A9C621DC",
+  "latest_commons_observation_id": "MNCS-LANG-4F28CEEA0AD8--OBS-A82444C66E4B",
   "verified_language_profile": "0.18",
   "target_layer": "provider inventory projection",
   "observed_need": "Provide a deterministic native data table of compiler-owned test, declaration, callable, and signature identities so the provider can validate runtime receipts; executable call selection belongs to the identity-bound runtime.",
