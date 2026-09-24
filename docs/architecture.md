@@ -61,12 +61,16 @@ For a first-class source, `mncs test` obtains the generic
 `mncs.declaration-inventory/1` from the compiler front end and projects its
 test callables into the retained `mncs.test-inventory/1` runner envelope. It
 then compiles once with tests included, opens one verified
-`mncs-embed` Session, and sends the selected calls through that retained
-session. Each returned value remains a distinct execution observation. The
-toolchain then calls native `mncs.test.suite::empty`/`observe` through the
-same session to obtain the semantic summary. If the native toolchain is not
-available, the command fails closed. A legacy manifest retains its behavior
-only through `bin/mncs-test-compat`.
+`mncs-embed` Session, resolves each selected compiler TestCase identity against
+that artifact, and batches the resulting artifact-bound callable references
+through the same retained session. Typed values, generic arguments, effects,
+and capabilities use the canonical runtime checks; each result carries the
+invoked callable, signature, and artifact receipt. The native provider checks
+those receipts against compiler-owned inventory data, with no generated
+per-test executable dispatch. The toolchain then calls native
+`mncs.test.suite::empty`/`observe` through the same session to obtain the semantic
+summary. If the native toolchain is not available, the command fails closed.
+A legacy manifest retains its behavior only through `mncs-test-compat`.
 
 Compile-only entries invoke `mncs validate`. A compile-fail or diagnostic
 entry is passing only when the compiler rejects the source and every declared

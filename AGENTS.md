@@ -6,8 +6,10 @@ repository are deliberately narrow transport adapters.
 
 Establish the bounded family context and current compiler/capability identity
 before broad search. Query Commons for an existing pressure before recording
-another one; the open callable-inventory pressure is
-`MNCS-LANG-4F28CEEA0AD8` / `MNCS-TEST-P-007`.
+another one. The callable identity-invocation pressure
+`MNCS-LANG-4F28CEEA0AD8` is resolved in Commons; local record
+`MNCS-TEST-P-007` tracks only the remaining non-semantic provider
+inventory data projection.
 
 Before adding host code, check the current `mncs-language` profile and
 standard library. If the missing capability is semantic rather than a

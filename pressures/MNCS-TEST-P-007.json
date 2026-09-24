@@ -1,22 +1,27 @@
 {
   "schema_version": "mncs-test.pressure/1",
   "id": "MNCS-TEST-P-007",
-  "title": "No identity-bound reflective invocation for heterogeneous typed callables",
+  "title": "Provider inventory still needs a generated data projection",
   "commons_pressure_id": "MNCS-LANG-4F28CEEA0AD8",
-  "latest_commons_observation_id": "MNCS-LANG-4F28CEEA0AD8--OBS-3933B274C547",
+  "latest_commons_observation_id": "MNCS-LANG-4F28CEEA0AD8--OBS-4163A9C621DC",
   "verified_language_profile": "0.18",
-  "verified_language_capability_identity": "sha256:8dab5b8f673a2d79d27f1f90eebb14500483e9942cd1b06b105458bf96385294",
-  "verified_compiler_inventory_identity": "sha256:e610453d5b7581c7da81eb8c1258a4beaeb02d4551e568b7b9684fc69a9d4186",
-  "target_layer": "language/runtime",
-  "observed_need": "Bind an authoritative compiler callable identity to a bounded typed invocation without generating consumer-specific dispatch source.",
-  "current_language_behavior": "Profile 0.18 supports named typed entrypoints and explicit generic type arguments, while mncs declaration-inventory exposes declaration, callable, test-case, source, profile, signature, effect, and capability identities. MNCS application code cannot yet invoke an arbitrary heterogeneous callable by that identity.",
-  "why_insufficient": "provider.mncs must consume a static generated typed binding for the seven self-suite tests; removing the generator would replace explicit glue with hidden host dispatch policy.",
-  "minimal_reproducer": "tools/generate_provider.py consumes mncs declaration-inventory and emits native/mncs/test/provider_inventory.mncs; a generic callable identity plus typed argument material has no native invocation boundary.",
-  "desired_direction": "A generic exported-callable binding and typed invocation capability with signature validation, identity admission, and fail-closed mismatch behavior.",
-  "severity": "major",
-  "disposition": "recorded_generic_language_pressure",
-  "workaround": "Keep deterministic source generation as a thin compiler-inventory-bound adapter. It may enumerate and encode signatures but cannot add tests, evaluate assertions, or aggregate results.",
+  "target_layer": "provider inventory projection",
+  "observed_need": "Provide a deterministic native data table of compiler-owned test, declaration, callable, and signature identities so the provider can validate runtime receipts; executable call selection belongs to the identity-bound runtime.",
+  "current_language_behavior": "The compiler emits artifact-bound callable, declaration, test-case, and signature metadata. mncs-test resolves selected TestCase identities through the retained Session dispatcher and the native provider validates returned receipts.",
+  "why_insufficient": "The identity invocation gap is resolved. A small deterministic generator remains only to project multiple source-module inventories into the provider bounded identity data table.",
+  "minimal_reproducer": "tools/generate_provider.py --check projects the compiler inventories for tests/self_suite.mncs and tests/provider_cross_module.mncs into native/mncs/test/provider_inventory.mncs; it emits no executable calls or per-declaration match branches.",
+  "desired_direction": "Remove the remaining data projection when the compiler/runtime exposes the multi-source declaration inventory directly to the provider artifact; no invocation semantics change is needed.",
+  "severity": "minor",
+  "disposition": "narrowed_non_semantic_data_projection",
+  "workaround": "No callable-dispatch workaround remains. Keep the generator data-only until compiler-owned multi-source inventory is directly available in the provider artifact.",
   "status": "open",
-  "relevant_files": ["tools/generate_provider.py", "native/mncs/test/provider_inventory.mncs", "tools/mncs_test.py"],
-  "relevant_tests": ["tests/test_phase6_provider_generation.py", "tests/test_runner.py::test_compiler_inventory_discovery"]
+  "relevant_files": [
+    "tools/generate_provider.py",
+    "native/mncs/test/provider_inventory.mncs",
+    "tools/mncs_test.py"
+  ],
+  "relevant_tests": [
+    "tests/test_phase6_provider_generation.py",
+    "tests/test_runner.py::test_compiler_inventory_discovery"
+  ]
 }
