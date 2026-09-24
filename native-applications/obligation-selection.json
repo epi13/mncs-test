@@ -5,7 +5,7 @@
   "module": "mncs.test.obligation_selection",
   "entry_function": "selection_app",
   "profile": "0.18",
-  "interface_identity": "fff7e8664a3c1aa8ceeb358a6d72434e618f180ec85dda9ec7f048bbdd96ab36",
+  "interface_identity": "ef7c83e0eaf4f2b14a00c3ee14ed34c745833e855859f32d6642ecba3c87b6f7",
   "libraries": [
     "../../mncs-language/library",
     "../native",

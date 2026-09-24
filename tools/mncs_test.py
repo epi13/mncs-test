@@ -26,7 +26,12 @@ import tomllib
 from pathlib import Path
 from typing import Any, Iterable
 
-from family_contract import validate_inventory, validate_obligation_plan, validate_plan
+from family_contract import (
+    validate_inventory,
+    validate_obligation_inventory,
+    validate_obligation_plan,
+    validate_plan,
+)
 
 
 RESULT_SCHEMA = "mncs.test-result/1"
@@ -37,12 +42,12 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.0"
+RUNNER_VERSION = "0.2.1"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
 NATIVE_OBLIGATION_SELECTION_MAX_ITEMS = 16
-NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH = 128
+NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH = 1024
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -544,6 +549,7 @@ def compiler_inventory(
     tests.sort(key=lambda item: (item.get("declaration_identity", ""), item.get("name", "")))
     inventory = {
         "schema_version": INVENTORY_SCHEMA,
+        "source_path": str(source_path.resolve()),
         "scope": declaration_inventory.get("scope"),
         "module": declaration_inventory.get("module"),
         "source_artifact_identity": declaration_inventory.get("source_artifact_identity"),
@@ -1784,6 +1790,705 @@ def load_verification_plan(
     return value
 
 
+def _digest_identity(value: Any) -> str:
+    return sha256_bytes(compact_json(value).encode("utf-8"))
+
+
+def _repository_root_for_path(path: Path) -> Path | None:
+    for parent in (path.resolve().parent, *path.resolve().parents):
+        if (parent / ".mncs" / "project.json").is_file():
+            return parent
+    return None
+
+
+def _repository_file_fingerprint(root: Path, paths: Iterable[str]) -> tuple[str, bool]:
+    files: dict[str, str] = {}
+    complete = True
+    visited = 0
+    excluded = {".git", "target", "node_modules", "__pycache__", ".pytest_cache"}
+    for raw in sorted(set(paths)):
+        candidate = (root / raw).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            complete = False
+            continue
+        if not candidate.exists():
+            complete = False
+            continue
+        candidates: list[Path]
+        if candidate.is_file():
+            candidates = [candidate]
+        elif candidate.is_dir():
+            candidates = []
+            for directory, child_dirs, child_files in os.walk(candidate):
+                child_dirs[:] = sorted(name for name in child_dirs if name not in excluded)
+                for name in sorted(child_files):
+                    candidates.append(Path(directory) / name)
+                    visited += 1
+                    if visited > 50000:
+                        return _digest_identity(files), False
+        else:
+            complete = False
+            continue
+        for item in candidates:
+            try:
+                files[item.relative_to(root).as_posix()] = sha256_file(item)
+            except (OSError, ValueError):
+                complete = False
+    return _digest_identity(files), complete
+
+
+def _repository_tool_identity(argv: list[str], *, cwd: Path) -> str | None:
+    if not argv:
+        return None
+    probes = [[argv[0], "--version"]]
+    if argv[0] == "cargo":
+        probes.append(["rustc", "--version"])
+    values: list[str] = []
+    for command in probes:
+        try:
+            process = subprocess.run(
+                command,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        output = (process.stdout or process.stderr).strip()
+        if process.returncode != 0 or not output:
+            return None
+        values.append(output)
+    return "; ".join(values)
+
+
+def _cargo_package_from_argv(argv: list[str]) -> str | None:
+    for index, value in enumerate(argv):
+        if value in {"--package", "-p"} and index + 1 < len(argv):
+            return argv[index + 1]
+        if value.startswith("--package="):
+            return value.partition("=")[2]
+    return None
+
+
+def _cargo_package_paths(metadata: dict[str, Any], package_name: str) -> list[str] | None:
+    packages = metadata.get("packages")
+    resolution = metadata.get("resolve")
+    nodes = resolution.get("nodes") if isinstance(resolution, dict) else None
+    if not isinstance(packages, list) or not isinstance(nodes, list):
+        return None
+    workspace_ids = set(metadata.get("workspace_members", []))
+    named = [item for item in packages if isinstance(item, dict) and item.get("name") == package_name and item.get("id") in workspace_ids]
+    if len(named) != 1:
+        return None
+    by_id = {item.get("id"): item for item in packages if isinstance(item, dict)}
+    node_by_id = {item.get("id"): item for item in nodes if isinstance(item, dict)}
+    closure: set[str] = set()
+    pending = [str(named[0]["id"])]
+    while pending:
+        identity = pending.pop()
+        if identity in closure:
+            continue
+        closure.add(identity)
+        node = node_by_id.get(identity, {})
+        dependencies = node.get("deps", [])
+        if not isinstance(dependencies, list):
+            return None
+        for dependency in dependencies:
+            package_id = dependency.get("pkg") if isinstance(dependency, dict) else None
+            if package_id in workspace_ids and package_id not in closure:
+                pending.append(str(package_id))
+    workspace_root = Path(str(metadata.get("workspace_root", "")))
+    paths = {"Cargo.toml", "Cargo.lock"}
+    for identity in closure:
+        package = by_id.get(identity, {})
+        manifest_path = package.get("manifest_path")
+        if not isinstance(manifest_path, str):
+            return None
+        try:
+            paths.add(Path(manifest_path).parent.relative_to(workspace_root).as_posix())
+        except ValueError:
+            return None
+    for optional in ("rust-toolchain", "rust-toolchain.toml", ".cargo"):
+        if (workspace_root / optional).exists():
+            paths.add(optional)
+    return sorted(paths)
+
+
+def _prepare_repository_obligation_context(
+    obligation_plan: dict[str, Any], manifest_path: Path
+) -> dict[str, Any]:
+    repository = obligation_plan.get("repository")
+    if not isinstance(repository, dict) or repository.get("scope") != "repository_canonical":
+        return {}
+    source_path = Path(str(obligation_plan.get("source", {}).get("path", ""))).resolve()
+    root = _repository_root_for_path(source_path)
+    manifest_root = _repository_root_for_path(manifest_path)
+    if root is None or manifest_root != root:
+        raise ManifestError("repository-canonical plan and mncs-test manifest must belong to the same declared repository")
+    project_path = root / ".mncs" / "project.json"
+    inventory_path = root / ".mncs" / "verification-obligations.json"
+    try:
+        project = json.loads(project_path.read_text(encoding="utf-8"))
+        raw_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ManifestError(f"repository verification metadata is unavailable: {error}") from error
+    if not isinstance(project, dict) or not isinstance(raw_inventory, dict):
+        raise ManifestError("repository verification metadata must contain objects")
+    verification = project.get("verification")
+    if not isinstance(verification, dict):
+        raise ManifestError("repository project metadata lacks a verification contract")
+    if verification.get("obligation_inventory") != ".mncs/verification-obligations.json":
+        raise ManifestError("repository verification inventory path does not match the repository-canonical runner contract")
+    repository_identity = project.get("repository")
+    if repository_identity != repository.get("identity"):
+        raise ManifestError("repository-canonical plan repository identity is stale")
+    if verification.get("test_runner_identity") != f"mncs-test/{RUNNER_VERSION}":
+        raise ManifestError("repository project metadata names a different mncs-test executor version")
+    try:
+        inventory = validate_obligation_inventory(raw_inventory, repository=repository_identity)
+    except (RuntimeError, ValueError) as error:
+        raise ManifestError(f"repository obligation inventory is invalid: {error}") from error
+    project_tests = project.get("contracts", {}).get("tests", [])
+    providers = project.get("contracts", {}).get("provides", [])
+    if not isinstance(project_tests, list) or not isinstance(providers, list):
+        raise ManifestError("repository project test declarations are malformed")
+    tests_by_identity: dict[str, dict[str, Any]] = {}
+    declared_tests: list[dict[str, Any]] = []
+    for test in project_tests:
+        if not isinstance(test, dict) or test.get("obligation") != "self":
+            continue
+        name = test.get("test")
+        command = test.get("command")
+        argv = command.get("argv") if isinstance(command, dict) else None
+        if not isinstance(name, str) or not isinstance(argv, list) or not argv:
+            raise ManifestError("repository self-test declarations need a name and argv")
+        identity = f"{repository_identity}.project-test.{name}"
+        if identity in tests_by_identity:
+            raise ManifestError(f"duplicate repository self-test identity: {identity}")
+        tests_by_identity[identity] = test
+        declared_tests.append({"identity": identity, "name": name, "command": argv})
+    canonical_inventory_ids = [
+        item["identity"] for item in inventory["obligations"] if item.get("scope") == "repository_canonical"
+    ]
+    expected_required = canonical_inventory_ids + [item["identity"] for item in declared_tests]
+    if expected_required != repository.get("required_obligation_identities"):
+        raise ManifestError("repository-canonical obligation set is stale or incomplete")
+    source_inventories = repository.get("compiler_test_inventories", [])
+    if not isinstance(source_inventories, list):
+        raise ManifestError("repository compiler test inventory list is malformed")
+    runner_identity = verification.get("test_runner_identity")
+    inventory_identity = _digest_identity({
+        "repository": repository_identity,
+        "project_revision": project.get("revision"),
+        "test_runner_identity": runner_identity,
+        "inventory": inventory,
+        "project_tests": declared_tests,
+        "compiler_test_inventories": source_inventories,
+    })
+    compiler_inventory_identity = _digest_identity(source_inventories)
+    fingerprint = _digest_identity({
+        "repository": repository_identity,
+        "project_revision": project.get("revision"),
+        "test_runner_identity": runner_identity,
+        "inventory_identity": inventory_identity,
+        "compiler_test_inventory_identity": compiler_inventory_identity,
+    })
+    if inventory_identity != repository.get("inventory_identity") or fingerprint != repository.get("fingerprint"):
+        raise ManifestError("repository-canonical definition fingerprint is stale")
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True,
+            check=False, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ManifestError(f"repository revision is unavailable: {error}") from error
+    if revision.returncode != 0 or revision.stdout.strip() != repository.get("revision"):
+        raise ManifestError("repository-canonical plan targets a different repository revision")
+    return {
+        "root": root,
+        "project": project,
+        "inventory": inventory,
+        "tests_by_identity": tests_by_identity,
+        "declared_tests": declared_tests,
+        "providers": providers,
+        "runner_identity": runner_identity,
+        "source_inventories": source_inventories,
+    }
+
+
+def _verify_repository_obligation_identities(
+    obligation_plan: dict[str, Any],
+    context: dict[str, Any],
+    compiler_inventory_document: dict[str, Any],
+) -> None:
+    if not context:
+        return
+    root = context["root"]
+    repository = obligation_plan["repository"]
+    selected_by_identity = {
+        item.get("identity"): item
+        for item in obligation_plan.get("obligations", [])
+        if isinstance(item, dict)
+    }
+    current_tests = compiler_inventory_document.get("tests", [])
+    current_test_ids = sorted(
+        item.get("test_case_identity")
+        for item in current_tests
+        if isinstance(item, dict) and isinstance(item.get("test_case_identity"), str)
+    )
+    if len(current_test_ids) != len(current_tests):
+        raise ManifestError("current compiler inventory has an unstable first-class test identity")
+    if compiler_inventory_document.get("scope") != "source_module":
+        raise ManifestError("repository test inventory must retain source_module scope")
+    subject_identity = compiler_inventory_document.get("subject_identity")
+    subject_fingerprint = compiler_inventory_document.get("subject_fingerprint")
+    inventory_material = {
+        "subject_identity": subject_identity,
+        "subject_fingerprint": subject_fingerprint,
+        "test_case_identities": current_test_ids,
+    }
+    source_path_value = Path(str(compiler_inventory_document.get("source_path", ""))).resolve()
+    try:
+        source_relative = source_path_value.relative_to(root).as_posix()
+    except ValueError:
+        source_relative = ""
+    source_identity = _digest_identity(inventory_material)
+    current_source_inventory = {
+        "path": source_relative,
+        "scope": "source_module",
+        "identity": source_identity,
+        "test_case_identities": current_test_ids,
+    }
+    if context["source_inventories"] != [current_source_inventory]:
+        raise ManifestError("source_module test inventory changed after RAVEL planned repository closure")
+
+    project = context["project"]
+    contracts = project.get("contracts", {})
+    providers = contracts.get("provides", []) if isinstance(contracts, dict) else []
+    fingerprint_sources: dict[str, list[str]] = {}
+    for provider in providers:
+        if not isinstance(provider, dict) or not isinstance(provider.get("contract"), str):
+            continue
+        declared = provider.get("fingerprint_sources", [])
+        if isinstance(declared, list):
+            fingerprint_sources[provider["contract"]] = [item for item in declared if isinstance(item, str)]
+    try:
+        metadata_process = subprocess.run(
+            ["cargo", "metadata", "--format-version", "1"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+            stdin=subprocess.DEVNULL,
+        )
+        metadata = json.loads(metadata_process.stdout) if metadata_process.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        metadata = None
+
+    for identity, test in context["tests_by_identity"].items():
+        selected = selected_by_identity.get(identity)
+        if selected is None:
+            raise ManifestError(f"repository-canonical plan omitted declared project test {identity}")
+        command = test.get("command")
+        argv = command.get("argv") if isinstance(command, dict) else None
+        timeout_seconds = command.get("timeout_seconds", test.get("timeout_seconds")) if isinstance(command, dict) else None
+        if not isinstance(argv, list) or not all(isinstance(item, str) and item for item in argv):
+            raise ManifestError(f"project test {identity} has no explicit argv executor")
+        tool_version = _repository_tool_identity(argv, cwd=root)
+        if tool_version is None:
+            raise ManifestError(f"project test {identity} executor version is unavailable")
+        dependencies = sorted({
+            path
+            for contract in test.get("covers", []) if isinstance(contract, str)
+            for path in fingerprint_sources.get(contract, [])
+        })
+        explicit_dependencies = test.get("invalidation_dependencies", [])
+        if isinstance(explicit_dependencies, list):
+            dependencies = sorted(set(dependencies + [item for item in explicit_dependencies if isinstance(item, str)]))
+        for argument in argv[1:]:
+            if not argument.startswith("-") and (root / argument).exists():
+                dependencies.append(argument)
+        dependencies = sorted(set(dependencies))
+        if argv[0] == "cargo":
+            package = _cargo_package_from_argv(argv)
+            paths = _cargo_package_paths(metadata, package) if metadata and package else None
+            if paths is None:
+                raise ManifestError(f"project test {identity} has no bounded Cargo package target")
+            dependencies = sorted(set(dependencies + paths))
+        invalidation, complete = _repository_file_fingerprint(root, dependencies)
+        if not complete:
+            raise ManifestError(f"project test {identity} dependency closure is stale or incomplete")
+        executor = {
+            "provider": "mncs-test",
+            "kind": "external_integration",
+            "entrypoint": f"project-test:{test['test']}",
+            "argv": argv,
+            "working_directory": ".",
+            "timeout_seconds": timeout_seconds,
+            "target_identity": _cargo_package_from_argv(argv) or test["test"],
+            "verifier_identity": tool_version,
+        }
+        definition = {"project_test": test, "repository": repository["identity"], "runner_identity": context["runner_identity"]}
+        subject = f"mncs.repository-test:{repository['identity']}:{test['test']}"
+        expected = {
+            "definition_identity": _digest_identity(definition),
+            "subject_identity": subject,
+            "subject_fingerprint": _digest_identity({"subject": subject, "invalidation": invalidation}),
+            "executor_identity": _digest_identity(executor),
+            "verifier_identity": _digest_identity({"verifier": tool_version, "runner": context["runner_identity"]}),
+            "invalidation_identity": invalidation,
+        }
+        for field, value in expected.items():
+            if selected.get(field) != value:
+                raise ManifestError(f"project test {identity} has stale {field}")
+        selected_executor = selected.get("executor", {})
+        if not isinstance(selected_executor, dict) or any(selected_executor.get(key) != value for key, value in executor.items()):
+            raise ManifestError(f"project test {identity} executor does not match its project declaration")
+        if selected_executor.get("argv") != argv or selected_executor.get("timeout_seconds") != timeout_seconds:
+            raise ManifestError(f"project test {identity} command or timeout is stale")
+
+    for obligation in context["inventory"]["obligations"]:
+        if obligation.get("scope") != "repository_canonical":
+            continue
+        identity = obligation["identity"]
+        selected = selected_by_identity.get(identity)
+        if selected is None:
+            raise ManifestError(f"repository-canonical plan omitted declared obligation {identity}")
+        executor = obligation.get("executor", {})
+        if not isinstance(executor, dict) or executor.get("kind") != "native_first_class_test":
+            raise ManifestError(f"unsupported declared repository executor for {identity}")
+        source_paths = executor.get("source_paths", [])
+        library_paths = executor.get("library_paths", [])
+        selected_executor = selected.get("executor", {})
+        if (
+            source_paths != [source_relative]
+            or not isinstance(selected_executor, dict)
+            or selected_executor.get("source_paths") != source_paths
+            or selected_executor.get("library_paths") != library_paths
+            or selected_executor.get("test_case_identities") != current_test_ids
+        ):
+            raise ManifestError(f"native obligation {identity} is not bound to the current exact source test identities")
+        local_invalidation, local_complete = _repository_file_fingerprint(
+            root, obligation.get("invalidation_dependencies", [])
+        )
+        external_names: list[str] = []
+        for raw_library in library_paths:
+            library = (root / raw_library).resolve()
+            try:
+                external_names.append(library.relative_to(root.parent.resolve()).as_posix())
+            except ValueError as error:
+                raise ManifestError(f"native obligation {identity} declares a library outside the workspace") from error
+        external_invalidation, external_complete = _repository_file_fingerprint(root.parent, external_names)
+        if not local_complete or not external_complete:
+            raise ManifestError(f"native obligation {identity} dependency fingerprint is incomplete")
+        invalidation = _digest_identity({
+            "declared_dependencies": local_invalidation,
+            "external_executor_libraries": external_invalidation,
+        })
+        verifier = executor.get("verifier_identity") or "mncs-test-runner/0.2.1"
+        executor_identity = _digest_identity({
+            "provider": executor.get("provider"),
+            "kind": executor.get("kind"),
+            "entrypoint": executor.get("entrypoint"),
+            "source_paths": source_paths,
+            "library_paths": library_paths,
+            "test_case_identities": selected_executor.get("test_case_identities"),
+            "verifier_identity": verifier,
+        })
+        subject = obligation.get("subjects", [identity])[0]
+        expected = {
+            "definition_identity": _digest_identity(obligation),
+            "subject_identity": subject,
+            "subject_fingerprint": _digest_identity({"identity": identity, "invalidation": invalidation}),
+            "executor_identity": executor_identity,
+            "verifier_identity": _digest_identity({"verifier": verifier, "runner": context["runner_identity"]}),
+            "invalidation_identity": invalidation,
+        }
+        for field, value in expected.items():
+            if selected.get(field) != value:
+                raise ManifestError(f"native obligation {identity} has stale {field}")
+
+
+def _repository_evidence_matches(
+    evidence: dict[str, Any], obligation: dict[str, Any], repository: dict[str, Any]
+) -> bool:
+    return (
+        evidence.get("obligation_identity") == obligation.get("identity")
+        and evidence.get("status") == "PASS"
+        and evidence.get("repository_identity") == repository.get("identity")
+        and evidence.get("repository_fingerprint") == repository.get("fingerprint")
+        and evidence.get("subject_identity") == obligation.get("subject_identity")
+        and evidence.get("subject_fingerprint") == obligation.get("subject_fingerprint")
+        and evidence.get("definition_identity") == obligation.get("definition_identity")
+        and evidence.get("executor_identity") == obligation.get("executor_identity")
+        and evidence.get("verifier_identity") == obligation.get("verifier_identity")
+        and evidence.get("invalidation_identity") == obligation.get("invalidation_identity")
+    )
+
+
+def _repository_evidence_record(
+    obligation_plan: dict[str, Any],
+    obligation: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+    observation: Any,
+    repository_revision: str,
+) -> dict[str, Any]:
+    repository = obligation_plan["repository"]
+    identity_material = {
+        "obligation_identity": obligation.get("identity"),
+        "repository_identity": repository.get("identity"),
+        "repository_fingerprint": repository.get("fingerprint"),
+        "subject_identity": obligation.get("subject_identity"),
+        "subject_fingerprint": obligation.get("subject_fingerprint"),
+        "definition_identity": obligation.get("definition_identity"),
+        "executor_identity": obligation.get("executor_identity"),
+        "verifier_identity": obligation.get("verifier_identity"),
+        "invalidation_identity": obligation.get("invalidation_identity"),
+        "status": status,
+        "observation": observation,
+    }
+    return {
+        "status": status,
+        "evidence_identity": _digest_identity(identity_material),
+        "obligation_identity": obligation.get("identity"),
+        "repository_identity": repository.get("identity"),
+        "repository_revision": repository_revision,
+        "repository_fingerprint": repository.get("fingerprint"),
+        "subject_identity": obligation.get("subject_identity"),
+        "subject_fingerprint": obligation.get("subject_fingerprint"),
+        "definition_identity": obligation.get("definition_identity"),
+        "executor_identity": obligation.get("executor_identity"),
+        "verifier_identity": obligation.get("verifier_identity"),
+        "invalidation_identity": obligation.get("invalidation_identity"),
+        "reason": reason,
+    }
+
+
+def execute_repository_host_obligations(
+    obligation_plan: dict[str, Any],
+    context: dict[str, Any],
+    *,
+    environment: dict[str, str],
+    artifacts: ArtifactStore,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    repository = obligation_plan["repository"]
+    old_evidence = [item for item in obligation_plan.get("evidence", []) if isinstance(item, dict)]
+    active_evidence: list[dict[str, Any]] = []
+    prior_evidence: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    revision_process = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=context["root"], capture_output=True,
+        text=True, check=False, timeout=10, stdin=subprocess.DEVNULL,
+    )
+    revision = revision_process.stdout.strip() if revision_process.returncode == 0 else str(repository.get("revision", "unknown"))
+    for obligation in obligation_plan.get("obligations", []):
+        if not isinstance(obligation, dict) or obligation.get("scope") != "repository_canonical":
+            continue
+        executor = obligation.get("executor", {})
+        if not isinstance(executor, dict) or executor.get("kind") == "native_first_class_test":
+            continue
+        related = [item for item in old_evidence if item.get("obligation_identity") == obligation.get("identity")]
+        exact_pass = [item for item in related if _repository_evidence_matches(item, obligation, repository)]
+        if obligation.get("status") == "current" and exact_pass:
+            active_evidence.extend(exact_pass)
+            prior_evidence.extend(related)
+            results.append({
+                "obligation_identity": obligation["identity"],
+                "executor_identity": obligation.get("executor_identity"),
+                "executor": executor,
+                "status": "PASS",
+                "reason": "current identity-bound PASS evidence reused",
+                "reused": True,
+                "duration_ms": 0.0,
+                "evidence_identities": [item.get("evidence_identity") for item in exact_pass],
+            })
+            continue
+        prior_evidence.extend(related)
+        declaration = context["tests_by_identity"].get(str(obligation.get("identity")))
+        argv = executor.get("argv")
+        timeout_seconds = executor.get("timeout_seconds")
+        if (
+            declaration is None
+            or not isinstance(argv, list)
+            or not all(isinstance(arg, str) and arg for arg in argv)
+            or not isinstance(timeout_seconds, int)
+        ):
+            reason = "executor identity is not backed by a current project self-test declaration"
+            evidence = _repository_evidence_record(
+                obligation_plan, obligation, status="UNKNOWN", reason=reason,
+                observation={"executor": executor}, repository_revision=revision,
+            )
+            active_evidence.append(evidence)
+            results.append({
+                "obligation_identity": obligation["identity"],
+                "executor_identity": obligation.get("executor_identity"),
+                "executor": executor,
+                "status": "UNKNOWN",
+                "reason": reason,
+                "reused": False,
+                "duration_ms": 0.0,
+                "evidence_identity": evidence["evidence_identity"],
+            })
+            continue
+        working_directory = executor.get("working_directory", ".")
+        command_cwd = resolve_path(str(working_directory), context["root"], must_exist=True)
+        process = run_process(
+            list(argv),
+            cwd=command_cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            artifacts=artifacts,
+            artifact_key=safe_artifact_key(f"obligation-{obligation['identity']}"),
+        )
+        if process.get("timed_out"):
+            status = "UNKNOWN"
+            reason = f"executor timed out after {timeout_seconds}s"
+        elif process.get("transport_error"):
+            status = "UNKNOWN"
+            reason = f"executor transport failed: {process['transport_error']}"
+        elif process.get("returncode") == 0:
+            status = "PASS"
+            reason = "declared executor exited with status 0"
+        else:
+            status = "FAIL"
+            reason = f"declared executor exited with status {process.get('returncode')}"
+        outputs = {
+            key: next((item.get("sha256") for item in artifacts.items if item.get("path") == process.get(f"{key}_artifact")), None)
+            for key in ("stdout", "stderr")
+        }
+        observation = {
+            "status": status,
+            "returncode": process.get("returncode"),
+            "timed_out": bool(process.get("timed_out")),
+            "outputs": outputs,
+        }
+        evidence = _repository_evidence_record(
+            obligation_plan, obligation, status=status, reason=reason,
+            observation=observation, repository_revision=revision,
+        )
+        active_evidence.append(evidence)
+        results.append({
+            "obligation_identity": obligation["identity"],
+            "executor_identity": obligation.get("executor_identity"),
+            "executor": executor,
+            "status": status,
+            "reason": reason,
+            "reused": False,
+            "duration_ms": (process.get("timing") or {}).get("wall_time_ms", 0.0),
+            "returncode": process.get("returncode"),
+            "timed_out": bool(process.get("timed_out")),
+            "artifacts": {
+                key: process.get(f"{key}_artifact")
+                for key in ("command", "stdout", "stderr")
+            },
+            "evidence_identity": evidence["evidence_identity"],
+        })
+    return active_evidence, prior_evidence, results
+
+
+def execute_repository_native_obligations(
+    obligation_plan: dict[str, Any],
+    context: dict[str, Any],
+    compiler_inventory_document: dict[str, Any],
+    test_results: list[dict[str, Any]],
+    prior_evidence: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    repository = obligation_plan["repository"]
+    active_evidence: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    revision_process = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=context["root"], capture_output=True,
+        text=True, check=False, timeout=10, stdin=subprocess.DEVNULL,
+    )
+    revision = revision_process.stdout.strip() if revision_process.returncode == 0 else str(repository.get("revision", "unknown"))
+    for obligation in obligation_plan.get("obligations", []):
+        if not isinstance(obligation, dict) or obligation.get("scope") != "repository_canonical":
+            continue
+        executor = obligation.get("executor", {})
+        if not isinstance(executor, dict) or executor.get("kind") != "native_first_class_test":
+            continue
+        related = [item for item in prior_evidence if item.get("obligation_identity") == obligation.get("identity")]
+        exact_pass = [item for item in related if _repository_evidence_matches(item, obligation, repository)]
+        if obligation.get("status") == "current" and exact_pass:
+            active_evidence.extend(exact_pass)
+            results.append({
+                "obligation_identity": obligation["identity"],
+                "executor_identity": obligation.get("executor_identity"),
+                "test_case_identities": obligation.get("test_case_identities", []),
+                "status": "PASS",
+                "reason": "current identity-bound PASS evidence reused",
+                "reused": True,
+                "duration_ms": 0.0,
+                "evidence_identities": [item.get("evidence_identity") for item in exact_pass],
+            })
+            continue
+        required_tests = obligation.get("test_case_identities", [])
+        result_by_identity = {
+            str(item.get("id")): item for item in test_results if isinstance(item, dict) and item.get("id")
+        }
+        selected_results = [result_by_identity.get(identity) for identity in required_tests]
+        missing = [identity for identity, result in zip(required_tests, selected_results) if result is None]
+        failures = [item for item in selected_results if isinstance(item, dict) and item.get("verdict") == "FAIL"]
+        unknowns = [item for item in selected_results if isinstance(item, dict) and item.get("verdict") != "PASS"]
+        if missing:
+            status = "UNKNOWN"
+            reason = "required first-class test identities were not executed: " + ", ".join(missing)
+        elif failures:
+            status = "FAIL"
+            first = failures[0]
+            detail = first.get("failure", {})
+            reason = f"first-class test {first.get('id')} failed: {detail.get('message', first.get('verdict'))}"
+        elif unknowns:
+            status = "UNKNOWN"
+            first = unknowns[0]
+            detail = first.get("failure", {})
+            reason = f"first-class test {first.get('id')} is UNKNOWN: {detail.get('message', first.get('verdict'))}"
+        else:
+            status = "PASS"
+            reason = "every exact compiler-selected first-class test passed"
+        observation = {
+            "test_case_identities": list(required_tests),
+            "test_results": [
+                {
+                    "identity": item.get("id"),
+                    "verdict": item.get("verdict"),
+                    "status": item.get("status"),
+                    "failure": item.get("failure"),
+                }
+                for item in selected_results
+                if isinstance(item, dict)
+            ],
+        }
+        evidence = _repository_evidence_record(
+            obligation_plan, obligation, status=status, reason=reason,
+            observation=observation, repository_revision=revision,
+        )
+        active_evidence.append(evidence)
+        results.append({
+            "obligation_identity": obligation["identity"],
+            "executor_identity": obligation.get("executor_identity"),
+            "test_case_identities": list(required_tests),
+            "status": status,
+            "reason": reason,
+            "reused": False,
+            "duration_ms": sum(
+                float((item.get("transport") or {}).get("timing", {}).get("wall_time_ms", 0.0))
+                for item in selected_results if isinstance(item, dict)
+            ),
+            "missing_test_case_identities": missing,
+            "evidence_identity": evidence["evidence_identity"],
+        })
+    return active_evidence, results
+
+
 def load_obligation_plan(
     path: Path,
     *,
@@ -1802,9 +2507,16 @@ def load_obligation_plan(
         raise ManifestError(str(error)) from error
     if verification_plan is not None and value.get("verification_plan_id") != verification_plan.get("plan_id"):
         raise ManifestError("obligation plan is bound to a different verification plan")
-    if value.get("source", {}).get("sha256") != sha256_file(source_path):
+    repository = value.get("repository")
+    repository_plan = isinstance(repository, dict) and repository.get("scope") == "repository_canonical"
+    plan_source = Path(str(value.get("source", {}).get("path", ""))).resolve() if repository_plan else source_path.resolve()
+    if repository_plan:
+        root = _repository_root_for_path(plan_source)
+        if root is None or plan_source == root or not plan_source.is_file():
+            raise ManifestError("repository-canonical plan source path is not a current repository file")
+    if value.get("source", {}).get("sha256") != sha256_file(plan_source):
         raise ManifestError("obligation plan source identity is stale")
-    value["_source_path"] = str(source_path.resolve())
+    value["_source_path"] = str(plan_source)
     value["_selected_obligation_identities"] = sorted(
         item.get("identity")
         for item in value.get("obligations", [])
@@ -1865,10 +2577,14 @@ def _apply_obligation_plan_oracle(
         if not isinstance(item, dict) or item.get("status") == "current":
             continue
         identities = item.get("test_case_identities", [])
-        if not isinstance(identities, list) or not identities:
+        executor = item.get("executor")
+        executor_kind = executor.get("kind") if isinstance(executor, dict) else None
+        requires_native_test = executor_kind == "native_first_class_test" or executor is None
+        if requires_native_test and (not isinstance(identities, list) or not identities):
             unresolved.append(str(item.get("identity", "unknown")))
             continue
-        required_test_ids.update(str(identity) for identity in identities)
+        if isinstance(identities, list):
+            required_test_ids.update(str(identity) for identity in identities)
     missing = sorted(required_test_ids - set(by_id))
     if missing:
         raise ManifestError(
@@ -1923,6 +2639,11 @@ def apply_obligation_plan(
             {
                 "identity": str(item.get("identity", "")),
                 "status": str(item.get("status", "")),
+                "requires_native_test": (
+                    item.get("executor", {}).get("kind") == "native_first_class_test"
+                    if isinstance(item.get("executor"), dict)
+                    else not bool(item.get("test_case_identities"))
+                ),
                 "test_case_identities": [
                     str(identity)
                     for identity in item.get("test_case_identities", [])
@@ -2265,8 +2986,12 @@ def make_result(
             "new_execution_required": (obligation_selection or {}).get("new_execution_obligation_identities", []),
             "selection_unresolved": (obligation_selection or {}).get("selection_unresolved", []),
             "evidence": (obligation_selection or {}).get("evidence", []),
+            "evidence_history": (obligation_selection or {}).get("evidence_history", []),
+            "execution_results": (obligation_selection or {}).get("execution_results", []),
+            "execution_complete": bool((obligation_selection or {}).get("execution_complete", False)),
             "sufficient_to_stop": bool((obligation_selection or {}).get("sufficient_to_stop", False)),
         },
+        "evidence": (obligation_selection or {}).get("evidence", []),
         "tests": test_results,
         "suite": suite_result,
         "native_suite_summary": native_suite_payload,
@@ -2778,10 +3503,24 @@ def run_manifest(args: argparse.Namespace) -> int:
         obligation_selection: dict[str, Any] | None = None
         if args.verification_plan:
             verification_plan_path = resolve_path(args.verification_plan, cwd, must_exist=True)
+            try:
+                plan_source_document = json.loads(verification_plan_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ManifestError(f"cannot read verification plan source identity: {error}") from error
+            plan_source_value = (
+                plan_source_document.get("source", {}).get("path")
+                if isinstance(plan_source_document, dict)
+                else None
+            )
+            plan_source_path = (
+                Path(plan_source_value).resolve()
+                if isinstance(plan_source_value, str)
+                else Path(manifest["source_path"])
+            )
             verification_plan = load_verification_plan(
                 verification_plan_path,
-                source_path=Path(manifest["source_path"]),
-                source_text=source_text,
+                source_path=plan_source_path,
+                source_text=read_source(plan_source_path),
             )
             verification_plan_ref = {
                 "kind": "mncs-verification-plan",
@@ -2812,6 +3551,42 @@ def run_manifest(args: argparse.Namespace) -> int:
                 raise ManifestError("--filter cannot be combined with --obligation-plan; the obligation plan owns exact selection")
             if args.test_identity:
                 raise ManifestError("--test-identity cannot be combined with --obligation-plan; the obligation plan owns exact selection")
+        repository_plan = bool(
+            obligation_plan
+            and isinstance(obligation_plan.get("repository"), dict)
+            and obligation_plan["repository"].get("scope") == "repository_canonical"
+        )
+        repository_context: dict[str, Any] = {}
+        repository_native_sources: list[str] = []
+        if repository_plan and obligation_plan is not None:
+            repository_context = _prepare_repository_obligation_context(obligation_plan, manifest_path)
+            for item in obligation_plan.get("obligations", []):
+                executor = item.get("executor") if isinstance(item, dict) else None
+                if (
+                    isinstance(item, dict)
+                    and item.get("scope") == "repository_canonical"
+                    and isinstance(executor, dict)
+                    and executor.get("kind") == "native_first_class_test"
+                ):
+                    paths = executor.get("source_paths", [])
+                    if isinstance(paths, list):
+                        repository_native_sources.extend(path for path in paths if isinstance(path, str))
+                    declared_libraries = executor.get("library_paths", [])
+                    if isinstance(declared_libraries, list):
+                        for raw_library in declared_libraries:
+                            if isinstance(raw_library, str):
+                                manifest["library_paths"].append(resolve_path(raw_library, repository_context["root"], must_exist=True))
+            repository_native_sources = sorted(set(repository_native_sources))
+            if len(repository_native_sources) > 1:
+                raise ManifestError("repository-canonical plan currently requires one bounded source_module inventory per mncs-test invocation")
+            if repository_native_sources:
+                native_source = resolve_path(repository_native_sources[0], repository_context["root"], must_exist=True)
+                manifest["source_path"] = str(native_source)
+                source_text = read_source(native_source)
+            else:
+                manifest["source_path"] = obligation_plan["source"]["path"]
+                source_text = read_source(Path(manifest["source_path"]))
+                manifest["tests"] = []
         library_paths = list(manifest["library_paths"])
         for raw_path in args.library or []:
             for component in raw_path.split(os.pathsep):
@@ -2847,8 +3622,18 @@ def run_manifest(args: argparse.Namespace) -> int:
                 artifacts=artifacts,
             )
             if test_inventory is not None:
+                if repository_plan:
+                    manifest["module"] = test_inventory.get("module")
+                    manifest["profile"] = test_inventory.get("source_profile")
+                    if obligation_plan is None:
+                        raise ManifestError("repository-canonical plan was not loaded")
+                    _verify_repository_obligation_identities(
+                        obligation_plan,
+                        repository_context,
+                        test_inventory,
+                    )
                 configured_tests = normalize_inventory_tests(test_inventory, manifest)
-                if verification_plan is not None:
+                if verification_plan is not None and not repository_plan:
                     if verification_plan.get("source", {}).get("subject_identity") not in (None, test_inventory.get("subject_identity")):
                         raise ManifestError("verification plan subject identity does not match the current compiler inventory")
                     configured_tests = apply_verification_plan(configured_tests, verification_plan)
@@ -3054,6 +3839,53 @@ def run_manifest(args: argparse.Namespace) -> int:
                         artifact_key=safe_artifact_key(f"test-{index:03d}-{test['id']}"),
                     )
                 test_results.append(test_result)
+        repository_execution_results: list[dict[str, Any]] = []
+        repository_evidence_history: list[dict[str, Any]] = []
+        repository_execution_complete = False
+        if repository_plan and obligation_plan is not None:
+            host_evidence, prior_host_evidence, host_results = execute_repository_host_obligations(
+                obligation_plan,
+                repository_context,
+                environment=environment,
+                artifacts=artifacts,
+            )
+            native_evidence, native_results = execute_repository_native_obligations(
+                obligation_plan,
+                repository_context,
+                test_inventory or {},
+                test_results,
+                [item for item in obligation_plan.get("evidence", []) if isinstance(item, dict)],
+            )
+            repository_evidence_history = [
+                item for item in obligation_plan.get("evidence", []) if isinstance(item, dict)
+            ]
+            repository_evidence = host_evidence + native_evidence
+            repository_execution_results = host_results + native_results
+            if obligation_selection is None:
+                obligation_selection = {
+                    "selected_obligation_identities": obligation_plan.get("_selected_obligation_identities", []),
+                    "reused_obligation_identities": obligation_plan.get("_reused_obligation_identities", []),
+                    "new_execution_obligation_identities": obligation_plan.get("_new_execution_obligation_identities", []),
+                    "selection_unresolved": [],
+                    "sufficient_to_stop": False,
+                    "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
+                }
+            obligation_selection["evidence"] = repository_evidence
+            obligation_selection["evidence_history"] = repository_evidence_history
+            obligation_selection["execution_results"] = repository_execution_results
+            execution_statuses = {
+                item.get("obligation_identity"): item.get("status")
+                for item in repository_evidence
+                if isinstance(item, dict)
+            }
+            required_identities = obligation_plan.get("repository", {}).get("required_obligation_identities", [])
+            repository_execution_complete = (
+                bool(obligation_plan.get("repository", {}).get("complete"))
+                and all(execution_statuses.get(identity) == "PASS" for identity in required_identities)
+                and len(execution_statuses) >= len(required_identities)
+            )
+            obligation_selection["execution_complete"] = repository_execution_complete
+            obligation_selection["sufficient_to_stop"] = False
         classification = "success"
         failure_class = "none"
         message: str | None = None
@@ -3115,6 +3947,39 @@ def run_manifest(args: argparse.Namespace) -> int:
             classification = "unsupported"
             failure_class = "selection_unresolved"
             message = f"selected verification obligations have no executable mncs-test identity: {unresolved}"
+        if repository_plan:
+            failed_obligations = [item for item in repository_execution_results if item.get("status") == "FAIL"]
+            unknown_obligations = [item for item in repository_execution_results if item.get("status") == "UNKNOWN"]
+            if failed_obligations:
+                failed = failed_obligations[0]
+                classification = "test_failure"
+                failure_class = "repository_obligation_failed"
+                message = str(failed.get("reason", "repository obligation failed"))
+                failure_details = {
+                    "obligation_identity": failed.get("obligation_identity"),
+                    "executor_identity": failed.get("executor_identity"),
+                    "executor": failed.get("executor"),
+                    "evidence_identity": failed.get("evidence_identity"),
+                }
+            elif unknown_obligations and classification == "success":
+                unknown = unknown_obligations[0]
+                classification = "unsupported"
+                failure_class = "repository_obligation_unknown"
+                message = str(unknown.get("reason", "repository obligation is UNKNOWN"))
+                failure_details = {
+                    "obligation_identity": unknown.get("obligation_identity"),
+                    "executor_identity": unknown.get("executor_identity"),
+                    "executor": unknown.get("executor"),
+                    "evidence_identity": unknown.get("evidence_identity"),
+                }
+            elif not repository_execution_complete and classification == "success":
+                classification = "unsupported"
+                failure_class = "repository_closure_incomplete"
+                message = "repository-canonical obligation set is incomplete"
+                failure_details = {
+                    "missing_obligation_identities": obligation_plan.get("repository", {}).get("missing_obligation_identities", []),
+                    "required_obligation_identities": obligation_plan.get("repository", {}).get("required_obligation_identities", []),
+                }
         result = make_result(
             manifest=manifest_for_run,
             source_text=source_text,

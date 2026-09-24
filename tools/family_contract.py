@@ -81,6 +81,10 @@ def validate_obligation_plan(value: Any) -> dict[str, Any]:
     return obligation_plan_contract().validate_obligation_plan(value)
 
 
+def validate_obligation_inventory(value: Any, *, repository: str | None = None) -> dict[str, Any]:
+    return obligation_plan_contract().validate_inventory(value, repository=repository)
+
+
 def contract_vocab() -> tuple[tuple[str, ...], set[str]]:
     module = verification_plan_contract()
     return tuple(module.VERIFICATION_LEVELS), set(module.ESCALATION_REASONS)
