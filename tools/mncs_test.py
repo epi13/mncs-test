@@ -2531,10 +2531,15 @@ def execute_repository_host_obligations(
             continue
         working_directory = executor.get("working_directory", ".")
         command_cwd = resolve_path(str(working_directory), context["root"], must_exist=True)
+        host_environment = repository_host_environment(
+            environment,
+            repository_root=context["root"],
+            library_paths=executor.get("library_paths", []),
+        )
         process = run_process(
             list(argv),
             cwd=command_cwd,
-            environment=environment,
+            environment=host_environment,
             timeout_seconds=timeout_seconds,
             artifacts=artifacts,
             artifact_key=safe_artifact_key(f"obligation-{obligation['identity']}"),
@@ -2583,6 +2588,33 @@ def execute_repository_host_obligations(
             "evidence_identity": evidence["evidence_identity"],
         })
     return active_evidence, prior_evidence, results
+
+
+def repository_host_environment(
+    inherited: dict[str, str],
+    *,
+    repository_root: Path,
+    library_paths: Any,
+) -> dict[str, str]:
+    """Build an external executor environment from its declared libraries.
+
+    ``--library`` configures native MNCS inventory/test execution. Host
+    repository obligations get their own explicitly declared library paths so
+    those runner inputs cannot alter the behavior of Rust/Python tests.
+    """
+
+    if not isinstance(library_paths, list) or not all(
+        isinstance(path, str) and path for path in library_paths
+    ):
+        raise ManifestError("repository executor library_paths must be a string array")
+    environment = dict(inherited)
+    environment.pop("MNCS_LIBRARY_PATH", None)
+    resolved = [
+        resolve_path(path, repository_root, must_exist=True) for path in library_paths
+    ]
+    if resolved:
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(str(path) for path in resolved)
+    return environment
 
 
 def execute_repository_native_obligations(

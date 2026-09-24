@@ -17,6 +17,7 @@ from mncs_test import (
     execute_batch,
     execute_repository_host_obligations,
     execute_repository_native_obligations,
+    repository_host_environment,
     validate_manifest,
 )
 
@@ -267,6 +268,30 @@ def test_external_obligation_is_not_reported_as_missing_native_test() -> None:
     assert summary["new_execution_obligation_identities"] == ["repo.package-test"]
 
 
+def test_repository_host_environment_isolated_from_native_library_paths(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    inherited = {
+        "MNCS_LIBRARY_PATH": "/runner/native-libraries",
+        "CARGO_TARGET_DIR": "/shared/cargo-target",
+        "PATH": "/usr/bin",
+    }
+
+    isolated = repository_host_environment(
+        inherited, repository_root=tmp_path, library_paths=[]
+    )
+    assert "MNCS_LIBRARY_PATH" not in isolated
+    assert isolated["CARGO_TARGET_DIR"] == "/shared/cargo-target"
+    assert inherited["MNCS_LIBRARY_PATH"] == "/runner/native-libraries"
+
+    declared = repository_host_environment(
+        inherited, repository_root=tmp_path, library_paths=["library"]
+    )
+    assert declared["MNCS_LIBRARY_PATH"] == str(library)
+
+
 def test_external_failure_keeps_obligation_and_executor_identity(tmp_path: Path, monkeypatch) -> None:
     import mncs_test
 
@@ -300,26 +325,40 @@ def test_external_failure_keeps_obligation_and_executor_identity(tmp_path: Path,
         "root": tmp_path,
         "tests_by_identity": {identity: {"test": "package"}},
     }
-    monkeypatch.setattr(
-        mncs_test,
-        "run_process",
-        lambda *args, **kwargs: {
+    captured_environment: dict[str, str] = {}
+
+    def failing_executor(*args, **kwargs):
+        captured_environment.update(kwargs["environment"])
+        return {
             "timed_out": False,
             "returncode": 17,
             "stdout_artifact": "stdout/package.out",
             "stderr_artifact": "stderr/package.err",
             "command_artifact": "commands/package.json",
             "timing": {"wall_time_ms": 12.5},
-        },
+        }
+
+    monkeypatch.setattr(
+        mncs_test,
+        "run_process",
+        failing_executor,
     )
     artifacts = ArtifactStore(tmp_path / "artifacts")
     evidence, _, results = execute_repository_host_obligations(
-        plan, context, environment={}, artifacts=artifacts
+        plan,
+        context,
+        environment={
+            "MNCS_LIBRARY_PATH": "/runner/native-libraries",
+            "CARGO_TARGET_DIR": "/shared/cargo-target",
+        },
+        artifacts=artifacts,
     )
     assert evidence[0]["status"] == "FAIL"
     assert results[0]["obligation_identity"] == identity
     assert results[0]["executor_identity"] == "3" * 64
     assert results[0]["status"] == "FAIL"
+    assert "MNCS_LIBRARY_PATH" not in captured_environment
+    assert captured_environment["CARGO_TARGET_DIR"] == "/shared/cargo-target"
 
 
 def test_external_timeout_is_unknown_and_keeps_obligation_executor_identity(
