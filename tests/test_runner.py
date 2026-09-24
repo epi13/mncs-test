@@ -80,6 +80,40 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertTrue(all(item["source_span"]["start"] < item["source_span"]["end"] for item in manifest["tests"]))
 
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_compiler_issued_test_identity_from_another_source_is_rejected(self):
+        environment = os.environ.copy()
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
+            [str(LANGUAGE / "library"), str(REPO / "native"), str(REPO)]
+        )
+        foreign = subprocess.run(
+            [str(MNCS), "declaration-inventory", str(REPO / "tests/fixtures/first_class_failing.mncs")],
+            cwd=REPO,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(foreign.returncode, 0, foreign.stderr)
+        inventory = json.loads(foreign.stdout)
+        foreign_tests = [
+            item["test_case_identity"]
+            for item in inventory["inventory"]["callables"]
+            if item.get("callable_kind") == "test"
+        ]
+        self.assertEqual(len(foreign_tests), 1)
+        selected = self.invoke(
+            "run",
+            "--manifest",
+            "mncs-test.toml",
+            *self.live_args(),
+            "--test-identity",
+            foreign_tests[0],
+        )
+        self.assertNotEqual(selected.returncode, 0, selected.stdout)
+        failure = json.loads(selected.stdout)["failure"]
+        self.assertIn("absent from the current compiler inventory", failure["message"])
+
     def test_validate_manifest(self):
         completed = self.invoke("validate-manifest", "--manifest", "mncs-test.toml")
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -304,7 +338,15 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(len(document["experiment"]["observations"]), 1)
             item = document["tests"][0]
             self.assertEqual(item["request"]["target"]["function"], "arithmetic")
-            self.assertEqual(item["transport_request"]["function"], "arithmetic")
+            self.assertNotIn("function", item["transport_request"])
+            self.assertEqual(
+                item["transport_request"]["callable_reference"]["callable_identity"],
+                item["semantic"]["function_identity"],
+            )
+            self.assertEqual(
+                item["transport_request"]["callable_reference"]["test_case_identity"],
+                item["semantic"]["test_case_identity"],
+            )
             self.assertEqual(item["transport_request"]["args"], item["request"]["arguments"])
             self.assertEqual(
                 item["execution_lineage"]["execution_identity"], item["execution_identity"]

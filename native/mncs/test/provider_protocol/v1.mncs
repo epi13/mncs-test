@@ -8,9 +8,22 @@ module mncs.test.provider_protocol.v1;
 
 use mncs.test.assertions;
 
+enum CallableExecutionStatus { RETURNED, INVALID_REQUEST, RUNTIME_FAILURE, UNSUPPORTED, BUDGET_EXHAUSTED }
+
+record ProviderTestExecution {
+    test_case_identity: [byte; up_to 1024],
+    declaration_identity: [byte; up_to 1024],
+    callable_identity: [byte; up_to 1024],
+    signature_identity: [byte; up_to 128],
+    artifact_identity: [byte; up_to 1024],
+    execution_status: CallableExecutionStatus,
+    native_result: TestResult
+}
+
 record ProviderRequest {
     inventory_identity: [byte; 32],
     selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selected_test_executions: [ProviderTestExecution; up_to 8],
     selection_count: u64,
     interface_identity: [byte; 32],
     provider_revision_identity: [byte; 32]

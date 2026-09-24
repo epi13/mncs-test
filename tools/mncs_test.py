@@ -330,6 +330,7 @@ def native_test_result(execution: dict[str, Any]) -> dict[str, Any] | None:
         # neither field participates in semantic control flow anymore.
         "verdict_code": integer_value(fields.get("verdict_code")),
         "failure_kind": "none" if failure_kind == "NoFailure" else failure_kind.lower(),
+        "failure_kind_name": failure_kind,
         "failure_kind_code": finite_discriminant(fields.get("failure_kind")),
         "failure_code": integer_value(fields.get("failure_code")),
         "assertions": integer_value(fields.get("assertions")),
@@ -568,6 +569,7 @@ def compiler_inventory(
                 "declaration_identity": callable_.get("declaration_identity"),
                 "test_case_identity": callable_.get("test_case_identity"),
                 "function_identity": callable_.get("callable_identity"),
+                "signature_identity": callable_.get("signature_identity"),
                 "module": callable_.get("module"),
                 "name": callable_.get("name"),
                 "qualified_name": callable_.get("qualified_name"),
@@ -629,7 +631,13 @@ def normalize_inventory_tests(
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             raise ManifestError(f"compiler inventory tests[{index}] must be an object")
-        required = ("test_case_identity", "declaration_identity", "function_identity", "name")
+        required = (
+            "test_case_identity",
+            "declaration_identity",
+            "function_identity",
+            "signature_identity",
+            "name",
+        )
         if not all(isinstance(entry.get(field), str) and entry[field] for field in required):
             raise ManifestError(f"compiler inventory tests[{index}] is missing a canonical identity")
         test_id = entry["test_case_identity"]
@@ -649,6 +657,7 @@ def normalize_inventory_tests(
                 "declaration_identity": entry["declaration_identity"],
                 "test_case_identity": test_id,
                 "function_identity": entry["function_identity"],
+                "signature_identity": entry["signature_identity"],
                 "module": entry.get("module", manifest["module"]),
                 "qualified_name": entry.get("qualified_name", name),
                 "profile": entry.get("profile", inventory.get("source_profile", manifest["profile"])),
@@ -1007,18 +1016,19 @@ def embed_execution_request(
     function: str,
     arguments: Any,
     step_budget: int,
+    callable_reference: dict[str, Any] | None = None,
     type_arguments: Any = None,
     include_type_arguments: bool = False,
     host_grants: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build only the request shape accepted by the retained embed ABI."""
 
-    request = {
-        "module": module,
-        "function": function,
-        "args": arguments,
-        "step_budget": step_budget,
-    }
+    request = (
+        {"callable_reference": callable_reference, "args": arguments}
+        if callable_reference is not None
+        else {"module": module, "function": function, "args": arguments}
+    )
+    request["step_budget"] = step_budget
     if include_type_arguments:
         request["type_arguments"] = type_arguments
     if host_grants:
@@ -1046,6 +1056,7 @@ def base_test_result(test: dict[str, Any], source_path: Path, source_text: str =
             "declaration_identity",
             "test_case_identity",
             "function_identity",
+            "signature_identity",
             "module",
             "qualified_name",
             "profile",
@@ -1119,6 +1130,30 @@ def execution_result_from_decoded(
         )
         if key in decoded
     }
+    if test.get("first_class"):
+        invoked = decoded.get("invoked_callable")
+        expected_reference = {
+            "artifact_identity": decoded.get("artifact_identity"),
+            "callable_identity": test.get("function_identity"),
+            "declaration_identity": test.get("declaration_identity"),
+            "test_case_identity": test.get("test_case_identity"),
+            "signature_identity": test.get("signature_identity"),
+        }
+        if not isinstance(invoked, dict) or any(
+            invoked.get(field) != expected
+            for field, expected in expected_reference.items()
+        ):
+            return result_failure(
+                test_result,
+                failure_class="identity_dispatch_failure",
+                message="first-class test result lacks a matching runtime callable reference receipt",
+                expected_callable_reference=expected_reference,
+                observed_callable_reference=invoked,
+            )
+        test_result["callable_invocation"] = {
+            **expected_reference,
+            "execution_status": decoded.get("status"),
+        }
     if status not in EXECUTION_STATUSES:
         return result_failure(
             test_result,
@@ -1424,6 +1459,10 @@ def execute_batch(
     request_documents: list[dict[str, Any]] = []
     transport_requests: list[dict[str, Any]] = []
     request_artifacts: list[dict[str, Any]] = []
+    needs_identity_reference = any(test.get("first_class") for test in tests)
+    artifact_identity = session.info().get("artifact_identity") if needs_identity_reference else None
+    if needs_identity_reference and (not isinstance(artifact_identity, str) or not artifact_identity):
+        raise AdapterError("retained MNCS session omitted its artifact identity")
     for index, test in enumerate(tests):
         step_budget = int(test.get("step_budget", default_step_budget))
         host_grants = test.get("host_grants", [])
@@ -1439,12 +1478,34 @@ def execute_batch(
             host_grants=host_grants,
         )
         request_documents.append(request)
+        callable_reference = None
+        if test.get("first_class"):
+            identity_fields = (
+                "function_identity",
+                "declaration_identity",
+                "test_case_identity",
+                "signature_identity",
+            )
+            if any(not isinstance(test.get(field), str) or not test[field] for field in identity_fields):
+                raise ManifestError(
+                    f"first-class test {test.get('id')} is missing compiler callable/signature metadata"
+                )
+            if not isinstance(artifact_identity, str) or not artifact_identity:
+                raise AdapterError("retained MNCS session omitted its artifact identity")
+            callable_reference = {
+                "artifact_identity": artifact_identity,
+                "callable_identity": test["function_identity"],
+                "declaration_identity": test["declaration_identity"],
+                "test_case_identity": test["test_case_identity"],
+                "signature_identity": test["signature_identity"],
+            }
         transport_requests.append(
             embed_execution_request(
                 module=module,
                 function=test["entry"],
                 arguments=test.get("arguments", []),
                 step_budget=step_budget,
+                callable_reference=callable_reference,
                 type_arguments=test.get("type_arguments"),
                 include_type_arguments="type_arguments" in test,
                 host_grants=host_grants,

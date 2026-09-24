@@ -2,9 +2,9 @@ mncs 0.18;
 
 // mncs.test.provider — production typed provider boundary.
 //
-// Compiler inventory dispatch is generated into provider_inventory.mncs.
-// Actions supplies only a typed bounded selection and never names a
-// host function or a nearby test.
+// Test declarations are invoked through compiler-owned callable references
+// by mncs-embed. The generated inventory is data used to validate receipts;
+// this module owns result folding and provider artifact publication.
 module mncs.test.provider;
 
 use mncs.test.assertions;
@@ -16,6 +16,7 @@ use mncs.std.application.v1;
 record ProviderExecutionMaterial {
     inventory_identity: [byte; 32],
     selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selected_test_executions: [protocol.ProviderTestExecution; up_to 8],
     selection_count: u64,
     interface_identity: [byte; 32],
     provider_revision_identity: [byte; 32]
@@ -24,7 +25,8 @@ record ProviderExecutionMaterial {
 record ProviderEvidenceMaterial {
     execution_identity: [byte; 32],
     native_result: TestResult,
-    selected_test_identities: [[byte; up_to 1024]; up_to 8]
+    selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    selected_test_executions: [protocol.ProviderTestExecution; up_to 8]
 }
 
 record ProviderAccumulator {
@@ -48,7 +50,7 @@ fn provider_identity() -> (result: [byte; 32]) {
 }
 
 fn interface_identity() -> (result: [byte; 32]) {
-    return [223, 95, 103, 95, 199, 47, 56, 136, 224, 176, 84, 205, 227, 245, 220, 15, 45, 42, 191, 29, 18, 111, 18, 150, 42, 41, 220, 79, 240, 84, 36, 179];
+    return [75, 142, 42, 218, 99, 249, 150, 185, 40, 106, 105, 100, 222, 15, 1, 204, 90, 226, 13, 180, 239, 70, 93, 123, 235, 149, 238, 241, 157, 87, 196, 242];
 }
 
 fn revision_identity() -> (result: [byte; 32]) {
@@ -91,8 +93,28 @@ fn equal_views(left: [byte; up_to 1024], right: [byte; up_to 1024]) -> (result: 
     return sequences.equals_byte_view<1024>(left, right);
 }
 
-fn known_identity(value: [byte; up_to 1024]) -> (result: bool) {
-    return generated.known_identity(value);
+fn callable_execution_matches(request: protocol.ProviderRequest) -> (result: bool) {
+    if request.selected_test_executions.len != request.selected_test_identities.len {
+        return false;
+    }
+    let inventory: generated.TestCallableInventory = generated.callable_inventory();
+    iterate i over request.selected_test_identities carrying all: bool = true {
+        let observed: protocol.ProviderTestExecution = request.selected_test_executions[i];
+        iterate j over inventory.entries carrying found: bool = false {
+            let declared: generated.TestCallableEntry = inventory.entries[j];
+            next found = found || (
+                equal_views(observed.test_case_identity, declared.test_case_identity)
+                    && equal_views(observed.declaration_identity, declared.declaration_identity)
+                    && equal_views(observed.callable_identity, declared.callable_identity)
+                    && sequences.equals_byte_view<128>(observed.signature_identity, declared.signature_identity)
+            );
+        }
+        next all = all
+            && equal_views(request.selected_test_identities[i], observed.test_case_identity)
+            && observed.artifact_identity.len > 0
+            && found;
+    }
+    return all;
 }
 
 fn inventory_matches(request: protocol.ProviderRequest) -> (result: bool) {
@@ -116,21 +138,6 @@ fn duplicate_selection(request: protocol.ProviderRequest) -> (result: bool) {
     return duplicate;
 }
 
-// The provider keeps an execution batch bound of eight for resource reasons,
-// but the family selection contract is wider. Materialize the validated
-// request through the shared bounded builder before dispatch so the provider
-// consumes an owned, deterministic sequence rather than relying on a
-// request-shaped view. The 64-slot staging bound is not an execution limit.
-fn materialize_provider_selection(
-    values: [[byte; up_to 1024]; up_to 8]
-) -> (result: [[byte; up_to 1024]; up_to 64]) {
-    let seed_builder: sequences.ByteViewBuilder64 = sequences.byte_view_builder64_empty();
-    iterate i over values carrying builder: sequences.ByteViewBuilder64 = seed_builder {
-        next builder = sequences.byte_view_builder64_push(builder, values[i], true);
-    }
-    return sequences.byte_view_builder64_finish(builder);
-}
-
 fn verdict_is_fail(value: Verdict) -> (result: bool) {
     return match value {
         PASS => false,
@@ -138,10 +145,6 @@ fn verdict_is_fail(value: Verdict) -> (result: bool) {
         SKIP => false,
         UNSUPPORTED => false
     };
-}
-
-fn run_one(selector: [byte; up_to 1024]) -> (result: TestResult) {
-    return generated.run_one(selector);
 }
 
 fn empty_accumulator() -> (result: ProviderAccumulator) {
@@ -201,9 +204,59 @@ fn native_result(accumulator: ProviderAccumulator) -> (result: TestResult) {
     };
 }
 
-fn fold_selected(values: [[byte; up_to 1024]; up_to 64]) -> (result: ProviderAccumulator) {
+fn observed_test_result(execution: protocol.ProviderTestExecution) -> (result: TestResult) {
+    return match execution.execution_status {
+        RETURNED => execution.native_result,
+        UNSUPPORTED => TestResult {
+            verdict: Verdict.UNSUPPORTED,
+            verdict_code: 3,
+            failure_kind: FailureKind.Unsupported,
+            failure_code: 9003,
+            assertions: 0,
+            failures: 0,
+            expected: 0,
+            actual: 0,
+            assertion_code: 0
+        },
+        BUDGET_EXHAUSTED => TestResult {
+            verdict: Verdict.FAIL,
+            verdict_code: 1,
+            failure_kind: FailureKind.Timeout,
+            failure_code: 9004,
+            assertions: 0,
+            failures: 1,
+            expected: 0,
+            actual: 0,
+            assertion_code: 0
+        },
+        INVALID_REQUEST => TestResult {
+            verdict: Verdict.FAIL,
+            verdict_code: 1,
+            failure_kind: FailureKind.Runtime,
+            failure_code: 9005,
+            assertions: 0,
+            failures: 1,
+            expected: 0,
+            actual: 0,
+            assertion_code: 0
+        },
+        RUNTIME_FAILURE => TestResult {
+            verdict: Verdict.FAIL,
+            verdict_code: 1,
+            failure_kind: FailureKind.Runtime,
+            failure_code: 9005,
+            assertions: 0,
+            failures: 1,
+            expected: 0,
+            actual: 0,
+            assertion_code: 0
+        }
+    };
+}
+
+fn fold_selected(values: [protocol.ProviderTestExecution; up_to 8]) -> (result: ProviderAccumulator) {
     iterate i over values carrying accumulator: ProviderAccumulator = empty_accumulator() {
-        next accumulator = observe(accumulator, run_one(values[i]));
+        next accumulator = observe(accumulator, observed_test_result(values[i]));
     }
     return accumulator;
 }
@@ -225,18 +278,17 @@ fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.Pr
     let valid_shape: bool = request.selection_count > 0
         && request.selection_count <= 8
         && request.selection_count == request.selected_test_identities.len
+        && request.selection_count == request.selected_test_executions.len
         && inventory_matches(request)
-        && !duplicate_selection(request);
-    iterate i over request.selected_test_identities carrying known: bool = true {
-        next known = known && known_identity(request.selected_test_identities[i]);
-    }
-    let valid: bool = valid_shape && request.selected_test_identities.len > 0 && known;
-    let selected: [[byte; up_to 1024]; up_to 64] = materialize_provider_selection(request.selected_test_identities);
-    let accumulator: ProviderAccumulator = select(valid, fold_selected(selected), invalid_accumulator(request));
+        && !duplicate_selection(request)
+        && callable_execution_matches(request);
+    let valid: bool = valid_shape && request.selected_test_identities.len > 0;
+    let accumulator: ProviderAccumulator = select(valid, fold_selected(request.selected_test_executions), invalid_accumulator(request));
     let selected_result: TestResult = native_result(accumulator);
     let execution_identity: [byte; 32] = copy_digest(structured_digest(ProviderExecutionMaterial {
         inventory_identity: request.inventory_identity,
         selected_test_identities: request.selected_test_identities,
+        selected_test_executions: request.selected_test_executions,
         selection_count: request.selection_count,
         interface_identity: request.interface_identity,
         provider_revision_identity: request.provider_revision_identity
@@ -244,7 +296,8 @@ fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.Pr
     let evidence_identity: [byte; 32] = copy_digest(structured_digest(ProviderEvidenceMaterial {
         execution_identity: execution_identity,
         native_result: selected_result,
-        selected_test_identities: request.selected_test_identities
+        selected_test_identities: request.selected_test_identities,
+        selected_test_executions: request.selected_test_executions
     }));
     let test_result_without_identity: protocol.ProviderTestResult = protocol.ProviderTestResult {
         result_identity: [0; 32],

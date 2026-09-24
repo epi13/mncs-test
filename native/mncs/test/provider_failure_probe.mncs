@@ -20,6 +20,7 @@ fn provider_failure_probe_app(context: ApplicationContext) -> (result: Applicati
     let request: protocol.ProviderRequest = protocol.ProviderRequest {
         inventory_identity: [204; 32],
         selected_test_identities: empty_selection,
+        selected_test_executions: [],
         selection_count: 0,
         interface_identity: [44, 47, 153, 233, 71, 126, 85, 223, 11, 29, 157, 30, 65, 82, 21, 68, 83, 207, 23, 125, 84, 199, 123, 30, 119, 42, 18, 202, 175, 189, 65, 138],
         provider_revision_identity: [187; 32]

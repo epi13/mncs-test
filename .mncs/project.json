@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 5,
+  "revision": 8,
   "manifest_location": "in-repository",
   "authority": {
     "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport, generation, and differential adapters."
@@ -12,15 +12,16 @@
       {"path": "native/mncs/test/", "class": "canonical", "authority": "mncs-test", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
       {"path": "native/mncs/test/obligation_selection.mncs", "class": "canonical", "authority": "mncs-test", "note": "Native lifecycle/status-to-test selection kernel; Python remains transport and explicit oracle only.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
       {"path": "native-applications/obligation-selection.json", "class": "canonical", "authority": "mncs-test", "note": "Descriptor for the native obligation selection application.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "compiler-bootstrap", "semantic_role": "platform-adapter"}},
-      {"path": "native/mncs/test/provider_inventory.mncs", "class": "generated", "note": "Compiler-inventory-bound compatibility projection while generic invocation remains unavailable.", "classification": {"authority": "none", "lifecycle": "generated", "boundary_kind": "none", "semantic_role": "generated"}},
+      {"path": "native/mncs/test/provider_inventory.mncs", "class": "generated", "note": "Compiler-owned callable, declaration, test-case, and signature identity data used to validate runtime invocation receipts; contains no executable dispatch.", "classification": {"authority": "none", "lifecycle": "generated", "boundary_kind": "none", "semantic_role": "generated"}},
       {"path": "tools/", "class": "host-boundary", "note": "Manifest/file discovery and compiler/process/JSON transport adapters; obligation selection is delegated to the native kernel.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "compiler-bootstrap", "semantic_role": "platform-adapter"}},
-      {"path": "tools/generate_provider.py", "class": "migration-shadow", "note": "Transparent compiler-inventory-bound typed dispatch generator; removal criterion is a generic identity-bound invocation surface.", "classification": {"authority": "none", "lifecycle": "temporary", "boundary_kind": "compiler-bootstrap", "semantic_role": "migration-shadow"}},
+      {"path": "tools/generate_provider.py", "class": "host-boundary", "note": "Projects compiler-owned declaration inventory into a native data table for receipt consistency; remove when the compiler embeds that inventory directly in runtime artifacts.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "compiler-bootstrap", "semantic_role": "platform-adapter"}},
       {"path": "pressures/MNCS-TEST-P-007.json", "class": "reference", "authority": "MNCS-Commons", "note": "Local evidence linked to the canonical Commons pressure.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "reference"}}
     ]
   },
   "verification": {
     "schema_version": "mncs-family.verification-obligation-inventory/v1",
-    "obligation_inventory": ".mncs/verification-obligations.json"
+    "obligation_inventory": ".mncs/verification-obligations.json",
+    "test_runner_identity": "mncs-test/0.2.1"
   },
   "contracts": {
     "provides": [
@@ -32,7 +33,7 @@
       ,{"contract": "ravel.verification-obligation-plan", "envelope": {"op": "any"}, "required": false}
     ],
     "tests": [
-      {"test": "native-test-provider", "covers": ["test-provider"], "obligation": "self", "command": {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]}}
+      {"test": "native-test-provider", "covers": ["test-provider"], "obligation": "self", "command": {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], "timeout_seconds": 1800}}
     ]
   }
 }

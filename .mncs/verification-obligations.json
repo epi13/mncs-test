@@ -1,8 +1,63 @@
 {
   "schema_version": "mncs-family.verification-obligation-inventory/v1",
   "repository": "mncs-test",
-  "revision": 1,
+  "revision": 3,
   "obligations": [
+    {
+      "identity": "mncs-test.identity-bound-provider-execution",
+      "title": "First-class test declarations execute through the identity-bound native provider path",
+      "guarantee_domain": "runtime",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "repository_canonical",
+      "subjects": [
+        "mncs:0.2:record-type:mncs.test.provider_protocol.v1::ProviderRequest::interface_identity%3A%5Bbyte%3B%2032%5D%3Binventory_identity%3A%5Bbyte%3B%2032%5D%3Bprovider_revision_identity%3A%5Bbyte%3B%2032%5D%3Bselected_test_executions%3A%5BProviderTestExecution%3B%20up_to%208%5D%3Bselected_test_identities%3A%5B%5Bbyte%3B%20up_to%201024%5D%3B%20up_to%208%5D%3Bselection_count%3Au64%3B",
+        "mncs:0.2:record-type:mncs.test.provider_protocol.v1::ProviderTestExecution::artifact_identity%3A%5Bbyte%3B%20up_to%201024%5D%3Bcallable_identity%3A%5Bbyte%3B%20up_to%201024%5D%3Bdeclaration_identity%3A%5Bbyte%3B%20up_to%201024%5D%3Bexecution_status%3ACallableExecutionStatus%3Bnative_result%3ATestResult%3Bsignature_identity%3A%5Bbyte%3B%20up_to%20128%5D%3Btest_case_identity%3A%5Bbyte%3B%20up_to%201024%5D%3B"
+      ],
+      "invalidation_dependencies": [
+        "tests/self_suite.mncs",
+        "tests/provider_cross_module.mncs",
+        "tests/test_phase6_provider_generation.py",
+        "tools/mncs_test.py",
+        "tools/generate_provider.py",
+        "native/mncs/test/provider.mncs",
+        "native/mncs/test/provider_inventory.mncs",
+        "native/mncs/test/provider_protocol/v1.mncs",
+        "native-applications/test-provider.json",
+        "native-applications/provider-admitted.json"
+      ],
+      "executor": {
+        "provider": "mncs-test",
+        "kind": "native_first_class_test",
+        "entrypoint": "mncs-test run",
+        "source_paths": [
+          "tests/self_suite.mncs"
+        ],
+        "library_paths": [
+          "../mncs-language/library"
+        ],
+        "declaration_identities": [
+          "*"
+        ],
+        "verifier_identity": "mncs-test-runner/0.2.1"
+      },
+      "evidence_identity": {
+        "subject_fields": [
+          "repository_fingerprint",
+          "subject_fingerprint"
+        ],
+        "definition_fields": [
+          "obligation_identity",
+          "definition_identity"
+        ],
+        "execution_fields": [
+          "test_case_identity",
+          "executor_identity",
+          "verifier_identity",
+          "invalidation_identity"
+        ]
+      }
+    },
     {
       "identity": "mncs-test.native-provider.execution",
       "title": "Selected test obligations execute through the native provider session",
@@ -10,18 +65,38 @@
       "evidence_role": "canonical_regression",
       "lifecycle": "permanent",
       "scope": "consumer",
-      "subjects": ["mncs.test-result/1", "mncs-test:test-provider"],
-      "invalidation_dependencies": ["native/mncs/test/", "ravel.verification-obligation-plan"],
+      "subjects": [
+        "mncs-test:test-provider",
+        "mncs.test-result/1",
+        "mncs:0.2:record-type:mncs.test.provider_protocol.v1::ProviderRequest::interface_identity%3A%5Bbyte%3B%2032%5D%3Binventory_identity%3A%5Bbyte%3B%2032%5D%3Bprovider_revision_identity%3A%5Bbyte%3B%2032%5D%3Bselected_test_executions%3A%5BProviderTestExecution%3B%20up_to%208%5D%3Bselected_test_identities%3A%5B%5Bbyte%3B%20up_to%201024%5D%3B%20up_to%208%5D%3Bselection_count%3Au64%3B",
+        "mncs:0.2:record-type:mncs.test.provider_protocol.v1::ProviderTestExecution::artifact_identity%3A%5Bbyte%3B%20up_to%201024%5D%3Bcallable_identity%3A%5Bbyte%3B%20up_to%201024%5D%3Bdeclaration_identity%3A%5Bbyte%3B%20up_to%201024%5D%3Bexecution_status%3ACallableExecutionStatus%3Bnative_result%3ATestResult%3Bsignature_identity%3A%5Bbyte%3B%20up_to%20128%5D%3Btest_case_identity%3A%5Bbyte%3B%20up_to%201024%5D%3B"
+      ],
+      "invalidation_dependencies": [
+        "native/mncs/test/",
+        "ravel.verification-obligation-plan"
+      ],
       "executor": {
         "provider": "mncs-test",
         "kind": "native_first_class_test",
         "entrypoint": "mncs-test run",
-        "declaration_identities": ["*"]
+        "declaration_identities": [
+          "*"
+        ]
       },
       "evidence_identity": {
-        "subject_fields": ["subject_identity", "subject_fingerprint"],
-        "definition_fields": ["test_case_identity", "obligation_plan_id"],
-        "execution_fields": ["execution_identity", "observation_identity", "run_id"]
+        "subject_fields": [
+          "subject_identity",
+          "subject_fingerprint"
+        ],
+        "definition_fields": [
+          "test_case_identity",
+          "obligation_plan_id"
+        ],
+        "execution_fields": [
+          "execution_identity",
+          "observation_identity",
+          "run_id"
+        ]
       }
     },
     {
@@ -31,17 +106,32 @@
       "evidence_role": "conformance",
       "lifecycle": "permanent",
       "scope": "consumer",
-      "subjects": ["mncs.verification-obligation-plan/1"],
-      "invalidation_dependencies": ["native/mncs/test/obligation_selection.mncs", "native-applications/obligation-selection.json", "tools/mncs_test.py", "tools/family_contract.py"],
+      "subjects": [
+        "mncs.verification-obligation-plan/1"
+      ],
+      "invalidation_dependencies": [
+        "native/mncs/test/obligation_selection.mncs",
+        "native-applications/obligation-selection.json",
+        "tools/mncs_test.py",
+        "tools/family_contract.py"
+      ],
       "executor": {
         "provider": "mncs-test",
         "kind": "compile_experiment",
         "entrypoint": "tests/test_obligation_selection.py"
       },
       "evidence_identity": {
-        "subject_fields": ["subject_identity", "subject_fingerprint"],
-        "definition_fields": ["inventory_identity", "obligation_plan_id"],
-        "execution_fields": ["result_identity"]
+        "subject_fields": [
+          "subject_identity",
+          "subject_fingerprint"
+        ],
+        "definition_fields": [
+          "inventory_identity",
+          "obligation_plan_id"
+        ],
+        "execution_fields": [
+          "result_identity"
+        ]
       }
     }
   ]

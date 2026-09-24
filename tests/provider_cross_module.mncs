@@ -1,0 +1,10 @@
+mncs 0.18;
+
+// Second first-class test module used to prove heterogeneous identity batching.
+module tests.provider_cross_module;
+
+use mncs.test.assertions;
+
+test separate_module_identity() -> (result: TestResult) {
+    return from_assertion(equals_i64(84, 42 +% 42, 3001));
+}

@@ -79,8 +79,8 @@
     "obligation_selection_interface": "mncs.test.obligation_selection::selection_app",
     "provider_selection_bound": 8,
     "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
-    "provider_inventory_binding": "compiler declaration-inventory → compatibility projection → generated native dispatch module and checked metadata",
-    "provider_inventory_generation_pressure": "generic callable identity binding with heterogeneous typed signatures is not yet expressible; generation remains transparent typed glue",
+    "provider_inventory_binding": "compiler declaration-inventory for multiple source modules → generated identity/signature data table → native receipt consistency; selected tests run through artifact-bound mncs-embed identity invocation",
+    "provider_inventory_generation_pressure": "only direct compiler/runtime projection of declaration inventory into provider artifact remains; generated data contains no executable callable dispatch",
     "provider_revision_binding": "inventory identity + compiler source artifact identity + provider policy identity + generator identity"
   }
 }

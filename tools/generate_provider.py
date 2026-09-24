@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the compiler-inventory-bound mncs-test provider surface.
+"""Generate the compiler-inventory data consumed by the native test provider.
 
-The generic compiler declaration/callable inventory is the only input to
-test-case dispatch. The provider module remains handwritten policy (batch
-validation, result folding, and artifact publication); this generator owns
-the repetitive identity-to-test binding so a declaration cannot be added to
-the inventory without regenerating the executable provider surface.
-
-Generation remains because MNCS does not yet provide reflective invocation of
-an arbitrary callable identity with a heterogeneous typed signature. The
-remaining generated surface is therefore a transparent typed binding, not a
-second source of test discovery or provider policy.
+The generic compiler declaration/callable inventory is the only input to the
+provider's data table. Executable test calls go through mncs-embed's
+compiler-owned identity dispatcher; this generator emits no per-declaration
+host dispatch or callable branches.
 """
 
 from __future__ import annotations
@@ -28,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATED_SOURCE = ROOT / "native/mncs/test/provider_inventory.mncs"
 GENERATED_METADATA = ROOT / "native/mncs/test/provider_inventory.metadata.json"
 PROVIDER_SOURCE = ROOT / "native/mncs/test/provider.mncs"
-GENERATOR_IDENTITY = "mncs-test:provider-generator:inventory/1"
+GENERATOR_IDENTITY = "mncs-test:provider-generator:callable-data/1"
 
 
 def compact_json(value: object) -> bytes:
@@ -40,12 +34,33 @@ def digest_hex(value: object) -> str:
 
 
 def inventory_identity(inventory: dict[str, object]) -> str:
+    sources = inventory.get("sources", [])
     tests = inventory.get("tests", [])
-    assert isinstance(tests, list)
+    assert isinstance(sources, list) and isinstance(tests, list)
     material = [
-        inventory.get("subject_identity"),
-        inventory.get("subject_fingerprint"),
-        [item.get("test_case_identity") for item in tests if isinstance(item, dict)],
+        [
+            {
+                "source": item.get("source"),
+                "module": item.get("module"),
+                "source_artifact_identity": item.get("source_artifact_identity"),
+                "subject_identity": item.get("subject_identity"),
+                "subject_fingerprint": item.get("subject_fingerprint"),
+                "declaration_inventory_identity": item.get("declaration_inventory_identity"),
+            }
+            for item in sources
+            if isinstance(item, dict)
+        ],
+        [
+            {
+                "test_case_identity": item.get("test_case_identity"),
+                "declaration_identity": item.get("declaration_identity"),
+                "callable_identity": item.get("function_identity"),
+                "signature_identity": item.get("signature_identity"),
+                "module": item.get("module"),
+            }
+            for item in tests
+            if isinstance(item, dict)
+        ],
     ]
     return digest_hex(material)
 
@@ -67,16 +82,28 @@ def provider_policy_identity() -> str:
 def revision_identity(
     inventory: dict[str, object], identity: str, policy_identity: str
 ) -> str:
+    sources = inventory.get("sources", [])
     tests = inventory.get("tests", [])
+    assert isinstance(sources, list) and isinstance(tests, list)
     material = [
         GENERATOR_IDENTITY,
         policy_identity,
         identity,
-        inventory.get("source_artifact_identity"),
+        [
+            {
+                "source": item.get("source"),
+                "source_artifact_identity": item.get("source_artifact_identity"),
+            }
+            for item in sources
+            if isinstance(item, dict)
+        ],
         [
             {
                 "test_case_identity": item.get("test_case_identity"),
                 "function_identity": item.get("function_identity"),
+                "declaration_identity": item.get("declaration_identity"),
+                "signature_identity": item.get("signature_identity"),
+                "module": item.get("module"),
             }
             for item in tests
             if isinstance(item, dict)
@@ -94,77 +121,105 @@ def identity_literal(value: str) -> str:
 
 
 def inventory_from_compiler(
-    binary: Path, source: Path, libraries: list[Path]
+    binary: Path, sources: list[Path], libraries: list[Path]
 ) -> dict[str, object]:
     environment = dict(os.environ)
     if libraries:
         environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
             str(path.resolve()) for path in libraries
         )
-    completed = subprocess.run(
-        [str(binary), "declaration-inventory", str(source)],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise SystemExit(completed.stderr or "compiler declaration inventory failed")
-    document = json.loads(completed.stdout)
-    if (
-        document.get("schema_version") != "mncs.declaration-inventory/1"
-        or not document.get("valid")
-        or not isinstance(document.get("inventory"), dict)
-    ):
-        raise SystemExit(json.dumps(document, sort_keys=True))
-    declaration_inventory = document["inventory"]
-    callables = declaration_inventory.get("callables", [])
+    if not sources:
+        raise SystemExit("at least one compiler inventory source is required")
+    source_rows = []
     tests = []
-    for callable_ in callables:
-        if not isinstance(callable_, dict) or callable_.get("callable_kind") != "test":
-            continue
-        if not callable_.get("test_case_identity"):
-            raise SystemExit(
-                "compiler declaration inventory exposed a test without a test-case identity"
-            )
-        tests.append(
+    seen_sources: set[str] = set()
+    seen_tests: set[str] = set()
+    for source in sources:
+        try:
+            source_label = source.resolve().relative_to(ROOT.resolve()).as_posix()
+        except ValueError as error:
+            raise SystemExit(f"inventory source must be within the Test repository: {source}") from error
+        if source_label in seen_sources:
+            raise SystemExit(f"duplicate inventory source: {source_label}")
+        seen_sources.add(source_label)
+        completed = subprocess.run(
+            [str(binary), "declaration-inventory", str(source)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise SystemExit(completed.stderr or "compiler declaration inventory failed")
+        document = json.loads(completed.stdout)
+        if (
+            document.get("schema_version") != "mncs.declaration-inventory/1"
+            or not document.get("valid")
+            or not isinstance(document.get("inventory"), dict)
+        ):
+            raise SystemExit(json.dumps(document, sort_keys=True))
+        declaration_inventory = document["inventory"]
+        source_rows.append(
             {
-                "declaration_identity": callable_["declaration_identity"],
-                "test_case_identity": callable_["test_case_identity"],
-                "function_identity": callable_["callable_identity"],
-                "module": callable_["module"],
-                "name": callable_["name"],
-                "qualified_name": callable_["qualified_name"],
-                "source_span": callable_["source_span"],
-                "profile": callable_["profile"],
-                "generic_params": callable_["generic_params"],
-                "inputs": callable_["inputs"],
-                "outputs": callable_["outputs"],
-                "effects": callable_["effects"],
-                "capabilities": callable_["capabilities"],
+                "source": source_label,
+                "module": declaration_inventory["module"],
+                "source_artifact_identity": declaration_inventory["source_artifact_identity"],
+                "source_profile": declaration_inventory["source_profile"],
                 "subject_identity": declaration_inventory["subject_identity"],
                 "subject_fingerprint": declaration_inventory["subject_fingerprint"],
-                "semantic_fingerprint": callable_["test_case_identity"],
+                "declaration_inventory_identity": declaration_inventory["inventory_identity"],
             }
         )
+        callables = declaration_inventory.get("callables", [])
+        for callable_ in callables:
+            if not isinstance(callable_, dict) or callable_.get("callable_kind") != "test":
+                continue
+            test_identity = callable_.get("test_case_identity")
+            if not isinstance(test_identity, str) or not test_identity:
+                raise SystemExit(
+                    "compiler declaration inventory exposed a test without a test-case identity"
+                )
+            if test_identity in seen_tests:
+                raise SystemExit(f"duplicate compiler test identity: {test_identity}")
+            seen_tests.add(test_identity)
+            tests.append(
+                {
+                    "source": source_label,
+                    "declaration_identity": callable_["declaration_identity"],
+                    "test_case_identity": test_identity,
+                    "function_identity": callable_["callable_identity"],
+                    "signature_identity": callable_["signature_identity"],
+                    "module": callable_["module"],
+                    "name": callable_["name"],
+                    "qualified_name": callable_["qualified_name"],
+                    "source_span": callable_["source_span"],
+                    "profile": callable_["profile"],
+                    "generic_params": callable_["generic_params"],
+                    "inputs": callable_["inputs"],
+                    "outputs": callable_["outputs"],
+                    "effects": callable_["effects"],
+                    "capabilities": callable_["capabilities"],
+                    "subject_identity": declaration_inventory["subject_identity"],
+                    "subject_fingerprint": declaration_inventory["subject_fingerprint"],
+                    "semantic_fingerprint": test_identity,
+                }
+            )
+    source_rows.sort(key=lambda item: str(item["source"]))
     tests.sort(key=lambda item: (item["declaration_identity"], item["qualified_name"]))
     return {
         "schema_version": "mncs.test-inventory/compatibility/1",
-        "scope": declaration_inventory["scope"],
-        "module": declaration_inventory["module"],
-        "source_artifact_identity": declaration_inventory["source_artifact_identity"],
-        "source_profile": declaration_inventory["source_profile"],
-        "subject_identity": declaration_inventory["subject_identity"],
-        "subject_fingerprint": declaration_inventory["subject_fingerprint"],
-        "declaration_inventory_identity": declaration_inventory["inventory_identity"],
+        "scope": "source_module_set",
+        "sources": source_rows,
         "tests": tests,
     }
 
 
 def generate_source(inventory: dict[str, object], identity: str, revision: str) -> str:
+    sources = inventory["sources"]
     tests = inventory["tests"]
-    assert isinstance(tests, list)
+    assert isinstance(sources, list) and isinstance(tests, list)
+    source_labels = ", ".join(str(item["source"]) for item in sources if isinstance(item, dict))
     lines = [
         "mncs 0.18;",
         "",
@@ -172,12 +227,20 @@ def generate_source(inventory: dict[str, object], identity: str, revision: str) 
         f"// generator: {GENERATOR_IDENTITY}",
         f"// compiler inventory identity: {identity}",
         f"// provider revision identity: {revision}",
-        "// source: tests/self_suite.mncs; regenerate with tools/generate_provider.py",
+        f"// data projection from compiler declaration inventories: {source_labels}",
         "module mncs.test.provider_inventory;",
         "",
-        "use mncs.core.sequences.v1 as sequences;",
-        "use mncs.test.assertions;",
-        "use tests.self_suite;",
+        "record TestCallableEntry {",
+        "    test_case_identity: [byte; up_to 1024],",
+        "    declaration_identity: [byte; up_to 1024],",
+        "    callable_identity: [byte; up_to 1024],",
+        "    signature_identity: [byte; up_to 128]",
+        "}",
+        "",
+        "record TestCallableInventory {",
+        "    entries: [TestCallableEntry; up_to 64],",
+        "    count: u64",
+        "}",
         "",
         "fn inventory_identity() -> (result: [byte; 32]) {",
         f"    return {identity_literal(identity)};",
@@ -187,108 +250,45 @@ def generate_source(inventory: dict[str, object], identity: str, revision: str) 
         f"    return {identity_literal(revision)};",
         "}",
         "",
+        "fn callable_inventory() -> (result: TestCallableInventory) {",
+        "    return TestCallableInventory {",
+        "        entries: [",
     ]
-    matcher_names: list[str] = []
     for index, item in enumerate(tests):
         assert isinstance(item, dict)
-        name = item["name"]
-        assert isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-        matcher = f"matches_{index}_{name}"
-        matcher_names.append(matcher)
-        identity_bytes = str(item["test_case_identity"]).encode()
         lines.extend(
             [
-                f"fn {matcher}(value: [byte; up_to 1024]) -> (result: bool) {{",
-                "    let expected: [byte; up_to 1024] = "
-                f"{byte_literal(identity_bytes)};",
-                "    return sequences.equals_byte_view<1024>(value, expected[0..expected.len]);",
-                "}",
-                "",
+                "            TestCallableEntry {",
+                "            test_case_identity: "
+                + byte_literal(str(item["test_case_identity"]).encode())
+                + ",",
+                "            declaration_identity: "
+                + byte_literal(str(item["declaration_identity"]).encode())
+                + ",",
+                "            callable_identity: "
+                + byte_literal(str(item["function_identity"]).encode())
+                + ",",
+                "            signature_identity: "
+                + byte_literal(str(item["signature_identity"]).encode()),
+                "            }" + ("," if index + 1 < len(tests) else ""),
             ]
         )
-    lines.extend(
-        [
-            "fn known_identity(value: [byte; up_to 1024]) -> (result: bool) {",
-            "    return " + " || ".join(f"{name}(value)" for name in matcher_names) + ";",
-            "}",
-            "",
-            "fn run_one(selector: [byte; up_to 1024]) -> (result: TestResult) {",
-        ]
-    )
-    for item, matcher in zip(tests, matcher_names):
-        assert isinstance(item, dict)
-        name = item["name"]
-        lines.extend(
-            [
-                f"    if {matcher}(selector) {{",
-                f"        return {name}();",
-                "    }",
-            ]
-        )
-    lines.extend(["    return unsupported(9001);", "}", ""])
+    lines.extend(["        ],", f"        count: {len(tests)}", "    };", "}", ""])
     return "\n".join(lines)
-
-
-def replace_simple_function(source: str, name: str, replacement: str) -> str:
-    pattern = re.compile(
-        rf"fn {re.escape(name)}\(\) -> \(result: \[byte; 32\]\) \{{\n.*?\n\}}\n",
-        re.DOTALL,
-    )
-    updated, count = pattern.subn(replacement.rstrip() + "\n", source, count=1)
-    if count != 1:
-        raise SystemExit(f"could not locate {name} in provider source")
-    return updated
-
-
-def update_provider_source(source: str) -> str:
-    if "use mncs.test.provider_inventory as generated;" not in source:
-        source = source.replace(
-            "use mncs.core.sequences.v1 as sequences;\n",
-            "use mncs.core.sequences.v1 as sequences;\n"
-            "use mncs.test.provider_inventory as generated;\n",
-            1,
-        )
-    source = replace_simple_function(
-        source,
-        "inventory_identity",
-        "fn inventory_identity() -> (result: [byte; 32]) {\n    return generated.inventory_identity();\n}",
-    )
-    source = replace_simple_function(
-        source,
-        "revision_identity",
-        "fn revision_identity() -> (result: [byte; 32]) {\n    return generated.revision_identity();\n}",
-    )
-    if "fn is_arithmetic(" in source:
-        dispatch_start = source.index("fn is_arithmetic(")
-        dispatch_end = source.index("fn known_identity(", dispatch_start)
-        source = source[:dispatch_start] + source[dispatch_end:]
-    source = re.sub(
-        r"fn known_identity\(value: \[byte; up_to 1024\]\) -> \(result: bool\) \{.*?\n\}\n",
-        "fn known_identity(value: [byte; up_to 1024]) -> (result: bool) {\n"
-        "    return generated.known_identity(value);\n}\n",
-        source,
-        count=1,
-        flags=re.DOTALL,
-    )
-    source = re.sub(
-        r"fn run_one\(selector: \[byte; up_to 1024\]\) -> \(result: TestResult\) \{.*?\n\}\n",
-        "fn run_one(selector: [byte; up_to 1024]) -> (result: TestResult) {\n"
-        "    return generated.run_one(selector);\n}\n",
-        source,
-        count=1,
-        flags=re.DOTALL,
-    )
-    return source
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mncs", required=True, type=Path)
-    parser.add_argument("--source", type=Path, default=Path("tests/self_suite.mncs"))
+    parser.add_argument("--source", action="append", type=Path, default=[])
     parser.add_argument("--library", action="append", type=Path, default=[])
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    inventory = inventory_from_compiler(args.mncs, args.source, args.library)
+    sources = args.source or [
+        Path("tests/self_suite.mncs"),
+        Path("tests/provider_cross_module.mncs"),
+    ]
+    inventory = inventory_from_compiler(args.mncs, sources, args.library)
     identity = inventory_identity(inventory)
     policy_identity = provider_policy_identity()
     revision = revision_identity(inventory, identity, policy_identity)
@@ -297,9 +297,7 @@ def main() -> int:
         "schema_version": "mncs-test.generated-provider/1",
         "generator": GENERATOR_IDENTITY,
         "input": {
-            "source": str(args.source),
-            "source_artifact_identity": inventory["source_artifact_identity"],
-            "declaration_inventory_identity": inventory["declaration_inventory_identity"],
+            "sources": inventory["sources"],
             "inventory_identity": identity,
         },
         "provider_revision_identity": revision,
@@ -315,12 +313,13 @@ def main() -> int:
         if json.loads(GENERATED_METADATA.read_text(encoding="utf-8")) != metadata:
             raise SystemExit("generated provider inventory metadata is stale")
         provider = PROVIDER_SOURCE.read_text(encoding="utf-8")
-        if "use mncs.test.provider_inventory as generated;" not in provider:
-            raise SystemExit("provider is not bound to generated inventory dispatch")
+        if "generated.callable_inventory()" not in provider:
+            raise SystemExit("provider is not bound to the compiler inventory data table")
+        if "generated.run_one(" in provider or "return name();" in provider:
+            raise SystemExit("provider still contains generated executable callable dispatch")
     else:
         GENERATED_SOURCE.write_text(generated, encoding="utf-8")
         GENERATED_METADATA.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        PROVIDER_SOURCE.write_text(update_provider_source(PROVIDER_SOURCE.read_text(encoding="utf-8")), encoding="utf-8")
     print(
         json.dumps(
             {

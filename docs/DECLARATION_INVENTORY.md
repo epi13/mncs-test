@@ -1,28 +1,27 @@
 # Compiler declaration inventory boundary
 
 `mncs declaration-inventory <source>` is the authoritative source for test
-declarations consumed by this repository. `tools/generate_provider.py` maps
-the generic callable entries whose `callable_kind` is `test` into the
-provider's compatibility metadata and generated typed binding.
+declarations consumed by this repository. The runner builds an artifact-bound
+callable reference from the compiler-owned test, declaration, callable, and
+signature identities, then invokes the selected declaration through
+`mncs-embed`'s generic identity dispatcher. Runtime type arguments and typed
+values pass through the existing specialization and execution machinery.
 
-The generated `native/mncs/test/provider_inventory.mncs` remains necessary
-for now because MNCS has no identity-bound reflective invocation operation
-that accepts an arbitrary callable identity together with heterogeneous typed
-arguments. Named typed entrypoints and explicit generic type arguments are
-already supported. This is recorded as `MNCS-LANG-4F28CEEA0AD8` in Commons and
-`MNCS-TEST-P-007` locally. The generator is intentionally limited to
-identity/signature binding; test discovery, assertion semantics, result
-aggregation, and provider policy remain native.
+`tools/generate_provider.py` now projects compiler inventories from the
+self-suite and a separate test module into
+`native/mncs/test/provider_inventory.mncs`, a data table used by the native
+provider to validate invocation receipts across modules. It emits no
+executable dispatch branches. Its remaining removal criterion is direct
+compiler/runtime projection of this declaration table into the provider
+artifact. Test discovery and result aggregation remain owned by MNCS source;
+Python handles inventory transport and artifact generation only.
 
-The current Profile 0.18 verification is preserved in Commons observation
-`MNCS-LANG-4F28CEEA0AD8--OBS-3933B274C547`, bound to the current named-call
-conformance and generated-dispatch reproducer. The earlier capability and
-compiler-inventory identities remain archived in the superseded Commons
-observation record.
+The latest verification outcome is recorded in the current Commons
+observation for `MNCS-LANG-4F28CEEA0AD8`; `MNCS-TEST-P-007` now tracks only the
+remaining inventory data-projection boundary.
 
-The Profile 0.18 `provider_call` capability was checked during this campaign.
-It is a generic admitted-provider boundary whose runtime receives one typed
-request and an expected result type; the host provider registry still selects
-an admitted provider's fixed entry module/function. It therefore does not
-provide callable-identity lookup with heterogeneous argument binding and does
-not retire the transparent inventory-bound adapter.
+The Profile 0.18 `provider_call` capability remains a separate strict
+admitted-provider boundary. Provider descriptor admission still validates
+provider, method, interface, revision, capability, and effect metadata; the
+callable identity dispatcher selects MNCS declarations within a loaded
+artifact and does not admit arbitrary host methods.

@@ -13,7 +13,7 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mncs", required=True, type=Path)
-    parser.add_argument("--source", type=Path, default=Path("tests/self_suite.mncs"))
+    parser.add_argument("--source", action="append", type=Path, default=[])
     parser.add_argument("--library", action="append", type=Path, default=[])
     args = parser.parse_args()
     generator = Path(__file__).with_name("generate_provider.py")
@@ -23,8 +23,7 @@ def main() -> int:
             str(generator),
             "--mncs",
             str(args.mncs),
-            "--source",
-            str(args.source),
+            *sum((["--source", str(source)] for source in args.source), []),
             *sum((["--library", str(path)] for path in args.library), []),
             "--check",
         ],

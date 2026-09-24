@@ -20,6 +20,7 @@ fn provider_admission_probe_app(context: ApplicationContext) -> (result: Applica
     let request: protocol.ProviderRequest = protocol.ProviderRequest {
         inventory_identity: [245, 194, 197, 102, 75, 36, 226, 126, 253, 190, 95, 78, 120, 172, 136, 142, 150, 101, 91, 85, 6, 49, 248, 177, 156, 170, 151, 49, 145, 39, 21, 219],
         selected_test_identities: empty_selection,
+        selected_test_executions: [],
         selection_count: 0,
         interface_identity: [78, 29, 255, 41, 102, 214, 36, 71, 184, 100, 252, 235, 203, 210, 103, 202, 81, 0, 95, 201, 102, 211, 150, 134, 208, 95, 214, 178, 149, 19, 41, 34],
         provider_revision_identity: [132, 219, 32, 242, 198, 128, 171, 25, 56, 71, 146, 40, 126, 35, 146, 151, 221, 32, 119, 111, 74, 43, 158, 52, 181, 88, 89, 115, 218, 219, 15, 0]
