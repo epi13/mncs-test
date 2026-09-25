@@ -10,6 +10,8 @@ use mncs.test.provider_protocol.v1 as protocol;
 
 record ProviderExecutionMaterial {
     inventory_identity: [byte; 32],
+    compiler_callable_bindings_identity: [byte; 32],
+    compiler_callable_bindings: [protocol.TestCallableEntry; up_to 64],
     selected_test_identities: [[byte; up_to 1024]; up_to 8],
     selection_count: u64,
     interface_identity: [byte; 32],
@@ -19,7 +21,8 @@ record ProviderExecutionMaterial {
 record ProviderEvidenceMaterial {
     execution_identity: [byte; 32],
     native_result: TestResult,
-    selected_test_identities: [[byte; up_to 1024]; up_to 8]
+    selected_test_identities: [[byte; up_to 1024]; up_to 8],
+    compiler_callable_bindings_identity: [byte; 32]
 }
 
 fn provider_identity() -> (result: [byte; 32]) {
@@ -31,7 +34,7 @@ fn interface_identity() -> (result: [byte; 32]) {
 }
 
 fn revision_identity() -> (result: [byte; 32]) {
-    return [187; 32];
+    return [99, 222, 41, 135, 133, 136, 121, 250, 160, 192, 135, 50, 93, 202, 68, 183, 71, 113, 136, 163, 128, 199, 213, 90, 91, 108, 154, 32, 182, 141, 39, 88];
 }
 
 fn inventory_identity() -> (result: [byte; 32]) {
@@ -51,6 +54,8 @@ fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.Pr
     capability provider_digest
     effect structured_digest authorized_by provider_digest
 {
+    let inventory_identity: [byte; 32] = inventory_identity();
+    let compiler_callable_bindings_identity: [byte; 32] = copy_digest(structured_digest(request.compiler_callable_bindings));
     let selected_result: TestResult = TestResult {
         verdict: Verdict.FAIL,
         verdict_code: 1,
@@ -63,7 +68,9 @@ fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.Pr
         assertion_code: 7001
     };
     let execution_identity: [byte; 32] = copy_digest(structured_digest(ProviderExecutionMaterial {
-        inventory_identity: request.inventory_identity,
+        inventory_identity: inventory_identity,
+        compiler_callable_bindings_identity: compiler_callable_bindings_identity,
+        compiler_callable_bindings: request.compiler_callable_bindings,
         selected_test_identities: request.selected_test_identities,
         selection_count: request.selection_count,
         interface_identity: request.interface_identity,
@@ -72,14 +79,16 @@ fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.Pr
     let evidence_identity: [byte; 32] = copy_digest(structured_digest(ProviderEvidenceMaterial {
         execution_identity: execution_identity,
         native_result: selected_result,
-        selected_test_identities: request.selected_test_identities
+        selected_test_identities: request.selected_test_identities,
+        compiler_callable_bindings_identity: compiler_callable_bindings_identity
     }));
     let result_without_identity: protocol.ProviderTestResult = protocol.ProviderTestResult {
         result_identity: [0; 32],
         provider_identity: provider_identity(),
         provider_revision_identity: revision_identity(),
         interface_identity: interface_identity(),
-        inventory_identity: inventory_identity(),
+        inventory_identity: inventory_identity,
+        compiler_callable_bindings_identity: compiler_callable_bindings_identity,
         execution_identity: execution_identity,
         evidence_identity: evidence_identity,
         selected_test_identities: request.selected_test_identities,
@@ -99,7 +108,8 @@ fn run_selected_batch(request: protocol.ProviderRequest) -> (result: protocol.Pr
         provider_identity: provider_identity(),
         provider_revision_identity: revision_identity(),
         interface_identity: interface_identity(),
-        inventory_identity: inventory_identity(),
+        inventory_identity: inventory_identity,
+        compiler_callable_bindings_identity: compiler_callable_bindings_identity,
         test_result_identity: result_identity,
         execution_identity: execution_identity,
         evidence_identity: evidence_identity,

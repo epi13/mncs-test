@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.verification-obligation-inventory/v1",
   "repository": "mncs-test",
-  "revision": 3,
+  "revision": 4,
   "obligations": [
     {
       "identity": "mncs-test.identity-bound-provider-execution",
@@ -17,11 +17,9 @@
       "invalidation_dependencies": [
         "tests/self_suite.mncs",
         "tests/provider_cross_module.mncs",
-        "tests/test_phase6_provider_generation.py",
+        "tests/test_provider_projection.py",
         "tools/mncs_test.py",
-        "tools/generate_provider.py",
         "native/mncs/test/provider.mncs",
-        "native/mncs/test/provider_inventory.mncs",
         "native/mncs/test/provider_protocol/v1.mncs",
         "native-applications/test-provider.json",
         "native-applications/provider-admitted.json"

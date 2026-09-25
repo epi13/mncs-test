@@ -18,7 +18,7 @@ fn provider_failure_probe_app(context: ApplicationContext) -> (result: Applicati
     let empty_selection: [[byte; up_to 1024]; up_to 8] = [empty_test; 0];
     let provider_id: [byte; 32] = [154, 15, 43, 79, 128, 118, 74, 20, 172, 54, 43, 112, 43, 95, 8, 149, 194, 97, 104, 45, 42, 215, 53, 70, 139, 27, 58, 191, 64, 219, 14, 39];
     let request: protocol.ProviderRequest = protocol.ProviderRequest {
-        inventory_identity: [204; 32],
+        compiler_callable_bindings: [],
         selected_test_identities: empty_selection,
         selected_test_executions: [],
         selection_count: 0,

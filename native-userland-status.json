@@ -6,8 +6,7 @@
   "native_sources": {
     "mncs-test.toml": "tests/self_suite.mncs",
     "mncs-test-provider": "native/mncs/test/provider.mncs",
-    "mncs-test-obligation-selection": "native/mncs/test/obligation_selection.mncs",
-    "mncs-test-provider-generated-inventory": "native/mncs/test/provider_inventory.mncs"
+    "mncs-test-obligation-selection": "native/mncs/test/obligation_selection.mncs"
   },
   "native_application_descriptors": {
     "mncs-test-provider": "native-applications/test-provider.json",
@@ -15,12 +14,12 @@
   },
   "canonical_launcher": "bin/mncs-test",
   "semantic_modules": [
-      "native/mncs/test/assertions.mncs",
-      "native/mncs/test/generative.mncs",
-      "native/mncs/test/runner.mncs",
-      "native/mncs/test/obligation_selection.mncs",
-      "native/mncs/test/snapshot.mncs",
-      "native/mncs/test/suite.mncs"
+    "native/mncs/test/assertions.mncs",
+    "native/mncs/test/generative.mncs",
+    "native/mncs/test/runner.mncs",
+    "native/mncs/test/obligation_selection.mncs",
+    "native/mncs/test/snapshot.mncs",
+    "native/mncs/test/suite.mncs"
   ],
   "trusted_bootstrap": [
     "Rust MNCS compiler/runtime/toolchain"
@@ -44,11 +43,6 @@
     {
       "path": "tools/generate_family_verification_checks.py",
       "role": "external_metadata_generation_utility",
-      "canonical": false
-    },
-    {
-      "path": "tools/generate_provider.py",
-      "role": "compiler_inventory_bound_native_source_generator",
       "canonical": false
     }
   ],
@@ -79,8 +73,7 @@
     "obligation_selection_interface": "mncs.test.obligation_selection::selection_app",
     "provider_selection_bound": 8,
     "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
-    "provider_inventory_binding": "compiler declaration-inventory for multiple source modules → generated identity/signature data table → native receipt consistency; selected tests run through artifact-bound mncs-embed identity invocation",
-    "provider_inventory_generation_pressure": "only direct compiler/runtime projection of declaration inventory into provider artifact remains; generated data contains no executable callable dispatch",
-    "provider_revision_binding": "inventory identity + compiler source artifact identity + provider policy identity + generator identity"
+    "provider_inventory_binding": "compiler-issued artifact callable metadata → bounded provider request projection → native receipt consistency; no MNCS identity source table",
+    "provider_revision_binding": "stable provider protocol identity + compiler artifact identity on each callable binding; per-request binding digest carried in TestResult and CheckResult"
   }
 }

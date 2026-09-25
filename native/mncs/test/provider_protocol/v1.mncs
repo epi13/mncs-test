@@ -10,6 +10,17 @@ use mncs.test.assertions;
 
 enum CallableExecutionStatus { RETURNED, INVALID_REQUEST, RUNTIME_FAILURE, UNSUPPORTED, BUDGET_EXHAUSTED }
 
+// A bounded projection of one compiler-owned callable binding. The artifact
+// revision travels with each row because one provider batch may combine
+// selected TestCase declarations from different source artifacts.
+record TestCallableEntry {
+    artifact_identity: [byte; up_to 1024],
+    test_case_identity: [byte; up_to 1024],
+    declaration_identity: [byte; up_to 1024],
+    callable_identity: [byte; up_to 1024],
+    signature_identity: [byte; up_to 128]
+}
+
 record ProviderTestExecution {
     test_case_identity: [byte; up_to 1024],
     declaration_identity: [byte; up_to 1024],
@@ -21,7 +32,7 @@ record ProviderTestExecution {
 }
 
 record ProviderRequest {
-    inventory_identity: [byte; 32],
+    compiler_callable_bindings: [TestCallableEntry; up_to 64],
     selected_test_identities: [[byte; up_to 1024]; up_to 8],
     selected_test_executions: [ProviderTestExecution; up_to 8],
     selection_count: u64,
@@ -35,6 +46,7 @@ record ProviderTestResult {
     provider_revision_identity: [byte; 32],
     interface_identity: [byte; 32],
     inventory_identity: [byte; 32],
+    compiler_callable_bindings_identity: [byte; 32],
     execution_identity: [byte; 32],
     evidence_identity: [byte; 32],
     selected_test_identities: [[byte; up_to 1024]; up_to 8],
@@ -49,6 +61,7 @@ record ProviderCheckResult {
     provider_revision_identity: [byte; 32],
     interface_identity: [byte; 32],
     inventory_identity: [byte; 32],
+    compiler_callable_bindings_identity: [byte; 32],
     test_result_identity: [byte; 32],
     execution_identity: [byte; 32],
     evidence_identity: [byte; 32],
@@ -68,6 +81,7 @@ record ProviderTestResultIdentityMaterial {
     provider_revision_identity: [byte; 32],
     interface_identity: [byte; 32],
     inventory_identity: [byte; 32],
+    compiler_callable_bindings_identity: [byte; 32],
     execution_identity: [byte; 32],
     evidence_identity: [byte; 32],
     selected_test_identities: [[byte; up_to 1024]; up_to 8],
@@ -81,6 +95,7 @@ record ProviderCheckResultIdentityMaterial {
     provider_revision_identity: [byte; 32],
     interface_identity: [byte; 32],
     inventory_identity: [byte; 32],
+    compiler_callable_bindings_identity: [byte; 32],
     test_result_identity: [byte; 32],
     execution_identity: [byte; 32],
     evidence_identity: [byte; 32],
@@ -95,6 +110,7 @@ fn provider_test_result_identity_material(
         provider_revision_identity: value.provider_revision_identity,
         interface_identity: value.interface_identity,
         inventory_identity: value.inventory_identity,
+        compiler_callable_bindings_identity: value.compiler_callable_bindings_identity,
         execution_identity: value.execution_identity,
         evidence_identity: value.evidence_identity,
         selected_test_identities: value.selected_test_identities,
@@ -112,6 +128,7 @@ fn provider_check_result_identity_material(
         provider_revision_identity: value.provider_revision_identity,
         interface_identity: value.interface_identity,
         inventory_identity: value.inventory_identity,
+        compiler_callable_bindings_identity: value.compiler_callable_bindings_identity,
         test_result_identity: value.test_result_identity,
         execution_identity: value.execution_identity,
         evidence_identity: value.evidence_identity,

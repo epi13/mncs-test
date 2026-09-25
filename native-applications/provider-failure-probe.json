@@ -5,7 +5,7 @@
   "module": "mncs.test.provider_failure_probe",
   "entry_function": "provider_failure_probe_app",
   "profile": "0.18",
-  "interface_identity": "2c2f99e9477e55df0b1d9d1e4152154453cf177d54c77b1e772a12caafbd418a",
+  "interface_identity": "ac4e8b2c2aa8febb75d80c324067803392d1d4c1e88b8fc9fb20f6d99df45e38",
   "libraries": [
     "../../mncs-language/library",
     "../native",

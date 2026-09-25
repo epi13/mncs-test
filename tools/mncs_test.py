@@ -804,6 +804,8 @@ class EmbedSession:
         self.library.mncs_session_close.restype = None
         self.library.mncs_session_info.argtypes = [ctypes.c_void_p]
         self.library.mncs_session_info.restype = ctypes.c_void_p
+        self.library.mncs_session_callable_bindings.argtypes = [ctypes.c_void_p]
+        self.library.mncs_session_callable_bindings.restype = ctypes.c_void_p
         self.library.mncs_session_call_batch.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         self.library.mncs_session_call_batch.restype = ctypes.c_void_p
         self.library.mncs_response_text.argtypes = [ctypes.c_void_p]
@@ -842,6 +844,18 @@ class EmbedSession:
         started = time.perf_counter()
         value = self._response(self.library.mncs_session_info(self.handle))
         self.timings.append({"phase": "session_info", "wall_time_ms": round((time.perf_counter() - started) * 1000, 3)})
+        return value
+
+    def callable_bindings(self) -> dict[str, Any]:
+        """Return compiler-issued bindings from this exact admitted artifact."""
+        started = time.perf_counter()
+        value = self._response(self.library.mncs_session_callable_bindings(self.handle))
+        self.timings.append({
+            "phase": "compiler_callable_bindings",
+            "wall_time_ms": round((time.perf_counter() - started) * 1000, 3),
+        })
+        if not isinstance(value, dict) or not isinstance(value.get("callable_bindings"), list):
+            raise AdapterError("mncs-embed callable metadata is not a binding document")
         return value
 
     def call_batch(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -966,6 +980,7 @@ def compile_embed_artifact(
         detail["mode"] = "retained-embed-batch"
         detail["library"] = str(candidate)
         detail["session"] = session.info()
+        detail["compiler_callable_bindings"] = session.callable_bindings()
         detail["session_timings"] = list(session.timings)
         return session, detail
     detail.setdefault("reason", "mncs-embed library was not found")

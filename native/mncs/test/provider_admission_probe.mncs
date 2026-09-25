@@ -18,7 +18,7 @@ fn provider_admission_probe_app(context: ApplicationContext) -> (result: Applica
     let empty_selection: [[byte; up_to 1024]; up_to 8] = [empty_test; 0];
     let provider_id: [byte; 32] = [72, 50, 15, 137, 143, 152, 72, 72, 180, 39, 92, 74, 219, 70, 94, 183, 100, 39, 176, 53, 227, 96, 104, 39, 117, 94, 36, 93, 106, 66, 46, 1];
     let request: protocol.ProviderRequest = protocol.ProviderRequest {
-        inventory_identity: [245, 194, 197, 102, 75, 36, 226, 126, 253, 190, 95, 78, 120, 172, 136, 142, 150, 101, 91, 85, 6, 49, 248, 177, 156, 170, 151, 49, 145, 39, 21, 219],
+        compiler_callable_bindings: [],
         selected_test_identities: empty_selection,
         selected_test_executions: [],
         selection_count: 0,

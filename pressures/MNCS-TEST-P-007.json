@@ -1,27 +1,27 @@
 {
   "schema_version": "mncs-test.pressure/1",
   "id": "MNCS-TEST-P-007",
-  "title": "Provider inventory still needs a generated data projection",
+  "title": "Provider inventory metadata is compiler-owned",
   "commons_pressure_id": "MNCS-LANG-4F28CEEA0AD8",
-  "latest_commons_observation_id": "MNCS-LANG-4F28CEEA0AD8--OBS-A82444C66E4B",
+  "latest_commons_observation_id": "MNCS-LANG-4F28CEEA0AD8--OBS-5681E499AEFB",
   "verified_language_profile": "0.18",
   "target_layer": "provider inventory projection",
-  "observed_need": "Provide a deterministic native data table of compiler-owned test, declaration, callable, and signature identities so the provider can validate runtime receipts; executable call selection belongs to the identity-bound runtime.",
-  "current_language_behavior": "The compiler emits artifact-bound callable, declaration, test-case, and signature metadata. mncs-test resolves selected TestCase identities through the retained Session dispatcher and the native provider validates returned receipts.",
-  "why_insufficient": "The identity invocation gap is resolved. A small deterministic generator remains only to project multiple source-module inventories into the provider bounded identity data table.",
-  "minimal_reproducer": "tools/generate_provider.py --check projects the compiler inventories for tests/self_suite.mncs and tests/provider_cross_module.mncs into native/mncs/test/provider_inventory.mncs; it emits no executable calls or per-declaration match branches.",
-  "desired_direction": "Remove the remaining data projection when the compiler/runtime exposes the multi-source declaration inventory directly to the provider artifact; no invocation semantics change is needed.",
+  "observed_need": "Expose compiler-owned TestCase, declaration, callable, and signature identities to the native provider so it can validate identity-bound execution receipts.",
+  "current_language_behavior": "The loaded compiler artifact exposes artifact-bound callable binding metadata across modules. The generic structured projection boundary materializes the bounded provider request, and native mncs-test validates the receipt identities against those bindings.",
+  "why_insufficient": "Resolved. The former generated source table duplicated compiler-issued identity rows and is no longer needed; a newly added TestCase is visible through the artifact metadata path without provider source generation.",
+  "minimal_reproducer": "Run tests/test_provider_projection.py: compiler-issued bindings cover TestCases from different modules, stale or foreign receipts fail, and a newly added declaration is visible without generating provider_inventory.mncs.",
+  "desired_direction": "Keep TestCase, declaration, callable, signature, and artifact identity authority in compiler metadata and validate receipts through the single native provider path.",
   "severity": "minor",
-  "disposition": "narrowed_non_semantic_data_projection",
-  "workaround": "No callable-dispatch workaround remains. Keep the generator data-only until compiler-owned multi-source inventory is directly available in the provider artifact.",
-  "status": "open",
+  "disposition": "resolved_compiler_owned_artifact_metadata",
+  "workaround": "Removed: provider inventory source generation and the duplicate identity table.",
+  "status": "resolved",
   "relevant_files": [
-    "tools/generate_provider.py",
-    "native/mncs/test/provider_inventory.mncs",
-    "tools/mncs_test.py"
+    "tools/mncs_test.py",
+    "native/mncs/test/provider_protocol/v1.mncs",
+    "tests/test_provider_projection.py"
   ],
   "relevant_tests": [
-    "tests/test_phase6_provider_generation.py",
+    "tests/test_provider_projection.py",
     "tests/test_runner.py::test_compiler_inventory_discovery"
   ]
 }

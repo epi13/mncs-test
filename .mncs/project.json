@@ -1,21 +1,72 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 8,
+  "revision": 9,
   "manifest_location": "in-repository",
   "authority": {
-    "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport, generation, and differential adapters."
+    "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport and differential adapters."
   },
   "organization": {
     "layout": "mncs.repository-layout/1",
     "surfaces": [
-      {"path": "native/mncs/test/", "class": "canonical", "authority": "mncs-test", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
-      {"path": "native/mncs/test/obligation_selection.mncs", "class": "canonical", "authority": "mncs-test", "note": "Native lifecycle/status-to-test selection kernel; Python remains transport and explicit oracle only.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "canonical-semantic"}},
-      {"path": "native-applications/obligation-selection.json", "class": "canonical", "authority": "mncs-test", "note": "Descriptor for the native obligation selection application.", "classification": {"authority": "canonical", "lifecycle": "active", "boundary_kind": "compiler-bootstrap", "semantic_role": "platform-adapter"}},
-      {"path": "native/mncs/test/provider_inventory.mncs", "class": "generated", "note": "Compiler-owned callable, declaration, test-case, and signature identity data used to validate runtime invocation receipts; contains no executable dispatch.", "classification": {"authority": "none", "lifecycle": "generated", "boundary_kind": "none", "semantic_role": "generated"}},
-      {"path": "tools/", "class": "host-boundary", "note": "Manifest/file discovery and compiler/process/JSON transport adapters; obligation selection is delegated to the native kernel.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "compiler-bootstrap", "semantic_role": "platform-adapter"}},
-      {"path": "tools/generate_provider.py", "class": "host-boundary", "note": "Projects compiler-owned declaration inventory into a native data table for receipt consistency; remove when the compiler embeds that inventory directly in runtime artifacts.", "classification": {"authority": "none", "lifecycle": "active", "boundary_kind": "compiler-bootstrap", "semantic_role": "platform-adapter"}},
-      {"path": "pressures/MNCS-TEST-P-007.json", "class": "reference", "authority": "MNCS-Commons", "note": "Local evidence linked to the canonical Commons pressure.", "classification": {"authority": "reference", "lifecycle": "active", "boundary_kind": "none", "semantic_role": "reference"}}
+      {
+        "path": "native/mncs/test/",
+        "class": "canonical",
+        "authority": "mncs-test",
+        "classification": {
+          "authority": "canonical",
+          "lifecycle": "active",
+          "boundary_kind": "none",
+          "semantic_role": "canonical-semantic"
+        }
+      },
+      {
+        "path": "native/mncs/test/obligation_selection.mncs",
+        "class": "canonical",
+        "authority": "mncs-test",
+        "note": "Native lifecycle/status-to-test selection kernel; Python remains transport and explicit oracle only.",
+        "classification": {
+          "authority": "canonical",
+          "lifecycle": "active",
+          "boundary_kind": "none",
+          "semantic_role": "canonical-semantic"
+        }
+      },
+      {
+        "path": "native-applications/obligation-selection.json",
+        "class": "canonical",
+        "authority": "mncs-test",
+        "note": "Descriptor for the native obligation selection application.",
+        "classification": {
+          "authority": "canonical",
+          "lifecycle": "active",
+          "boundary_kind": "compiler-bootstrap",
+          "semantic_role": "platform-adapter"
+        }
+      },
+      {
+        "path": "tools/",
+        "class": "host-boundary",
+        "note": "Manifest/file discovery and compiler/process/JSON transport adapters; obligation selection is delegated to the native kernel.",
+        "classification": {
+          "authority": "none",
+          "lifecycle": "active",
+          "boundary_kind": "compiler-bootstrap",
+          "semantic_role": "platform-adapter"
+        }
+      },
+      {
+        "path": "pressures/MNCS-TEST-P-007.json",
+        "class": "reference",
+        "authority": "MNCS-Commons",
+        "note": "Local evidence linked to the canonical Commons pressure.",
+        "classification": {
+          "authority": "reference",
+          "lifecycle": "active",
+          "boundary_kind": "none",
+          "semantic_role": "reference"
+        }
+      }
     ]
   },
   "verification": {
@@ -25,15 +76,61 @@
   },
   "contracts": {
     "provides": [
-      {"contract": "test-provider", "version": "1", "kind": "native-test-provider", "stability": "experimental", "fingerprint_sources": ["native/mncs/test/", "schemas/"]}
+      {
+        "contract": "test-provider",
+        "version": "1",
+        "kind": "native-test-provider",
+        "stability": "experimental",
+        "fingerprint_sources": [
+          "native/mncs/test/",
+          "schemas/"
+        ]
+      }
     ],
     "consumes": [
-      {"contract": "mncs-language.compiler-inventory", "envelope": {"op": "any"}, "required": true}
-      ,{"contract": "ravel.verification-plan", "envelope": {"op": "any"}, "required": true}
-      ,{"contract": "ravel.verification-obligation-plan", "envelope": {"op": "any"}, "required": false}
+      {
+        "contract": "mncs-language.compiler-inventory",
+        "envelope": {
+          "op": "any"
+        },
+        "required": true
+      },
+      {
+        "contract": "ravel.verification-plan",
+        "envelope": {
+          "op": "any"
+        },
+        "required": true
+      },
+      {
+        "contract": "ravel.verification-obligation-plan",
+        "envelope": {
+          "op": "any"
+        },
+        "required": false
+      }
     ],
     "tests": [
-      {"test": "native-test-provider", "covers": ["test-provider"], "obligation": "self", "command": {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], "timeout_seconds": 1800}}
+      {
+        "test": "native-test-provider",
+        "covers": [
+          "test-provider"
+        ],
+        "obligation": "self",
+        "command": {
+          "argv": [
+            "python3",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            "test_*.py"
+          ],
+          "timeout_seconds": 1800
+        }
+      }
     ]
   }
 }

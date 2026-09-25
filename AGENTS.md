@@ -8,8 +8,11 @@ Establish the bounded family context and current compiler/capability identity
 before broad search. Query Commons for an existing pressure before recording
 another one. The callable identity-invocation pressure
 `MNCS-LANG-4F28CEEA0AD8` is resolved in Commons; local record
-`MNCS-TEST-P-007` tracks only the remaining non-semantic provider
-inventory data projection.
+`MNCS-TEST-P-007` is also resolved. Compiler-owned artifact metadata feeds
+the generic bounded provider request projection. The generated inventory
+source and its generator have been removed. `tests/test_provider_projection.py`
+proves cross-module identity validation and visibility of newly added
+declarations without source regeneration.
 
 Before adding host code, check the current `mncs-language` profile and
 standard library. If the missing capability is semantic rather than a
