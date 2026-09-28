@@ -26,6 +26,32 @@ if ! command -v "$MNCS_BIN" >/dev/null 2>&1 && [[ ! -x "$MNCS_BIN" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MNCS_PATH="$(command -v "$MNCS_BIN" 2>/dev/null || true)"
+if [[ -z "$MNCS_PATH" && -x "$MNCS_BIN" ]]; then
+    MNCS_PATH="$MNCS_BIN"
+fi
+if [[ -n "$MNCS_PATH" ]]; then
+    LANGUAGE_ROOT="$(cd "$(dirname "$MNCS_PATH")/../.." && pwd)"
+    AUTO_LIBRARY_PATH=""
+    if [[ -d "$LANGUAGE_ROOT/library" ]]; then
+        AUTO_LIBRARY_PATH="$LANGUAGE_ROOT/library"
+    fi
+    if [[ -d "$SCRIPT_DIR/../native" ]]; then
+        TEST_NATIVE_LIBRARY="$(cd "$SCRIPT_DIR/../native" && pwd)"
+        if [[ -n "$AUTO_LIBRARY_PATH" ]]; then
+            AUTO_LIBRARY_PATH="$AUTO_LIBRARY_PATH:$TEST_NATIVE_LIBRARY"
+        else
+            AUTO_LIBRARY_PATH="$TEST_NATIVE_LIBRARY"
+        fi
+    fi
+    if [[ -n "$AUTO_LIBRARY_PATH" ]]; then
+        if [[ -n "${MNCS_LIBRARY_PATH:-}" ]]; then
+            export MNCS_LIBRARY_PATH="$AUTO_LIBRARY_PATH:$MNCS_LIBRARY_PATH"
+        else
+            export MNCS_LIBRARY_PATH="$AUTO_LIBRARY_PATH"
+        fi
+    fi
+fi
 SOURCE="${MNCS_TEST_SOURCE:-$SCRIPT_DIR/../tests/self_suite.mncs}"
 if [[ $# -eq 0 ]]; then
     set -- "$SOURCE"
