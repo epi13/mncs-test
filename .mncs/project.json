@@ -45,6 +45,30 @@
         }
       },
       {
+        "path": "native/mncs/test/verification_coherence.mncs",
+        "class": "canonical",
+        "authority": "mncs-test",
+        "note": "Native evidence-reuse and verification-selection policy for ambient verification; host remains transport only.",
+        "classification": {
+          "authority": "canonical",
+          "lifecycle": "active",
+          "boundary_kind": "none",
+          "semantic_role": "canonical-semantic"
+        }
+      },
+      {
+        "path": "native-applications/test-verification-coherence.json",
+        "class": "canonical",
+        "authority": "mncs-test",
+        "note": "Descriptor for the native verification coherence application.",
+        "classification": {
+          "authority": "canonical",
+          "lifecycle": "active",
+          "boundary_kind": "compiler-bootstrap",
+          "semantic_role": "platform-adapter"
+        }
+      },
+      {
         "path": "tools/",
         "class": "host-boundary",
         "note": "Manifest/file discovery and compiler/process/JSON transport adapters; obligation selection is delegated to the native kernel.",
@@ -84,7 +108,16 @@
         "fingerprint_sources": [
           "native/mncs/test/",
           "schemas/"
-        ]
+        ],
+        "invocation": {
+          "kind": "executable",
+          "path": "bin/mncs-test-provider",
+          "toolchain": {
+            "repository": "mncs-language",
+            "path": "target/release/mncs"
+          },
+          "toolchain_env": "MNCS"
+        }
       }
     ],
     "consumes": [

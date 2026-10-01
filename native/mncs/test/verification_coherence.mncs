@@ -1,0 +1,539 @@
+mncs 0.18;
+
+// mncs.test.verification_coherence — native ambient verification policy.
+//
+// The host (Environment) measures the current world (fingerprints,
+// revisions, digests, compiler inventory) and transports records; this
+// module owns every reuse/selection decision: which obligations are
+// current, which need execution, which are unrunnable or excluded, and
+// the bounded run queue.
+//
+// Evidence admission is strict: every bound identity must match, and a
+// recorded FAIL is current knowledge that the subject fails, never
+// stale evidence. Anything unresolvable fails closed to a non-queued
+// status; the host surfaces it instead of executing blindly.
+//
+// Evidence identity material (normative, hashed by the host with the
+// family digest, in this order): definition_identity,
+// subject_identity, subject_fingerprint, executor_identity,
+// invalidation_identity, toolchain_identity, inventory_identity,
+// repository_revision, repository_fingerprint.
+module mncs.test.verification_coherence;
+
+use mncs.std.application.v1;
+use mncs.commons.family.obligations.v1 as contracts;
+
+// Bound identities recorded by a previous execution. The verifier
+// travels as provenance only: the runner ships with the toolchain, so
+// a toolchain change already invalidates.
+record CoherenceEvidence {
+    definition_identity: [byte; up_to 128],
+    subject_identity: [byte; up_to 1024],
+    subject_fingerprint: [byte; up_to 128],
+    executor_identity: [byte; up_to 128],
+    verifier_identity: [byte; up_to 128],
+    invalidation_identity: [byte; up_to 128],
+    toolchain_identity: [byte; up_to 128],
+    inventory_identity: [byte; up_to 128],
+    repository_revision: [byte; up_to 128],
+    repository_fingerprint: [byte; up_to 128],
+    verdict: contracts.EvidenceVerdict,
+    evidence_id: [byte; up_to 128]
+}
+
+// Host-measured current world view for one obligation.
+record CoherenceCurrent {
+    definition_identity: [byte; up_to 128],
+    subject_identity: [byte; up_to 1024],
+    subject_fingerprint: [byte; up_to 128],
+    executor_identity: [byte; up_to 128],
+    invalidation_identity: [byte; up_to 128],
+    toolchain_identity: [byte; up_to 128],
+    inventory_identity: [byte; up_to 128],
+    repository_revision: [byte; up_to 128],
+    repository_fingerprint: [byte; up_to 128]
+}
+
+record CoherenceObligation {
+    identity: [byte; up_to 1024],
+    lifecycle: contracts.ObligationLifecycle,
+    executor_kind: contracts.ExecutorKind,
+    runnable_native: bool,
+    current: CoherenceCurrent,
+    declared_patterns: [[byte; up_to 1024]; up_to 8],
+    inventory_test_identities: [[byte; up_to 1024]; up_to 64],
+    inventory_truncated: bool,
+    evidence_present: bool,
+    evidence: CoherenceEvidence,
+    evidence_conflict: bool,
+    provider_available: bool
+}
+
+record CoherenceRequest {
+    schema_version: [byte; up_to 64],
+    max_executions: u64,
+    obligations: [CoherenceObligation; up_to 32]
+}
+
+enum CoherenceReason {
+    evidence_current,
+    no_evidence,
+    input_changed,
+    executor_not_runnable,
+    lifecycle_excluded,
+    provider_unavailable,
+    evidence_conflict,
+    selection_unresolved
+}
+
+record ObligationCoherence {
+    identity: [byte; up_to 1024],
+    status: contracts.ObligationStatus,
+    reason: CoherenceReason,
+    deferred: bool,
+    verdict_known: bool,
+    verdict: contracts.EvidenceVerdict,
+    evidence_id: [byte; up_to 128],
+    resolved_test_identities: [[byte; up_to 1024]; up_to 64],
+    unresolved_count: u64
+}
+
+record CoherenceSummary {
+    obligations: u64,
+    current: u64,
+    queued: u64,
+    deferred: u64,
+    failed: u64,
+    unknown: u64,
+    contradictory: u64,
+    unsupported: u64,
+    unresolved: u64,
+    excluded: u64
+}
+
+record CoherenceResult {
+    schema_version: [byte; up_to 64],
+    verdicts: [ObligationCoherence; up_to 32],
+    run_queue: [[byte; up_to 1024]; up_to 32],
+    summary: CoherenceSummary
+}
+
+record CoherenceAccumulator {
+    verdicts: [ObligationCoherence; 32],
+    queue: [[byte; up_to 1024]; 32],
+    queued: u64,
+    deferred: u64,
+    current: u64,
+    failed: u64,
+    unknown: u64,
+    contradictory: u64,
+    unsupported: u64,
+    unresolved: u64,
+    excluded: u64
+}
+
+record IdentityBuilder64 {
+    values: [[byte; up_to 1024]; 64],
+    length: u64
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 45, 99, 111, 104, 101, 114, 101, 110, 99, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 45, 99, 111, 104, 101, 114, 101, 110, 99, 101, 47, 49];
+}
+
+fn bytes1024_equal(left: [byte; up_to 1024], right: [byte; up_to 1024]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn bytes128_equal(left: [byte; up_to 128], right: [byte; up_to 128]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn evidence_admits(evidence: CoherenceEvidence, current: CoherenceCurrent) -> (result: bool) {
+    return bytes128_equal(evidence.definition_identity, current.definition_identity)
+        && bytes1024_equal(evidence.subject_identity, current.subject_identity)
+        && bytes128_equal(evidence.subject_fingerprint, current.subject_fingerprint)
+        && bytes128_equal(evidence.executor_identity, current.executor_identity)
+        && bytes128_equal(evidence.invalidation_identity, current.invalidation_identity)
+        && bytes128_equal(evidence.toolchain_identity, current.toolchain_identity)
+        && bytes128_equal(evidence.inventory_identity, current.inventory_identity)
+        && bytes128_equal(evidence.repository_revision, current.repository_revision)
+        && bytes128_equal(evidence.repository_fingerprint, current.repository_fingerprint);
+}
+
+fn is_wildcard(pattern: [byte; up_to 1024]) -> (result: bool) {
+    return pattern.len == 1 && pattern[0] == 42;
+}
+
+fn builder64_empty() -> (result: IdentityBuilder64) {
+    return IdentityBuilder64 {
+        values: [[0; 0]; 64],
+        length: 0
+    };
+}
+
+fn builder64_contains(builder: IdentityBuilder64, candidate: [byte; up_to 1024]) -> (result: bool) {
+    iterate i over builder.values carrying found: bool = false {
+        next found = found || (i < builder.length && bytes1024_equal(builder.values[i], candidate));
+    }
+    return found;
+}
+
+fn builder64_push_unique(builder: IdentityBuilder64, value: [byte; up_to 1024], include: bool) -> (result: IdentityBuilder64) {
+    if !include || value.len == 0 || builder.length >= 64 || builder64_contains(builder, value) {
+        return builder;
+    }
+    return IdentityBuilder64 {
+        values: replace(builder.values, builder.length, value),
+        length: builder.length +% 1
+    };
+}
+
+fn builder64_finish(builder: IdentityBuilder64) -> (result: [[byte; up_to 1024]; up_to 64]) {
+    return builder.values[0..builder.length];
+}
+
+fn resolve_tests(obligation: CoherenceObligation) -> (result: IdentityBuilder64) {
+    let seed: IdentityBuilder64 = builder64_empty();
+    iterate i over obligation.declared_patterns carrying builder: IdentityBuilder64 = seed {
+        let pattern: [byte; up_to 1024] = obligation.declared_patterns[i];
+        iterate j over obligation.inventory_test_identities carrying nested: IdentityBuilder64 = builder {
+            next nested = builder64_push_unique(nested, obligation.inventory_test_identities[j], is_wildcard(pattern) || bytes1024_equal(pattern, obligation.inventory_test_identities[j]));
+        }
+        next builder = nested;
+    }
+    return builder;
+}
+
+fn count_unresolved(obligation: CoherenceObligation) -> (result: u64) {
+    iterate i over obligation.declared_patterns carrying missing: u64 = 0 {
+        let pattern: [byte; up_to 1024] = obligation.declared_patterns[i];
+        iterate j over obligation.inventory_test_identities carrying found: bool = false {
+            next found = found || is_wildcard(pattern) || bytes1024_equal(pattern, obligation.inventory_test_identities[j]);
+        }
+        next missing = missing +% select(found, 0, 1);
+    }
+    return missing;
+}
+
+fn status_is_current(status: contracts.ObligationStatus) -> (result: bool) {
+    return match status {
+        contracts.ObligationStatus.required => false,
+        contracts.ObligationStatus.current => true,
+        contracts.ObligationStatus.new_execution_required => false,
+        contracts.ObligationStatus.stale => false,
+        contracts.ObligationStatus.contradictory => false,
+        contracts.ObligationStatus.selection_unresolved => false,
+        contracts.ObligationStatus.escalation_required => false,
+        contracts.ObligationStatus.not_selected => false
+    };
+}
+
+fn status_queues(status: contracts.ObligationStatus) -> (result: bool) {
+    return match status {
+        contracts.ObligationStatus.required => false,
+        contracts.ObligationStatus.current => false,
+        contracts.ObligationStatus.new_execution_required => true,
+        contracts.ObligationStatus.stale => true,
+        contracts.ObligationStatus.contradictory => false,
+        contracts.ObligationStatus.selection_unresolved => false,
+        contracts.ObligationStatus.escalation_required => false,
+        contracts.ObligationStatus.not_selected => false
+    };
+}
+
+fn status_is_contradictory(status: contracts.ObligationStatus) -> (result: bool) {
+    return match status {
+        contracts.ObligationStatus.required => false,
+        contracts.ObligationStatus.current => false,
+        contracts.ObligationStatus.new_execution_required => false,
+        contracts.ObligationStatus.stale => false,
+        contracts.ObligationStatus.contradictory => true,
+        contracts.ObligationStatus.selection_unresolved => false,
+        contracts.ObligationStatus.escalation_required => false,
+        contracts.ObligationStatus.not_selected => false
+    };
+}
+
+fn status_is_unresolved(status: contracts.ObligationStatus) -> (result: bool) {
+    return match status {
+        contracts.ObligationStatus.required => false,
+        contracts.ObligationStatus.current => false,
+        contracts.ObligationStatus.new_execution_required => false,
+        contracts.ObligationStatus.stale => false,
+        contracts.ObligationStatus.contradictory => false,
+        contracts.ObligationStatus.selection_unresolved => true,
+        contracts.ObligationStatus.escalation_required => false,
+        contracts.ObligationStatus.not_selected => false
+    };
+}
+
+fn reason_is_lifecycle_excluded(reason: CoherenceReason) -> (result: bool) {
+    return match reason {
+        CoherenceReason.evidence_current => false,
+        CoherenceReason.no_evidence => false,
+        CoherenceReason.input_changed => false,
+        CoherenceReason.executor_not_runnable => false,
+        CoherenceReason.lifecycle_excluded => true,
+        CoherenceReason.provider_unavailable => false,
+        CoherenceReason.evidence_conflict => false,
+        CoherenceReason.selection_unresolved => false
+    };
+}
+
+fn reason_is_executor_not_runnable(reason: CoherenceReason) -> (result: bool) {
+    return match reason {
+        CoherenceReason.evidence_current => false,
+        CoherenceReason.no_evidence => false,
+        CoherenceReason.input_changed => false,
+        CoherenceReason.executor_not_runnable => true,
+        CoherenceReason.lifecycle_excluded => false,
+        CoherenceReason.provider_unavailable => false,
+        CoherenceReason.evidence_conflict => false,
+        CoherenceReason.selection_unresolved => false
+    };
+}
+
+fn verdict_is_fail(verdict: contracts.EvidenceVerdict) -> (result: bool) {
+    return match verdict {
+        contracts.EvidenceVerdict.PASS => false,
+        contracts.EvidenceVerdict.FAIL => true,
+        contracts.EvidenceVerdict.UNKNOWN => false
+    };
+}
+
+fn verdict_is_unknown(verdict: contracts.EvidenceVerdict) -> (result: bool) {
+    return match verdict {
+        contracts.EvidenceVerdict.PASS => false,
+        contracts.EvidenceVerdict.FAIL => false,
+        contracts.EvidenceVerdict.UNKNOWN => true
+    };
+}
+
+fn default_coherence() -> (result: ObligationCoherence) {
+    return ObligationCoherence {
+        identity: [0; 0],
+        status: contracts.ObligationStatus.not_selected,
+        reason: CoherenceReason.lifecycle_excluded,
+        deferred: false,
+        verdict_known: false,
+        verdict: contracts.EvidenceVerdict.UNKNOWN,
+        evidence_id: [0; 0],
+        resolved_test_identities: builder64_finish(builder64_empty()),
+        unresolved_count: 0
+    };
+}
+
+fn evaluate_status(obligation: CoherenceObligation, unresolved: u64, resolved_count: u64) -> (result: ObligationCoherence) {
+    let verdict_known: bool = obligation.evidence_present;
+    let verdict: contracts.EvidenceVerdict = select(obligation.evidence_present, obligation.evidence.verdict, contracts.EvidenceVerdict.UNKNOWN);
+    let evidence_id: [byte; up_to 128] = select(obligation.evidence_present, obligation.evidence.evidence_id, [0; 0]);
+    if obligation.evidence_conflict {
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.contradictory,
+            reason: CoherenceReason.evidence_conflict,
+            deferred: false,
+            verdict_known: verdict_known,
+            verdict: verdict,
+            evidence_id: evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    if !contracts.lifecycle_is_active(obligation.lifecycle) {
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.not_selected,
+            reason: CoherenceReason.lifecycle_excluded,
+            deferred: false,
+            verdict_known: verdict_known,
+            verdict: verdict,
+            evidence_id: evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    if !contracts.executor_is_native_test(obligation.executor_kind) || !obligation.runnable_native {
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.not_selected,
+            reason: CoherenceReason.executor_not_runnable,
+            deferred: false,
+            verdict_known: verdict_known,
+            verdict: verdict,
+            evidence_id: evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    if !obligation.provider_available {
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.escalation_required,
+            reason: CoherenceReason.provider_unavailable,
+            deferred: false,
+            verdict_known: verdict_known,
+            verdict: verdict,
+            evidence_id: evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    if !obligation.evidence_present {
+        // No evidence yet: queue for discovery even when the recorded
+        // inventory cannot resolve the declared selection. Execution is
+        // read-only; the fresh result establishes the inventory that
+        // later passes resolve against.
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.new_execution_required,
+            reason: CoherenceReason.no_evidence,
+            deferred: false,
+            verdict_known: false,
+            verdict: contracts.EvidenceVerdict.UNKNOWN,
+            evidence_id: [0; 0],
+            resolved_test_identities: builder64_finish(resolve_tests(obligation)),
+            unresolved_count: unresolved
+        };
+    }
+    if obligation.inventory_truncated || unresolved > 0 || resolved_count == 0 {
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.selection_unresolved,
+            reason: CoherenceReason.selection_unresolved,
+            deferred: false,
+            verdict_known: verdict_known,
+            verdict: verdict,
+            evidence_id: evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    if evidence_admits(obligation.evidence, obligation.current) {
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.current,
+            reason: CoherenceReason.evidence_current,
+            deferred: false,
+            verdict_known: true,
+            verdict: obligation.evidence.verdict,
+            evidence_id: obligation.evidence.evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    return ObligationCoherence {
+        identity: obligation.identity,
+        status: contracts.ObligationStatus.stale,
+        reason: CoherenceReason.input_changed,
+        deferred: false,
+        verdict_known: verdict_known,
+        verdict: verdict,
+        evidence_id: evidence_id,
+        resolved_test_identities: builder64_finish(resolve_tests(obligation)),
+        unresolved_count: unresolved
+    };
+}
+
+fn accumulator_empty() -> (result: CoherenceAccumulator) {
+    return CoherenceAccumulator {
+        verdicts: [default_coherence(); 32],
+        queue: [[0; 0]; 32],
+        queued: 0,
+        deferred: 0,
+        current: 0,
+        failed: 0,
+        unknown: 0,
+        contradictory: 0,
+        unsupported: 0,
+        unresolved: 0,
+        excluded: 0
+    };
+}
+
+fn build_result(request: CoherenceRequest) -> (result: CoherenceResult) {
+    let seed: CoherenceAccumulator = accumulator_empty();
+    iterate i over request.obligations carrying acc: CoherenceAccumulator = seed {
+        let obligation: CoherenceObligation = request.obligations[i];
+        let resolved: IdentityBuilder64 = resolve_tests(obligation);
+        let unresolved: u64 = count_unresolved(obligation);
+        let evaluated: ObligationCoherence = evaluate_status(obligation, unresolved, resolved.length);
+        let queueable: bool = status_queues(evaluated.status) && obligation.runnable_native && obligation.provider_available;
+        let admitted: bool = queueable && acc.queued < request.max_executions;
+        let verdict: ObligationCoherence = ObligationCoherence {
+            identity: evaluated.identity,
+            status: evaluated.status,
+            reason: evaluated.reason,
+            deferred: queueable && !admitted,
+            verdict_known: evaluated.verdict_known,
+            verdict: evaluated.verdict,
+            evidence_id: evaluated.evidence_id,
+            resolved_test_identities: evaluated.resolved_test_identities,
+            unresolved_count: evaluated.unresolved_count
+        };
+        next acc = CoherenceAccumulator {
+            verdicts: replace(acc.verdicts, i, verdict),
+            queue: replace(acc.queue, acc.queued, select(admitted, obligation.identity, acc.queue[acc.queued])),
+            queued: acc.queued +% select(admitted, 1, 0),
+            deferred: acc.deferred +% select(queueable && !admitted, 1, 0),
+            current: acc.current +% select(status_is_current(verdict.status), 1, 0),
+            failed: acc.failed +% select(status_is_current(verdict.status) && verdict.verdict_known && verdict_is_fail(verdict.verdict), 1, 0),
+            unknown: acc.unknown +% select(status_is_current(verdict.status) && verdict.verdict_known && verdict_is_unknown(verdict.verdict), 1, 0),
+            contradictory: acc.contradictory +% select(status_is_contradictory(verdict.status), 1, 0),
+            unsupported: acc.unsupported +% select(reason_is_executor_not_runnable(verdict.reason), 1, 0),
+            unresolved: acc.unresolved +% select(status_is_unresolved(verdict.status), 1, 0),
+            excluded: acc.excluded +% select(reason_is_lifecycle_excluded(verdict.reason), 1, 0)
+        };
+    }
+    return CoherenceResult {
+        schema_version: request.schema_version,
+        verdicts: acc.verdicts[0..request.obligations.len],
+        run_queue: acc.queue[0..acc.queued],
+        summary: CoherenceSummary {
+            obligations: request.obligations.len,
+            current: acc.current,
+            queued: acc.queued,
+            deferred: acc.deferred,
+            failed: acc.failed,
+            unknown: acc.unknown,
+            contradictory: acc.contradictory,
+            unsupported: acc.unsupported,
+            unresolved: acc.unresolved,
+            excluded: acc.excluded
+        }
+    };
+}
+
+fn coherence_app(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 99, 111, 104, 101, 114, 101, 110, 99, 101, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: CoherenceRequest = structured_read(context.argv[0], request_schema());
+    let result: CoherenceResult = build_result(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([99, 111, 104, 101, 114, 101, 110, 99, 101, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

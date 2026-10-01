@@ -47,6 +47,11 @@ FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
 NATIVE_OBLIGATION_SELECTION_MAX_ITEMS = 16
 NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH = 1024
+VERIFICATION_COHERENCE_REQUEST_SCHEMA = "mncs.test-verification-coherence-request/1"
+VERIFICATION_COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
+VERIFICATION_COHERENCE_MAX_OBLIGATIONS = 32
+VERIFICATION_COHERENCE_MAX_IDENTITIES = 64
+VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -3091,6 +3096,114 @@ def apply_obligation_plan(
         "sufficient_to_stop": bool(obligation_plan.get("stop", {}).get("sufficient_to_stop")),
         "obligation_plan_id": obligation_plan.get("obligation_plan_id"),
     }
+
+
+def _coherence_identity_values(obligation: dict[str, Any]) -> list[str]:
+    values = [obligation.get("identity", "")]
+    values.extend(obligation.get("declared_patterns", []) or [])
+    values.extend(obligation.get("inventory_test_identities", []) or [])
+    for section in (obligation.get("current", {}) or {}, obligation.get("evidence", {}) or {}):
+        if isinstance(section, dict):
+            values.extend(
+                value for value in section.values() if isinstance(value, str)
+            )
+    return [value for value in values if isinstance(value, str)]
+
+
+def evaluate_verification_coherence(
+    request: dict[str, Any],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Transport a verification-coherence request to the native policy.
+
+    This is a process/filesystem boundary shim only: it bound-checks the
+    request, invokes ``mncs.test.verification_coherence`` through run-app,
+    and returns the validated native result. All reuse/selection policy
+    lives in the native module.
+    """
+    if not isinstance(request, dict):
+        raise ManifestError("verification coherence request must be an object")
+    if request.get("schema_version") != VERIFICATION_COHERENCE_REQUEST_SCHEMA:
+        raise ManifestError("verification coherence request has an invalid schema version")
+    obligations = request.get("obligations", [])
+    if not isinstance(obligations, list):
+        raise ManifestError("verification coherence request obligations must be a list")
+    if len(obligations) > VERIFICATION_COHERENCE_MAX_OBLIGATIONS:
+        raise ManifestError(
+            "verification coherence bound exceeded: at most "
+            f"{VERIFICATION_COHERENCE_MAX_OBLIGATIONS} obligations"
+        )
+    for obligation in obligations:
+        if not isinstance(obligation, dict):
+            raise ManifestError("verification coherence obligation must be an object")
+        identities = _coherence_identity_values(obligation)
+        if len(obligation.get("declared_patterns", []) or []) > 8:
+            raise ManifestError("verification coherence bound exceeded: at most 8 declared patterns")
+        if len(obligation.get("inventory_test_identities", []) or []) > VERIFICATION_COHERENCE_MAX_IDENTITIES:
+            raise ManifestError(
+                "verification coherence bound exceeded: at most "
+                f"{VERIFICATION_COHERENCE_MAX_IDENTITIES} inventory test identities"
+            )
+        if any(
+            len(identity.encode("utf-8")) > VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH
+            for identity in identities
+        ):
+            raise ManifestError(
+                "verification coherence bound exceeded: at most "
+                f"{VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH} UTF-8 bytes per identity"
+            )
+    descriptor = Path(__file__).resolve().parents[1] / "native-applications" / "test-verification-coherence.json"
+    if not descriptor.is_file():
+        raise ManifestError(f"verification coherence descriptor is unavailable: {descriptor}")
+    cwd = cwd.resolve()
+    try:
+        with tempfile.TemporaryDirectory(prefix=".mncs-test-coherence-", dir=cwd) as directory:
+            directory_path = Path(directory)
+            request_path = directory_path / "request.json"
+            result_path = directory_path / "result.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            relative_request = request_path.relative_to(cwd).as_posix()
+            relative_result = result_path.relative_to(cwd).as_posix()
+            completed = subprocess.run(
+                [
+                    mncs,
+                    "run-app",
+                    str(descriptor),
+                    "--grant-structured",
+                    "test_artifact",
+                    "--step-budget",
+                    "1048576",
+                    "--",
+                    relative_request,
+                    relative_result,
+                ],
+                cwd=str(cwd),
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+            if completed.returncode != 0:
+                detail = completed.stderr.strip() or completed.stdout.strip()
+                raise ManifestError(
+                    f"native verification coherence failed (exit {completed.returncode}): {detail}"
+                )
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ManifestError(f"native verification coherence returned no valid result: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise ManifestError(
+            f"native verification coherence exceeded {timeout_seconds}s"
+        ) from error
+    if not isinstance(result, dict) or result.get("schema_version") != VERIFICATION_COHERENCE_RESULT_SCHEMA:
+        raise ManifestError("native verification coherence returned an invalid result schema")
+    return result
 
 
 def _apply_host_grants(

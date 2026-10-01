@@ -19,6 +19,23 @@
         },
         "toolchain_env": "MNCS"
       }
+    },
+    {
+      "contract_identity": "mncs.test-verification-coherence/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-test:verification-coherence",
+      "evidence": "native/mncs/test/verification_coherence.mncs",
+      "canonical_entrypoint": "mncs-test-coherence",
+      "status": "native_canonical",
+      "invocation": {
+        "kind": "executable",
+        "path": "bin/mncs-test-coherence",
+        "toolchain": {
+          "repository": "mncs-language",
+          "path": "target/release/mncs"
+        },
+        "toolchain_env": "MNCS"
+      }
     }
   ],
   "consumes": [
