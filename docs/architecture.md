@@ -108,6 +108,25 @@ by family contract tests so malformed identities, stale source bindings,
 unknown levels/reasons, incomplete impact, and inventory mismatches have one
 disposition across consumers.
 
+## Ambient verification coherence
+
+`mncs.test.verification_coherence` is the native reuse/selection policy
+for ambient verification. The host (mncs-environment) measures the
+current world — declaration, subject-content, executor, toolchain,
+inventory, repository revision, and dirty-content identities — and
+transports records; the module owns every decision: strict bound-identity
+admission, lifecycle/executor/provider gating, exact pattern resolution
+against recorded inventory, a bounded run queue with deferral, and
+fail-closed contradictory/unresolved statuses. Fresh obligations queue
+for discovery execution; recorded FAIL stays current knowledge.
+
+The module is invocable as the `test-verification-coherence` native
+application (`bin/mncs-test-coherence`, contract
+`mncs.test-verification-coherence/1`) and as the `evaluate_verification_coherence`
+transport in `tools/mncs_test.py`. `bin/mncs-test-provider` likewise
+exposes the native batch provider. All three adapters are transport
+only; no selection or reuse policy lives in shell or Python.
+
 ## Failure taxonomy
 
 `PASS`, `FAIL`, and `UNKNOWN` are intentionally not collapsed. `FAIL` covers
