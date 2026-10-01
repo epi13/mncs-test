@@ -396,6 +396,23 @@ fn evaluate_status(obligation: CoherenceObligation, unresolved: u64, resolved_co
             unresolved_count: unresolved
         };
     }
+    if !obligation.evidence_present {
+        // No evidence yet: queue for discovery even when the recorded
+        // inventory cannot resolve the declared selection. Execution is
+        // read-only; the fresh result establishes the inventory that
+        // later passes resolve against.
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.new_execution_required,
+            reason: CoherenceReason.no_evidence,
+            deferred: false,
+            verdict_known: false,
+            verdict: contracts.EvidenceVerdict.UNKNOWN,
+            evidence_id: [0; 0],
+            resolved_test_identities: builder64_finish(resolve_tests(obligation)),
+            unresolved_count: unresolved
+        };
+    }
     if obligation.inventory_truncated || unresolved > 0 || resolved_count == 0 {
         return ObligationCoherence {
             identity: obligation.identity,
@@ -406,19 +423,6 @@ fn evaluate_status(obligation: CoherenceObligation, unresolved: u64, resolved_co
             verdict: verdict,
             evidence_id: evidence_id,
             resolved_test_identities: builder64_finish(builder64_empty()),
-            unresolved_count: unresolved
-        };
-    }
-    if !obligation.evidence_present {
-        return ObligationCoherence {
-            identity: obligation.identity,
-            status: contracts.ObligationStatus.new_execution_required,
-            reason: CoherenceReason.no_evidence,
-            deferred: false,
-            verdict_known: false,
-            verdict: contracts.EvidenceVerdict.UNKNOWN,
-            evidence_id: [0; 0],
-            resolved_test_identities: builder64_finish(resolve_tests(obligation)),
             unresolved_count: unresolved
         };
     }

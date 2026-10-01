@@ -165,10 +165,18 @@ def test_exclusion_matrix_never_queues() -> None:
             obligation(
                 "ob-unres",
                 CURRENT,
+                evidence_present=True,
+                evidence=evidence_for(CURRENT),
                 declared_patterns=["missing"],
                 inventory_test_identities=["t1"],
             ),
-            obligation("ob-trunc", CURRENT, inventory_truncated=True),
+            obligation(
+                "ob-trunc",
+                CURRENT,
+                evidence_present=True,
+                evidence=evidence_for(CURRENT),
+                inventory_truncated=True,
+            ),
         ]
     )
     got = {item["identity"]: (item["status"], item["reason"]) for item in result["verdicts"]}
@@ -204,6 +212,59 @@ def test_exact_patterns_resolve_with_dedup() -> None:
     assert verdict["resolved_test_identities"] == ["t1", "t2"]
     assert verdict["unresolved_count"] == 0
     assert verdict["status"] == "new_execution_required"
+
+
+def test_fresh_obligation_queues_without_recorded_inventory() -> None:
+    result = evaluate(
+        [
+            obligation(
+                "ob-fresh",
+                CURRENT,
+                declared_patterns=["*"],
+                inventory_test_identities=[],
+            )
+        ]
+    )
+    verdict = result["verdicts"][0]
+    assert verdict["status"] == "new_execution_required"
+    assert verdict["reason"] == "no_evidence"
+    assert verdict["resolved_test_identities"] == []
+    assert result["run_queue"] == ["ob-fresh"]
+
+
+def test_fresh_obligation_queues_with_unresolved_pattern() -> None:
+    result = evaluate(
+        [
+            obligation(
+                "ob-fresh-unres",
+                CURRENT,
+                declared_patterns=["missing"],
+                inventory_test_identities=[],
+            )
+        ]
+    )
+    verdict = result["verdicts"][0]
+    assert verdict["status"] == "new_execution_required"
+    assert verdict["unresolved_count"] == 1
+    assert result["run_queue"] == ["ob-fresh-unres"]
+
+
+def test_stale_unresolvable_selection_does_not_queue() -> None:
+    result = evaluate(
+        [
+            obligation(
+                "ob-stale-unres",
+                dict(CURRENT, subject_fingerprint="fp-2"),
+                evidence_present=True,
+                evidence=evidence_for(CURRENT),
+                declared_patterns=["missing"],
+                inventory_test_identities=["t1"],
+            )
+        ]
+    )
+    verdict = result["verdicts"][0]
+    assert verdict["status"] == "selection_unresolved"
+    assert result["run_queue"] == []
 
 
 def test_adapter_rejects_bad_schema() -> None:
