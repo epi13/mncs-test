@@ -35,14 +35,26 @@ verdicts, or silently reinterpret a returned MNCS value.
 From this repository, with a built compiler in the sibling checkout:
 
 ```bash
-MNCS=/home/epi13/Documents/Projects/mncs-language/target/debug/mncs
-./bin/mncs-test discover --format text
-./bin/mncs-test run --mncs "$MNCS" \
-  --library /home/epi13/Documents/Projects/mncs-stdlib/library \
-  --format text
+export MNCS=/home/epi13/Documents/Projects/mncs-language/target/debug/mncs
+export MNCS_LIBRARY_PATH="$(pwd)/native:/home/epi13/Documents/Projects/mncs-stdlib/library"
+
+# One suite, natively.
+"$MNCS" test tests/self_suite.mncs --format text
+
+# The repository's obligations, natively (measure, coherence selection,
+# identity-bound execution, digest, receipts, Store vault).
+./bin/mncs-test-verify --repo . --format text
+
+# Host transport/oracle checks.
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m pytest tests/test_obligation_selection.py \
+  tests/test_verification_coherence.py tests/test_digest.py \
+  tests/test_verify.py -q
 ```
 
 The `mncs` and library paths are intentionally explicit: the repository must
 remain usable as an external consumer rather than depending on privileged
-compiler internals.
+compiler internals. Legacy `discover`/`run` subcommands are
+compatibility-only (`bin/mncs-test-compat`); the canonical entrypoints are
+`mncs test`, the `bin/mncs-test-*` native adapters, and
+`bin/mncs-test-verify`.

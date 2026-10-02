@@ -92,7 +92,10 @@
         },
         "toolchain_env": "MNCS",
         "adapter_library_paths": ["native"]
-      }
+      },
+      "effects": [
+        "verify"
+      ]
     }
   ],
   "consumes": [

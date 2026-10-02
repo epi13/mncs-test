@@ -127,6 +127,101 @@ transport in `tools/mncs_test.py`. `bin/mncs-test-provider` likewise
 exposes the native batch provider. All three adapters are transport
 only; no selection or reuse policy lives in shell or Python.
 
+## Family verification
+
+`bin/mncs-test-verify` (`tools/mncs_test_verify.py`) evaluates one
+repository's verification obligations end to end:
+
+```text
+obligation inventory
+        ↓ host measures (git, content digests, compiler test-inventory; no execution)
+native coherence policy → current / queued / deferred / excluded
+        ↓ queued native suites, identity-bound
+`mncs test` → file-captured mncs.test-result/1 (stdout is never parsed)
+        ↓ native digest policy
+compact digest + content-addressed receipt → repo-local Store vault
+        ↓
+one agent-facing report (considered / reused / executed / failed)
+```
+
+Soundness rules, never violated to look fast:
+
+- the native coherence module owns every reuse decision; the host only
+  measures and transports;
+- unmeasurable is UNKNOWN, never queued blindly and never green;
+- only `native_first_class_test` obligations with an explicit
+  single-source binding execute; everything else is reported with its
+  status/reason and left unexecuted;
+- a recorded FAIL stays a FAIL (current knowledge);
+- a changed test selection always re-executes, even when the bound world
+  matches (a `current` verdict carries no resolved selection, so the host
+  proves selection equivalence from wildcard/exact patterns only);
+- verifier upgrades invalidate (the verifier implementation is digested
+  into the repository fingerprint);
+- corrupt receipts heal by re-execution; deterministic execution makes
+  concurrent races converge (the Store reports DUPLICATE, receipts stay
+  valid);
+- PASS→FAIL transitions report `REGRESSION`, FAIL→PASS report `FIXED`.
+
+The repository fingerprint binds the revision, MNCS-source status,
+verification manifests, the verifier implementation, and outside
+library-root content, so documentation/script changes preserve reuse
+while any suite edit re-executes. Per-obligation file precision needs
+the compiler to report a resolved module closure (pressure
+MNCS-TEST-P-014). Exit codes are `0` pass, `1` fail, `3` incomplete,
+`2` harness error.
+
+## Native digest
+
+`mncs.test.digest` owns the relevance decision for agents: counts fold
+through `mncs.test.suite` (never recomputed), failure rows echo the
+oracle expected/actual/code triple plus source location in test order
+under a `max_failures` bound, omissions are counted, and verdicts are
+never invented. The host projects the documented result schema into a
+`DigestRequest` (mechanical field re-keying; unknown vocabulary fails
+closed) and renders the returned digest as text. Measured on a two-test
+failing suite: 21223-byte result → 1158-byte digest JSON → 322-byte
+text. `bin/mncs-test-digest` is the transport adapter and
+`tools/mncs_test_digest.py` the transport; both are native-first and do
+not import the frozen compatibility oracle.
+
+## Capability surface and environment routing
+
+The provider seam is routable through the environment without secret
+knowledge:
+
+- `mncs.test-result/1` → `bin/mncs-test` (one native suite);
+- `mncs.test-verification-coherence/1` → `bin/mncs-test-coherence`;
+- `mncs.test-obligation-selection/1` → `bin/mncs-test-selection`;
+- `mncs.test-digest/1` → `bin/mncs-test-digest`;
+- `mncs.test-verify/1` → `bin/mncs-test-verify` (effects `verify`).
+
+From an entered session, `mncs-env test <session> --checkout <repo>`
+resolves the checkout, invokes the bound verify capability with that
+checkout as its working directory, and streams the provider report; the
+invocation is recorded in the session store. Capability selection and
+reuse policy live in the native modules; the environment only routes.
+
+## Doctor and Forge posture
+
+Doctor composes through `mncs-doctor verify
+--verify-cmd="mncs-test-verify ..."`; provider exit codes propagate
+honestly (INCOMPLETE fails verification with the compact reason
+attached). Doctor repairs infrastructure, never verdicts: corrupt
+receipts heal by re-execution inside the verifier, and Doctor's own
+inventory cache refreshes through normal runs. mncs-test deliberately
+publishes no competing `:repository-remediation` capability; that
+contract belongs to mncs-doctor's provider.
+
+The native `mncs.test-result/1` and `mncs.check-result/1` envelopes
+satisfy Forge's provider validators (schema, provider, verdict
+vocabulary, per-test id/verdict, run identity). Forge/Actions family
+proof still invokes the legacy `run --manifest` flow, which the
+canonical adapter rejects by design; migrating the runner prefix to a
+native entry (per-suite `mncs test`, the provider batch, or
+`mncs-test-verify`) is Forge/Actions-owned work (pressure
+MNCS-TEST-P-013).
+
 ## Failure taxonomy
 
 `PASS`, `FAIL`, and `UNKNOWN` are intentionally not collapsed. `FAIL` covers
