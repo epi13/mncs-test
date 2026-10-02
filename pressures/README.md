@@ -25,6 +25,8 @@ The current campaign records:
 | `MNCS-TEST-P-010` | _pending_ | toolchain | missing `use mncs.test.suite` needs a real diagnostic; documented |
 | `MNCS-TEST-P-011` | _pending_ | toolchain packaging | rebuild libmncs_embed.so with the binary; needs a version gate |
 | `MNCS-TEST-P-012` | _pending_ | toolchain cache | cache key collides across debug/release; clear or namespace per toolchain |
+| `MNCS-TEST-P-013` | _pending_ | forge/actions | family proof still invokes legacy `run --manifest`; native envelopes validate |
+| `MNCS-TEST-P-014` | _pending_ | compiler inventory | no resolved module closure; per-obligation precision needs it |
 
 When a pressure is repaired, update both this record and its Commons state,
 add a regression/conformance witness, and remove the workaround before

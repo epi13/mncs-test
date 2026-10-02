@@ -1,0 +1,24 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-014",
+  "title": "Compiler inventory reports no resolved module closure",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. The owning layer is mncs-language (branch-active, stdlib extraction).",
+  "verified_language_profile": "0.18",
+  "target_layer": "compiler inventory",
+  "observed_need": "mncs-test-verify needs the exact set of modules/files the compiler resolved for a suite, so one obligation's dependency change does not invalidate unrelated obligations in the same repository.",
+  "current_language_behavior": "`mncs test-inventory` reports the source module's subject identity/fingerprint plus per-test declaration/test-case identities, spans, signatures, effects, and capabilities, but no resolved import closure. mncs-test-verify therefore fingerprints every MNCS source in the repository: docs/scripts changes preserve reuse, but any suite edit conservatively invalidates every obligation in the repo.",
+  "why_insufficient": "Host-side import resolution would duplicate compiler knowledge (forbidden by the test tool's own architecture). Only the compiler can state authoritatively which files it read.",
+  "minimal_reproducer": "In a two-suite repository, edit suite A and run mncs-test-verify: obligation B re-executes even though its subject, inventory, and invalidation closure are unchanged, because the shared repository fingerprint covers suite A.",
+  "desired_direction": "Extend mncs.test-inventory/1 with the resolved module/file closure (content identities); mncs-test-verify will bind per-obligation fingerprints to it and compute affected sets precisely.",
+  "severity": "minor",
+  "disposition": "documented_with_conservative_fallback",
+  "workaround": "Repository-wide MNCS-source fingerprinting: sound (a superset of what can matter), merely imprecise across obligations.",
+  "status": "open",
+  "relevant_files": [
+    "tools/mncs_test_verify.py"
+  ],
+  "relevant_tests": [
+    "tests/test_verify.py"
+  ]
+}
