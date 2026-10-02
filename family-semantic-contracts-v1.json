@@ -1,7 +1,7 @@
 {
   "schema_version": "commons.mncs.semantic-contract-declarations/v1",
   "repository_id": "mncs-test",
-  "revision": "3",
+  "revision": "4",
   "provides": [
     {
       "contract_identity": "mncs.test-result/1",
@@ -70,6 +70,28 @@
           "path": "target/release/mncs"
         },
         "toolchain_env": "MNCS"
+      }
+    },
+    {
+      "contract_identity": "mncs.test-verify/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-test:verify",
+      "evidence": "tools/mncs_test_verify.py",
+      "canonical_entrypoint": "mncs-test-verify",
+      "status": "native_orchestrated",
+      "invocation": {
+        "kind": "executable",
+        "path": "bin/mncs-test-verify",
+        "fixed_argv": [
+          "--format",
+          "text"
+        ],
+        "toolchain": {
+          "repository": "mncs-language",
+          "path": "target/release/mncs"
+        },
+        "toolchain_env": "MNCS",
+        "adapter_library_paths": ["native"]
       }
     }
   ],

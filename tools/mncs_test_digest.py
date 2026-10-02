@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mncs_test_native import NativeTransportError, run_native_app
 
 TEST_RESULT_SCHEMA = "mncs.test-result/1"
 DIGEST_REQUEST_SCHEMA = "mncs.test-digest-request/1"
@@ -163,56 +165,20 @@ def evaluate_digest(
     timeout_seconds: float = 120.0,
 ) -> dict:
     """Transport a digest request to the native policy and return the digest."""
-    if not isinstance(request, dict):
-        raise DigestError("digest request must be an object")
-    if request.get("schema_version") != DIGEST_REQUEST_SCHEMA:
-        raise DigestError("digest request has an invalid schema version")
-    descriptor = (
-        Path(__file__).resolve().parents[1] / "native-applications" / "test-digest.json"
-    )
-    if not descriptor.is_file():
-        raise DigestError(f"digest descriptor is unavailable: {descriptor}")
-    cwd = cwd.resolve()
     try:
-        with tempfile.TemporaryDirectory(prefix=".mncs-test-digest-", dir=cwd) as directory:
-            directory_path = Path(directory)
-            request_path = directory_path / "request.json"
-            result_path = directory_path / "digest.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            relative_request = request_path.relative_to(cwd).as_posix()
-            relative_result = result_path.relative_to(cwd).as_posix()
-            completed = subprocess.run(
-                [
-                    mncs,
-                    "run-app",
-                    str(descriptor),
-                    "--grant-structured",
-                    "test_artifact",
-                    "--step-budget",
-                    "1048576",
-                    "--",
-                    relative_request,
-                    relative_result,
-                ],
-                cwd=str(cwd),
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout_seconds,
-            )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or completed.stdout.strip()
-                raise DigestError(f"native digest failed (exit {completed.returncode}): {detail}")
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                raise DigestError(f"native digest returned no valid result: {error}") from error
-    except subprocess.TimeoutExpired as error:
-        raise DigestError(f"native digest exceeded {timeout_seconds}s") from error
-    if not isinstance(result, dict) or result.get("schema_version") != DIGEST_RESULT_SCHEMA:
-        raise DigestError("native digest returned an invalid result schema")
-    return result
+        return run_native_app(
+            "test-digest.json",
+            request,
+            request_schema=DIGEST_REQUEST_SCHEMA,
+            result_schema=DIGEST_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            result_filename="digest.json",
+        )
+    except NativeTransportError as error:
+        raise DigestError(str(error)) from error
 
 
 def render_digest_text(digest: dict) -> str:
