@@ -54,11 +54,27 @@ record CoherenceCurrent {
     repository_fingerprint: [byte; up_to 128]
 }
 
+// Admission of externally produced evidence (for example CI receipts
+// admitted through mncs-actions). The owning external policy already
+// established exact subject equivalence; this record carries that
+// admission across the host projection. Identity binding is re-checked
+// here so a misprojected row can never satisfy the wrong obligation,
+// and the verdict travels with its external provenance intact: test
+// semantics never claim to have executed what ran elsewhere.
+record ExternalAdmission {
+    obligation: [byte; up_to 1024],
+    subject_digest: [byte; up_to 128],
+    verdict: contracts.EvidenceVerdict,
+    evidence_id: [byte; up_to 128]
+}
+
 record CoherenceObligation {
     identity: [byte; up_to 1024],
     lifecycle: contracts.ObligationLifecycle,
     executor_kind: contracts.ExecutorKind,
     runnable_native: bool,
+    external_evidence_present: bool,
+    external_evidence: ExternalAdmission,
     current: CoherenceCurrent,
     declared_patterns: [[byte; up_to 1024]; up_to 8],
     inventory_test_identities: [[byte; up_to 1024]; up_to 64],
@@ -175,6 +191,17 @@ fn evidence_admits(evidence: CoherenceEvidence, current: CoherenceCurrent) -> (r
         && bytes128_equal(evidence.inventory_identity, current.inventory_identity)
         && bytes128_equal(evidence.repository_revision, current.repository_revision)
         && bytes128_equal(evidence.repository_fingerprint, current.repository_fingerprint);
+}
+
+// External admission re-checks the binding, not the subject: exact
+// subject equivalence was already established by the owning external
+// policy (mncs.actions.external_evidence). A present-but-misbound
+// admission never satisfies the obligation.
+fn external_admits(obligation: CoherenceObligation) -> (result: bool) {
+    return obligation.external_evidence_present
+        && bytes1024_equal(obligation.external_evidence.obligation, obligation.identity)
+        && obligation.external_evidence.subject_digest.len > 0
+        && obligation.external_evidence.evidence_id.len > 0;
 }
 
 fn is_wildcard(pattern: [byte; up_to 1024]) -> (result: bool) {
@@ -362,6 +389,35 @@ fn evaluate_status(obligation: CoherenceObligation, unresolved: u64, resolved_co
             identity: obligation.identity,
             status: contracts.ObligationStatus.not_selected,
             reason: CoherenceReason.lifecycle_excluded,
+            deferred: false,
+            verdict_known: verdict_known,
+            verdict: verdict,
+            evidence_id: evidence_id,
+            resolved_test_identities: builder64_finish(builder64_empty()),
+            unresolved_count: unresolved
+        };
+    }
+    if contracts.executor_is_external(obligation.executor_kind) {
+        // External integrations never execute natively. Bound external
+        // evidence satisfies the obligation with its carried verdict;
+        // anything else stays unrunnable, never queued.
+        if external_admits(obligation) {
+            return ObligationCoherence {
+                identity: obligation.identity,
+                status: contracts.ObligationStatus.current,
+                reason: CoherenceReason.evidence_current,
+                deferred: false,
+                verdict_known: true,
+                verdict: obligation.external_evidence.verdict,
+                evidence_id: obligation.external_evidence.evidence_id,
+                resolved_test_identities: builder64_finish(builder64_empty()),
+                unresolved_count: unresolved
+            };
+        }
+        return ObligationCoherence {
+            identity: obligation.identity,
+            status: contracts.ObligationStatus.not_selected,
+            reason: CoherenceReason.executor_not_runnable,
             deferred: false,
             verdict_known: verdict_known,
             verdict: verdict,
