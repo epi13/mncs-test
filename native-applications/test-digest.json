@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.digest",
+  "source": "../native/mncs/test/digest.mncs",
+  "module": "mncs.test.digest",
+  "entry_function": "digest_app",
+  "profile": "0.18",
+  "interface_identity": "ff61bfe764e5ff538fc9e5b56f752055eca7e0e316f586c9d47f1d827d06d6f6",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native",
+    "../../MNCS-Commons/src/mncs_commons/mesh/mncs"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

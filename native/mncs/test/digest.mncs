@@ -1,0 +1,221 @@
+mncs 0.18;
+
+// mncs.test.digest — native agent-facing test digest policy.
+//
+// A full `mncs.test-result/1` record carries typed-value dumps, artifact
+// receipts, and per-test execution lineage: exactly what provenance needs
+// and far more than an agent should read to learn "what failed". This
+// module owns the relevance decision: which rows survive, in what order,
+// under what bound, and whether anything was omitted.
+//
+// The host projects one test-result into a DigestRequest (mechanical field
+// re-keying of the documented result schema, never output parsing) and
+// transports records; every counting, verdict-precedence, row-selection,
+// and truncation decision below is native. The digest never invents
+// verdicts: counts fold through `mncs.test.suite`, and failure rows echo
+// the native oracle's expected/actual/code triple plus source location.
+module mncs.test.digest;
+
+use mncs.std.application.v1;
+use mncs.test.assertions;
+use mncs.test.suite;
+
+// One executed-or-skipped test, projected from `mncs.test-result/1`.
+record DigestTest {
+    qualified_name: [byte; up_to 1024],
+    verdict: Verdict,
+    failure_kind: FailureKind,
+    assertions: u64,
+    failures: u64,
+    expected: i64,
+    actual: i64,
+    assertion_code: u64,
+    source: [byte; up_to 1024],
+    line: u64,
+    column: u64,
+    semantic_fingerprint: [byte; up_to 128]
+}
+
+// Run echo: enough provenance to name the execution, not to replay it.
+record DigestRun {
+    run_id: [byte; up_to 128],
+    module_name: [byte; up_to 1024],
+    source: [byte; up_to 1024],
+    backend: [byte; up_to 128],
+    artifact_identity: [byte; up_to 1024]
+}
+
+record DigestRequest {
+    schema_version: [byte; up_to 64],
+    max_failures: u64,
+    run: DigestRun,
+    tests: [DigestTest; up_to 256]
+}
+
+record DigestFailure {
+    qualified_name: [byte; up_to 1024],
+    expected: i64,
+    actual: i64,
+    assertion_code: u64,
+    source: [byte; up_to 1024],
+    line: u64,
+    column: u64,
+    semantic_fingerprint: [byte; up_to 128]
+}
+
+record DigestResult {
+    schema_version: [byte; up_to 64],
+    summary: SuiteSummary,
+    failures: [DigestFailure; up_to 32],
+    failure_rows: u64,
+    failures_omitted: u64,
+    run: DigestRun
+}
+
+record DigestBuilder {
+    rows: [DigestFailure; 32],
+    length: u64,
+    omitted: u64
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 100, 105, 103, 101, 115, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 100, 105, 103, 101, 115, 116, 47, 49];
+}
+
+fn verdict_code(value: Verdict) -> (result: u64) {
+    return match value {
+        Verdict.PASS => 0,
+        Verdict.FAIL => 1,
+        Verdict.SKIP => 2,
+        Verdict.UNSUPPORTED => 3
+    };
+}
+
+fn verdict_is_fail(value: Verdict) -> (result: bool) {
+    return match value {
+        Verdict.PASS => false,
+        Verdict.FAIL => true,
+        Verdict.SKIP => false,
+        Verdict.UNSUPPORTED => false
+    };
+}
+
+fn to_result(test: DigestTest) -> (result: TestResult) {
+    return TestResult {
+        verdict: test.verdict,
+        verdict_code: verdict_code(test.verdict),
+        failure_kind: test.failure_kind,
+        failure_code: test.assertion_code,
+        assertions: test.assertions,
+        failures: test.failures,
+        expected: test.expected,
+        actual: test.actual,
+        assertion_code: test.assertion_code
+    };
+}
+
+fn to_failure(test: DigestTest) -> (result: DigestFailure) {
+    return DigestFailure {
+        qualified_name: test.qualified_name,
+        expected: test.expected,
+        actual: test.actual,
+        assertion_code: test.assertion_code,
+        source: test.source,
+        line: test.line,
+        column: test.column,
+        semantic_fingerprint: test.semantic_fingerprint
+    };
+}
+
+fn empty_failure() -> (result: DigestFailure) {
+    return DigestFailure {
+        qualified_name: [0; 0],
+        expected: 0,
+        actual: 0,
+        assertion_code: 0,
+        source: [0; 0],
+        line: 0,
+        column: 0,
+        semantic_fingerprint: [0; 0]
+    };
+}
+
+fn builder_empty() -> (result: DigestBuilder) {
+    return DigestBuilder {
+        rows: [empty_failure(); 32],
+        length: 0,
+        omitted: 0
+    };
+}
+
+// Row admission: failures arrive in test order; the first `cap` rows are
+// retained and every further failure is counted as omitted, never dropped
+// silently. `cap` is already clamped to the row bound by the caller.
+fn builder_push(builder: DigestBuilder, test: DigestTest, cap: u64) -> (result: DigestBuilder) {
+    if !verdict_is_fail(test.verdict) {
+        return builder;
+    }
+    if builder.length < cap {
+        return DigestBuilder {
+            rows: replace(builder.rows, builder.length, to_failure(test)),
+            length: builder.length +% 1,
+            omitted: builder.omitted
+        };
+    }
+    return DigestBuilder {
+        rows: builder.rows,
+        length: builder.length,
+        omitted: builder.omitted +% 1
+    };
+}
+
+fn builder_finish(builder: DigestBuilder) -> (result: [DigestFailure; up_to 32]) {
+    return builder.rows[0..builder.length];
+}
+
+fn clamp_cap(max_failures: u64) -> (result: u64) {
+    if max_failures > 32 {
+        return 32;
+    }
+    return max_failures;
+}
+
+fn build_digest(request: DigestRequest) -> (result: DigestResult) {
+    let cap: u64 = clamp_cap(request.max_failures);
+    iterate i over request.tests carrying summary: SuiteSummary = empty() {
+        next summary = observe(summary, to_result(request.tests[i]));
+    }
+    let folded: SuiteSummary = summary;
+    iterate j over request.tests carrying builder: DigestBuilder = builder_empty() {
+        next builder = builder_push(builder, request.tests[j], cap);
+    }
+    return DigestResult {
+        schema_version: result_schema(),
+        summary: folded,
+        failures: builder_finish(builder),
+        failure_rows: folded.failed,
+        failures_omitted: builder.omitted,
+        run: request.run
+    };
+}
+
+fn digest_app(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 100, 105, 103, 101, 115, 116, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: DigestRequest = structured_read(context.argv[0], request_schema());
+    let result: DigestResult = build_digest(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([100, 105, 103, 101, 115, 116, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
