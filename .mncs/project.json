@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 9,
+  "revision": 10,
   "manifest_location": "in-repository",
   "authority": {
     "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport and differential adapters."
@@ -141,6 +141,21 @@
           "op": "any"
         },
         "required": false
+      },
+      {
+        "contract": "mncs-stdlib.stdlib-source",
+        "envelope": {
+          "op": "any"
+        },
+        "required": true,
+        "evidence_refs": [
+          "native/mncs/test/obligation_selection.mncs",
+          "native/mncs/test/provider.mncs",
+          "native/mncs/test/provider_admission_probe.mncs",
+          "native/mncs/test/provider_failure_probe.mncs",
+          "native/mncs/test/verification_coherence.mncs"
+        ],
+        "scope": "native runtime imports; legacy pre-extraction toolchains may bind equivalent language library sources"
       }
     ],
     "tests": [
