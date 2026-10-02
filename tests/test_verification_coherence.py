@@ -18,6 +18,20 @@ LANGUAGE_ROOT = ROOT.parent / "mncs-language"
 COMMONS_ROOT = ROOT.parent / "MNCS-Commons"
 MNCS = Path(os.environ.get("MNCS_BINARY", LANGUAGE_ROOT / "target/debug/mncs"))
 
+
+def _stdlib_library() -> Path:
+    """Standard-library tree: explicit root, else family sibling, else legacy."""
+    explicit = os.environ.get("MNCS_STDLIB_ROOT")
+    if explicit:
+        return Path(explicit) / "library"
+    sibling = ROOT.parent / "mncs-stdlib"
+    if (sibling / "stdlib-manifest.json").is_file():
+        return sibling / "library"
+    return LANGUAGE_ROOT / "library"
+
+
+STDLIB_LIBRARY = _stdlib_library()
+
 CURRENT = {
     "definition_identity": "def-1",
     "subject_identity": "subj-1",
@@ -50,7 +64,7 @@ def compiler_environment() -> dict[str, str]:
     environment = dict(os.environ)
     environment["MNCS_LIBRARY_PATH"] = ":".join(
         [
-            str(LANGUAGE_ROOT / "library"),
+            str(STDLIB_LIBRARY),
             str(COMMONS_ROOT / "src/mncs_commons/mesh"),
             str(ROOT / "native"),
             str(ROOT),

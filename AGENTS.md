@@ -38,7 +38,7 @@ From this repository, with a built compiler in the sibling checkout:
 MNCS=/home/epi13/Documents/Projects/mncs-language/target/debug/mncs
 ./bin/mncs-test discover --format text
 ./bin/mncs-test run --mncs "$MNCS" \
-  --library /home/epi13/Documents/Projects/mncs-language/library \
+  --library /home/epi13/Documents/Projects/mncs-stdlib/library \
   --format text
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```

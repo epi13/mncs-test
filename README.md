@@ -31,12 +31,12 @@ self-suite from this repository:
 
 ```bash
 MNCS=/path/to/mncs-language/target/debug/mncs
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   "$MNCS" test tests/self_suite.mncs --format text
 
 # Transparent native packaging adapter.
 MNCS="$MNCS" \
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   ./bin/mncs-test
 ```
 
@@ -227,11 +227,11 @@ The survey and disposition of pre-existing host-language tests is in
 python3 -m py_compile tools/mncs_test.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 MNCS=/path/to/mncs-language/target/debug/mncs
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   "$MNCS" test tests/self_suite.mncs --format text
 
 # Explicit compatibility/oracle validation only.
-./bin/mncs-test-compat run --mncs "$MNCS" --library /path/to/mncs-language/library --format text
+./bin/mncs-test-compat run --mncs "$MNCS" --library /path/to/mncs-stdlib/library --format text
 ```
 
 Keep native semantics in MNCS and update the local/Commons pressure record
