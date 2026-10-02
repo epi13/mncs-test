@@ -17,7 +17,8 @@
           "repository": "mncs-language",
           "path": "target/release/mncs"
         },
-        "toolchain_env": "MNCS"
+        "toolchain_env": "MNCS",
+        "adapter_library_paths": ["native"]
       }
     },
     {
