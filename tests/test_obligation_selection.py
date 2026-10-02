@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -463,3 +465,44 @@ def test_native_failure_keeps_exact_compiler_test_identity(tmp_path: Path) -> No
     assert results[0]["obligation_identity"] == identity
     assert results[0]["executor_identity"] == "3" * 64
     assert results[0]["test_case_identities"] == [test_identity]
+
+
+def test_selection_adapter_routes_to_the_native_kernel(tmp_path: Path) -> None:
+    """bin/mncs-test-selection is transport only: request in, native policy out."""
+    request = {
+        "schema_version": "mncs.test-obligation-selection-request/1",
+        "plan_identity": "plan-adapter-probe",
+        "obligations": [
+            {
+                "identity": "obligation-new",
+                "status": "new_execution_required",
+                "requires_native_test": True,
+                "test_case_identities": ["case-new"],
+            },
+            {
+                "identity": "obligation-current",
+                "status": "current",
+                "requires_native_test": True,
+                "test_case_identities": ["case-current"],
+            },
+        ],
+        "available_test_identities": ["case-new", "case-current"],
+    }
+    (tmp_path / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    environment = compiler_environment()
+    environment["MNCS"] = str(MNCS)
+    completed = subprocess.run(
+        [str(ROOT / "bin/mncs-test-selection"), "request.json", "result.json"],
+        cwd=str(tmp_path),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert result["schema_version"] == "mncs.test-obligation-selection/1"
+    assert result["selected_test_identities"] == ["case-new"]
+    assert result["reused_obligation_identities"] == ["obligation-current"]
+    assert result["new_execution_obligation_identities"] == ["obligation-new"]
+    assert result["missing_test_identities"] == []

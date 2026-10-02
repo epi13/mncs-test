@@ -1,7 +1,7 @@
 {
   "schema_version": "commons.mncs.semantic-contract-declarations/v1",
   "repository_id": "mncs-test",
-  "revision": "1",
+  "revision": "2",
   "provides": [
     {
       "contract_identity": "mncs.test-result/1",
@@ -31,6 +31,23 @@
       "invocation": {
         "kind": "executable",
         "path": "bin/mncs-test-coherence",
+        "toolchain": {
+          "repository": "mncs-language",
+          "path": "target/release/mncs"
+        },
+        "toolchain_env": "MNCS"
+      }
+    },
+    {
+      "contract_identity": "mncs.test-obligation-selection/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-test:obligation-selection",
+      "evidence": "native/mncs/test/obligation_selection.mncs",
+      "canonical_entrypoint": "mncs-test-selection",
+      "status": "native_canonical",
+      "invocation": {
+        "kind": "executable",
+        "path": "bin/mncs-test-selection",
         "toolchain": {
           "repository": "mncs-language",
           "path": "target/release/mncs"

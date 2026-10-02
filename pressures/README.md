@@ -24,6 +24,7 @@ The current campaign records:
 | `MNCS-TEST-P-009` | _pending_ | doctor | DOC102 on current profile 0.18 is upstream staleness; ignored |
 | `MNCS-TEST-P-010` | _pending_ | toolchain | missing `use mncs.test.suite` needs a real diagnostic; documented |
 | `MNCS-TEST-P-011` | _pending_ | toolchain packaging | rebuild libmncs_embed.so with the binary; needs a version gate |
+| `MNCS-TEST-P-012` | _pending_ | toolchain cache | cache key collides across debug/release; clear or namespace per toolchain |
 
 When a pressure is repaired, update both this record and its Commons state,
 add a regression/conformance witness, and remove the workaround before
