@@ -20,6 +20,10 @@ The current campaign records:
 | `MNCS-TEST-P-004` | `MNCS-LANG-52A5E0C72A39` | runtime/tooling | retained embed session; fallback remains |
 | `MNCS-TEST-P-005` | `MNCS-LANG-770B42F56E6C` | language semantics | first-class static declarations; advanced callbacks remain constrained |
 | `MNCS-TEST-P-006` | `MNCS-TOOLING-146FB6F4BBC6` | stdlib/tooling | narrow typed-to-JSON transport adapter |
+| `MNCS-TEST-P-008` | _pending_ | family contracts | local external-executor predicate until checkouts reunite |
+| `MNCS-TEST-P-009` | _pending_ | doctor | DOC102 on current profile 0.18 is upstream staleness; ignored |
+| `MNCS-TEST-P-010` | _pending_ | toolchain | missing `use mncs.test.suite` needs a real diagnostic; documented |
+| `MNCS-TEST-P-011` | _pending_ | toolchain packaging | rebuild libmncs_embed.so with the binary; needs a version gate |
 
 When a pressure is repaired, update both this record and its Commons state,
 add a regression/conformance witness, and remove the workaround before

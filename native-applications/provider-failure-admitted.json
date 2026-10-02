@@ -12,7 +12,7 @@
   "entry_function": "run_selected_batch",
   "profile": "0.18",
   "libraries": [
-    "../../mncs-language/library",
+    "../../mncs-stdlib/library",
     "../native",
     ".."
   ],

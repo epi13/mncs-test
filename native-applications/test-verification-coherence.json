@@ -5,9 +5,9 @@
   "module": "mncs.test.verification_coherence",
   "entry_function": "coherence_app",
   "profile": "0.18",
-  "interface_identity": "52951c73e24352654e26bd838f20ac5edd44cb1ea0fbfba44adb9820961b232b",
+  "interface_identity": "cf3e81bcbe3b97582747906b3234480fbc450c4e4fb95e92619367378f732f25",
   "libraries": [
-    "../../mncs-language/library",
+    "../../mncs-stdlib/library",
     "../native",
     "../../MNCS-Commons/src/mncs_commons/mesh/mncs"
   ],

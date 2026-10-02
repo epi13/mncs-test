@@ -14,7 +14,7 @@ selected test identities:
 python3 tools/generate_family_verification_checks.py \
   --mncs /path/to/mncs \
   --library /path/to/mncs-test/native \
-  --library /path/to/mncs-language/library
+  --library /path/to/mncs-stdlib/library
 ```
 
 Use `--check` in a repository or family synchronization gate.  The generator

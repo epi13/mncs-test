@@ -5,3 +5,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+# run-app compiled-artifact cache (MNCS_NATIVE_APPLICATION_CACHE_DIR override
+# available for hermetic runs).
+native-applications/.mncs/
