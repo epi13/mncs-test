@@ -18,15 +18,18 @@ sys.path.insert(0, str(ROOT / "tools"))
 from mncs_test_native import run_native_app, toolchain_cache_dir  # noqa: E402
 from mncs_test_verify import (  # noqa: E402
     VERIFY_VERSION,
+    RunStores,
     build_coherence_row,
     evidence_envelope,
     evidence_id_for,
     find_recall_candidate,
     finish_execution,
     measure_closure,
+    measure_obligation,
     obligation_scope,
     parse_evidence_envelope,
     receipt_core,
+    resolve_obligation_evidence,
     run_stamp,
     semantic_match,
     stdlib_bundle_digest,
@@ -569,3 +572,168 @@ def test_find_recall_candidate_rejects_mismatch_and_gaps() -> None:
     head2 = _history_evidence("head2", _bound(closure_identity="x"), "stale")
     world = _recall_world(head2, [head2, stale], world_bound)
     assert find_recall_candidate(world) is None
+
+
+class _FakeStore:
+    constructions = 0
+
+    def __init__(self, path, read_only: bool = False) -> None:
+        type(self).constructions += 1
+        self.read_only = read_only
+        self.closed = False
+
+    @property
+    def current_generation(self) -> int:
+        return 7
+
+    def find_bound_objects(self, schema: bytes, prefix: bytes = b"") -> list:
+        return []
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FailingStore:
+    constructions = 0
+
+    def __init__(self, path, read_only: bool = False) -> None:
+        type(self).constructions += 1
+        raise RuntimeError("vault is unreadable")
+
+
+def _loaded(fake: type) -> tuple:
+    return ((fake, RuntimeError, object), None)
+
+
+def test_run_stores_reuses_one_reader_across_obligations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mncs_test_verify as verify_module
+
+    _FakeStore.constructions = 0
+    monkeypatch.setattr(verify_module, "load_store_api", lambda: _loaded(_FakeStore))
+    vault = tmp_path / "store"
+    vault.mkdir()
+    stores = RunStores()
+    try:
+        first = resolve_obligation_evidence(vault, "ob.a", stores=stores)
+        second = resolve_obligation_evidence(vault, "ob.b", stores=stores)
+    finally:
+        stores.close()
+    assert first["status"] == "ok"
+    assert first["generation"] == 7
+    assert second["status"] == "ok"
+    assert _FakeStore.constructions == 1
+    assert stores.read_opens == 1
+    assert stores.write_opens == 0
+
+
+def test_run_stores_caches_open_failure_without_repaying(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mncs_test_verify as verify_module
+
+    _FailingStore.constructions = 0
+    monkeypatch.setattr(verify_module, "load_store_api", lambda: _loaded(_FailingStore))
+    vault = tmp_path / "store"
+    vault.mkdir()
+    stores = RunStores()
+    try:
+        first = resolve_obligation_evidence(vault, "ob.a", stores=stores)
+        second = resolve_obligation_evidence(vault, "ob.b", stores=stores)
+    finally:
+        stores.close()
+    assert first["status"] == "unavailable"
+    assert "store open failed" in (first["detail"] or "")
+    assert second["status"] == "unavailable"
+    assert _FailingStore.constructions == 1
+    assert stores.read_opens == 0
+
+
+def test_run_stores_missing_vault_opens_nothing_and_stays_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mncs_test_verify as verify_module
+
+    _FakeStore.constructions = 0
+    monkeypatch.setattr(verify_module, "load_store_api", lambda: _loaded(_FakeStore))
+    stores = RunStores()
+    try:
+        resolved = resolve_obligation_evidence(
+            tmp_path / "absent", "ob.a", stores=stores
+        )
+    finally:
+        stores.close()
+    assert resolved["status"] == "empty"
+    assert _FakeStore.constructions == 0
+    assert stores.read_opens == 0
+
+
+def test_run_stores_close_releases_and_is_idempotent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mncs_test_verify as verify_module
+
+    monkeypatch.setattr(verify_module, "load_store_api", lambda: _loaded(_FakeStore))
+    vault = tmp_path / "store"
+    vault.mkdir()
+    stores = RunStores()
+    handle, error = stores.reader(vault, _loaded(_FakeStore)[0])
+    assert error is None
+    assert handle is not None
+    stores.close()
+    assert handle.closed
+    stores.close()
+
+
+def test_closure_cache_measures_each_distinct_input_once(tmp_path: Path) -> None:
+    import mncs_test_verify as verify_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    adapter = tmp_path / "native"
+    adapter.mkdir()
+    calls: list[tuple] = []
+
+    def _counting(libraries: list[str], stats: dict, **kwargs):
+        calls.append(tuple(libraries))
+        return ("closure-id", True)
+
+    obligation = {
+        "identity": "ob.external",
+        "executor": {"kind": "external_integration", "entrypoint": "ext"},
+        "invalidation_dependencies": [],
+    }
+    stats: dict = {}
+    cache: dict = {}
+    with mock.patch.object(verify_module, "measure_closure", _counting):
+        first = measure_obligation(
+            obligation, repo, adapter, {}, "mncs", "toolchain", "rev", "fp",
+            repo / "receipts", 1.0, stats, ".mncs/obs.json", repo / "store",
+            False, None, cache,
+        )
+        second = measure_obligation(
+            obligation, repo, adapter, {}, "mncs", "toolchain", "rev", "fp",
+            repo / "receipts", 1.0, stats, ".mncs/obs.json", repo / "store",
+            False, None, cache,
+        )
+    assert calls == [(str(repo), str(adapter))]
+    assert first["bound"]["closure_identity"] == "closure-id"
+    assert second["bound"]["closure_identity"] == "closure-id"
+
+    other = {
+        "identity": "ob.other",
+        "executor": {
+            "kind": "external_integration",
+            "entrypoint": "ext",
+            "library_paths": [str(repo)],
+        },
+        "invalidation_dependencies": [],
+    }
+    with mock.patch.object(verify_module, "measure_closure", _counting):
+        measure_obligation(
+            other, repo, adapter, {}, "mncs", "toolchain", "rev", "fp",
+            repo / "receipts", 1.0, stats, ".mncs/obs.json", repo / "store",
+            False, None, cache,
+        )
+    assert len(calls) == 2
