@@ -57,6 +57,51 @@
       }
     },
     {
+      "identity": "mncs-test.cross-module-suite-execution",
+      "title": "Second first-class suite executes independently (multi-obligation boundary probe)",
+      "guarantee_domain": "runtime",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "repository_canonical",
+      "subjects": [
+        "mncs:0.2:program:tests.closure_suite"
+      ],
+      "invalidation_dependencies": [
+        "tests/closure_suite.mncs"
+      ],
+      "executor": {
+        "provider": "mncs-test",
+        "kind": "native_first_class_test",
+        "entrypoint": "mncs-test run",
+        "source_paths": [
+          "tests/closure_suite.mncs"
+        ],
+        "library_paths": [
+          "../mncs-stdlib/library"
+        ],
+        "declaration_identities": [
+          "*"
+        ],
+        "verifier_identity": "mncs-test-runner/0.2.1"
+      },
+      "evidence_identity": {
+        "subject_fields": [
+          "repository_fingerprint",
+          "subject_fingerprint"
+        ],
+        "definition_fields": [
+          "obligation_identity",
+          "definition_identity"
+        ],
+        "execution_fields": [
+          "test_case_identity",
+          "executor_identity",
+          "verifier_identity",
+          "invalidation_identity"
+        ]
+      }
+    },
+    {
       "identity": "mncs-test.native-provider.execution",
       "title": "Selected test obligations execute through the native provider session",
       "guarantee_domain": "runtime",

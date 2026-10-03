@@ -1,0 +1,18 @@
+mncs 0.18;
+
+// Second first-class suite: proves multi-obligation verification and bounds
+// per-obligation invalidation. Edits here must rerun this obligation; the
+// self-suite obligation reruns too until the compiler exposes a resolved
+// module closure (MNCS-TEST-P-014).
+module tests.closure_suite;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+
+test independent_arithmetic() -> (result: TestResult) {
+    return from_assertion(equals_i64(7, 3 +% 4, 2001));
+}
+
+test independent_boolean() -> (result: TestResult) {
+    return from_assertion(equals_bool(false, select(1 > 2, true, false), 2002));
+}
