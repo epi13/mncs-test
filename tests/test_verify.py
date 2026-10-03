@@ -391,6 +391,96 @@ def test_corrupt_projection_heals_from_authority(tmp_path: Path) -> None:
     assert repaired is not None and repaired["evidence_id"] == head_id
 
 
+def test_uncommitted_projection_is_not_authoritative(tmp_path: Path) -> None:
+    """Crash-before-admit recovery: projection exists, vault never committed."""
+    import shutil as _shutil
+
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    receipts_dir = repo / ".mncs" / "test-receipts"
+    assert read_receipt(receipts_dir, "fixture.suite") is not None
+    _shutil.rmtree(repo / ".mncs" / "test-store")
+    recovered = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(recovered, "fixture.suite")
+    assert suite["action"] == "executed"
+    assert suite["verdict"] == "PASS"
+    assert recovered["stats"]["suite_runs"] == 1
+    assert (repo / ".mncs" / "test-store").is_dir()
+
+
+def _crafted_receipt(identity: str, verdict: str, marker: str) -> dict:
+    import mncs_test_verify as verify_module
+
+    receipt = {
+        "schema_version": "mncs.test-receipt/1",
+        "obligation_identity": identity,
+        "verdict": verdict,
+        "bound": {"marker": marker},
+        "verifier_identity": "ver",
+        "selected_test_identities": ["t1"],
+        "digest": {"marker": marker},
+        "result_sha256": "r" * 64,
+        "producer": verify_module.VERIFY_VERSION,
+        "previous_evidence_id": None,
+    }
+    receipt["evidence_id"] = verify_module.evidence_id_for(
+        verify_module.receipt_core(receipt)
+    )
+    return receipt
+
+
+def _store_evidence(store_dir: Path, receipt: dict, previous: str | None) -> str:
+    import mncs_test_verify as verify_module
+
+    loaded, reason = verify_module.load_store_api()
+    assert loaded is not None, reason
+    receipt = dict(receipt)
+    receipt["previous_evidence_id"] = previous
+    outcome = verify_module.admit_receipt_to_store(
+        store_dir, receipt, relations=[], provenance=[]
+    )
+    assert outcome["status"] in ("admitted", "duplicate"), outcome
+    return receipt["evidence_id"]
+
+
+def test_history_fork_resolves_deterministically(tmp_path: Path) -> None:
+    """Concurrent divergent evidence forks the chain; smallest id wins."""
+    import mncs_test_verify as verify_module
+
+    store_dir = tmp_path / "store"
+    base = _store_evidence(
+        store_dir, _crafted_receipt("ob", "PASS", "base"), None
+    )
+    left = _store_evidence(
+        store_dir, _crafted_receipt("ob", "PASS", "left"), base
+    )
+    right = _store_evidence(
+        store_dir, _crafted_receipt("ob", "FAIL", "right"), base
+    )
+    resolved = verify_module.resolve_obligation_evidence(store_dir, "ob")
+    assert resolved["status"] == "ok"
+    assert resolved["head"]["evidence_id"] == min(left, right)
+    assert "fork" in resolved["detail"]
+    assert len(resolved["history"]) == 3
+
+
+def test_history_overflow_fails_closed(tmp_path: Path) -> None:
+    """History beyond the scan bound refuses authority (never partial)."""
+    import mncs_test_verify as verify_module
+
+    store_dir = tmp_path / "store"
+    previous = None
+    for index in range(verify_module.MAX_HISTORY_SCAN + 1):
+        previous = _store_evidence(
+            store_dir,
+            _crafted_receipt("ob", "PASS", f"gen-{index}"),
+            previous,
+        )
+    resolved = verify_module.resolve_obligation_evidence(store_dir, "ob")
+    assert resolved["status"] == "overflow"
+    assert resolved["head"] is None
+
+
 def test_missing_projection_rebuilds_from_authority(tmp_path: Path) -> None:
     """Crash-after-admit recovery: vault committed, projection missing."""
     repo = make_fixture_repo(tmp_path / "repo")
