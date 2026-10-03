@@ -239,19 +239,21 @@ def test_receipt_rollback_reuses_store_head_without_executing(tmp_path: Path) ->
     assert repaired is not None and repaired["evidence_id"] == head_id
 
 
-def test_receipt_rollback_without_head_match_reexecutes(tmp_path: Path) -> None:
-    """P-015: stale projection + no matching head evidence forces execution.
+def test_closure_recall_reuses_identical_semantics(tmp_path: Path) -> None:
+    """P-016: A PASS -> B FAIL -> restore A recalls the PASS, not executes.
 
     World restored to A while the Store head is the B FAIL. The file
-    claims the old PASS, but authority says the projection is stale and
-    nothing authoritative matches the current world, so the obligation
-    must execute (historical recall arrives with P-016).
+    claims the old PASS (stale projection, repaired to the head), the
+    head does not match the current world, but vaulted evidence for
+    this exact semantic world exists and is recalled without execution.
+    The projection tracks the chronological head, not the recall.
     """
     repo = make_fixture_repo(tmp_path / "repo")
     verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
     receipts_dir = repo / ".mncs" / "test-receipts"
     path = receipt_path(receipts_dir, "fixture.suite")
     old_bytes = path.read_bytes()
+    old_id = read_receipt(receipts_dir, "fixture.suite")["evidence_id"]
     suite_path = repo / "fv" / "tiny.mncs"
     suite_path.write_text(
         TINY_SUITE.replace("equals_i64(1, 1, 9001)", "equals_i64(2, 1, 9001)"),
@@ -263,12 +265,36 @@ def test_receipt_rollback_without_head_match_reexecutes(tmp_path: Path) -> None:
     path.write_bytes(old_bytes)
     restored = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
     suite = entry_by_id(restored, "fixture.suite")
+    assert suite["action"] == "reused"
+    assert suite["verdict"] == "PASS"
+    assert suite["verdict_source"] == "recalled-closure"
+    assert suite["evidence_id"] == old_id
+    assert suite["transition"] == "recalled"
+    assert restored["stats"]["suite_runs"] == 0
+    assert restored["summary"]["reused_recalled"] == 1
+    assert any("stale" in note or "rollback" in note for note in suite["notes"])
+    assert any("recall" in note for note in suite["notes"])
+    projected = read_receipt(receipts_dir, "fixture.suite")
+    assert projected is not None and projected["evidence_id"] == head_id
+
+
+def test_recall_requires_exact_semantics(tmp_path: Path) -> None:
+    """P-016: A -> B -> A' (one relevant identity differs) must execute."""
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite_path = repo / "fv" / "tiny.mncs"
+    suite_path.write_text(
+        TINY_SUITE.replace("equals_i64(1, 1, 9001)", "equals_i64(2, 1, 9001)"),
+        encoding="utf-8",
+    )
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite_path.write_text(TINY_SUITE + "\n// near-miss comment\n", encoding="utf-8")
+    near = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(near, "fixture.suite")
     assert suite["action"] == "executed"
     assert suite["verdict"] == "PASS"
-    assert restored["stats"]["suite_runs"] == 1
-    assert any("stale" in note or "rollback" in note for note in suite["notes"])
-    stored = json.loads(path.read_text(encoding="utf-8"))
-    assert stored["previous_evidence_id"] == head_id
+    assert near["stats"]["suite_runs"] == 1
+    assert near["summary"]["reused_recalled"] == 0
 
 
 def test_store_unreadable_refuses_cached_reuse(tmp_path: Path) -> None:

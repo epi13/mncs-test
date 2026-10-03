@@ -1448,7 +1448,7 @@ def verify_repository(
                     world["bound"],
                     world["inventory_identities"],
                     world["inventory_truncated"],
-                    world["receipt"],
+                    world["presented"],
                     provider_available,
                 )
             )
@@ -1481,6 +1481,60 @@ def verify_repository(
         if isinstance(item, dict) and isinstance(item.get("identity"), str)
     }
     run_queue = set(coherence.get("run_queue", []))
+
+    # Historical recall: for obligations whose head evidence is stale,
+    # present the newest vaulted evidence for this exact semantic world
+    # (if any) and let native policy verify admission on it. The head
+    # stays the projection target and lineage anchor; recall only
+    # changes which evidence the verdict speaks about.
+    recall_rows: list[dict] = []
+    recall_candidates: dict[str, dict] = {}
+    for identity in row_order:
+        if verdicts.get(identity, {}).get("status") != "stale":
+            continue
+        candidate = find_recall_candidate(measured[identity])
+        if candidate is None:
+            continue
+        try:
+            world = measured[identity]
+            recall_rows.append(
+                build_coherence_row(
+                    world["obligation"],
+                    world["bound"],
+                    world["inventory_identities"],
+                    world["inventory_truncated"],
+                    candidate,
+                    provider_available,
+                )
+            )
+            recall_candidates[identity] = candidate
+        except VerifyError:
+            continue
+    if recall_rows:
+        stats["subprocesses"] += 1
+        stats["coherence_runs"] += 1
+        recall_coherence = evaluate_coherence(
+            recall_rows,
+            mncs=mncs,
+            cwd=repo,
+            environment=base_environment,
+            max_executions=max_executions,
+            timeout_seconds=coherence_timeout,
+        )
+        for item in recall_coherence.get("verdicts", []):
+            if not isinstance(item, dict) or not isinstance(item.get("identity"), str):
+                continue
+            if item.get("status") != "current":
+                continue
+            identity = item["identity"]
+            candidate = recall_candidates.get(identity)
+            if candidate is None:
+                continue
+            world = measured[identity]
+            world["recall"] = candidate
+            world["presented"] = candidate
+            verdicts[identity] = item
+            run_queue.discard(identity)
 
     for identity in row_order:
         world = measured[identity]
@@ -1643,6 +1697,8 @@ def resolve_world_evidence(
     if not admit_store:
         return {
             "receipt": file_receipt,
+            "presented": file_receipt,
+            "recall": None,
             "file_receipt": file_receipt,
             "history": [],
             "authority": {
@@ -1655,6 +1711,8 @@ def resolve_world_evidence(
     authority = resolve_obligation_evidence(store_dir, identity)
     return {
         "receipt": authority["head"],
+        "presented": authority["head"],
+        "recall": None,
         "file_receipt": file_receipt,
         "history": authority["history"],
         "authority": {
@@ -1689,6 +1747,75 @@ def required_selection(world: dict) -> list[str] | None:
         else:
             return None
     return required
+
+
+RECALL_IDENTITIES = (
+    "definition_identity",
+    "subject_identity",
+    "subject_fingerprint",
+    "executor_identity",
+    "invalidation_identity",
+    "toolchain_identity",
+    "inventory_identity",
+    "closure_identity",
+)
+
+
+def semantic_match(candidate_bound: dict, current_bound: dict) -> bool:
+    """Exact semantic equivalence for historical recall candidacy.
+
+    Mirrors the native closure_admits comparison (minus revision and
+    fingerprint, which recall deliberately crosses): every semantic
+    identity equal, both closures trusted, filesets equal. This only
+    SELECTS a candidate to present; native policy still verifies
+    admission on the presented evidence.
+    """
+    if not current_bound.get("closure_trusted") or not candidate_bound.get(
+        "closure_trusted"
+    ):
+        return False
+    if candidate_bound.get("closure_fileset") != current_bound.get("closure_fileset"):
+        return False
+    return all(
+        candidate_bound.get(key) == current_bound.get(key) for key in RECALL_IDENTITIES
+    )
+
+
+def find_recall_candidate(world: dict) -> dict | None:
+    """Find vaulted evidence for this exact semantic world, if any.
+
+    Walks the head-anchored lineage chain (newest first) for an exact
+    semantic match written by this verifier version with a covering
+    selection. Returns None when nothing matches, the chain leaves
+    known history, or the walk exceeds its bound.
+    """
+    head = world.get("receipt")
+    history = world.get("history", [])
+    if head is None or not history:
+        return None
+    required = required_selection(world)
+    if required is None:
+        return None
+    by_id = {item["evidence_id"]: item for item in history}
+    seen = {head["evidence_id"]}
+    current = head.get("previous_evidence_id")
+    steps = 0
+    while current and current not in seen and steps < MAX_HISTORY_SCAN:
+        seen.add(current)
+        steps += 1
+        candidate = by_id.get(current)
+        if candidate is None:
+            return None
+        recorded = candidate.get("selected_test_identities")
+        if (
+            candidate.get("producer") == VERIFY_VERSION
+            and isinstance(recorded, list)
+            and sorted(recorded) == sorted(required)
+            and semantic_match(candidate["bound"], world["bound"])
+        ):
+            return candidate
+        current = candidate.get("previous_evidence_id")
+    return None
 
 
 def bound_diff(world: dict) -> list[str]:
@@ -1831,7 +1958,7 @@ def act_on_verdict(
             f"evidence authority {authority.get('status')}: {authority.get('detail')}"
         )
     if status == "current":
-        receipt = world["receipt"]
+        receipt = world["presented"]
         if receipt is None:  # Native policy trusts evidence we cannot read: re-check.
             entry["notes"].append("current without a readable receipt; treating as unresolved")
             return entry
@@ -1887,7 +2014,19 @@ def act_on_verdict(
         entry["store_generation"] = world.get("authority", {}).get("generation")
         entry["action"] = "would_reuse" if dry_run else "reused"
         entry["verdict"] = receipt["verdict"]
-        if reason == "closure_current":
+        recalled = world.get("recall") is not None
+        if recalled:
+            head = world.get("receipt") or {}
+            entry["notes"].append(
+                f"closure recall: reusing {receipt['evidence_id'][:12]} "
+                f"(verdict {receipt['verdict']}) for identical semantics; "
+                f"latest chronological evidence is {head.get('verdict')} "
+                f"({str(head.get('evidence_id', '?'))[:12]}); not executed now"
+            )
+            entry["verdict_source"] = "recalled-closure"
+            if head.get("verdict") != receipt["verdict"]:
+                entry["transition"] = "recalled"
+        elif reason == "closure_current":
             produced = receipt.get("bound", {}).get("repository_revision", "?")
             current = world["bound"].get("repository_revision", "?")
             entry["notes"].append(
@@ -2118,6 +2257,7 @@ def assemble_report(
         "tests_considered": tests_considered,
         "reused": 0,
         "reused_closure": 0,
+        "reused_recalled": 0,
         "executed": 0,
         "would_reuse": 0,
         "would_execute": 0,
@@ -2137,12 +2277,16 @@ def assemble_report(
             summary["reused"] += 1
             if entry.get("verdict_source") == "reused-closure":
                 summary["reused_closure"] += 1
+            elif entry.get("verdict_source") == "recalled-closure":
+                summary["reused_recalled"] += 1
         elif action == "executed":
             summary["executed"] += 1
         elif action == "would_reuse":
             summary["would_reuse"] += 1
             if entry.get("verdict_source") == "reused-closure":
                 summary["reused_closure"] += 1
+            elif entry.get("verdict_source") == "recalled-closure":
+                summary["reused_recalled"] += 1
         elif action == "would_execute":
             summary["would_execute"] += 1
         elif action == "deferred":
@@ -2205,7 +2349,8 @@ def render_report_text(report: dict) -> str:
     if dry_run:
         lines.append(
             f"  would-reuse: {summary['would_reuse']} "
-            f"({summary['reused_closure']} closure) "
+            f"({summary['reused_closure']} closure, "
+            f"{summary['reused_recalled']} recalled) "
             f"· would-execute: {summary['would_execute']} "
             f"· pass: {summary['pass']} · fail: {summary['fail']} "
             f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "
@@ -2213,7 +2358,8 @@ def render_report_text(report: dict) -> str:
         )
     else:
         lines.append(
-            f"  reused: {summary['reused']} ({summary['reused_closure']} closure) "
+            f"  reused: {summary['reused']} ({summary['reused_closure']} closure, "
+            f"{summary['reused_recalled']} recalled) "
             f"· executed: {summary['executed']} "
             f"· pass: {summary['pass']} · fail: {summary['fail']} "
             f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "

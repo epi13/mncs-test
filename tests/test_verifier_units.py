@@ -17,15 +17,18 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from mncs_test_native import run_native_app, toolchain_cache_dir  # noqa: E402
 from mncs_test_verify import (  # noqa: E402
+    VERIFY_VERSION,
     build_coherence_row,
     evidence_envelope,
     evidence_id_for,
+    find_recall_candidate,
     finish_execution,
     measure_closure,
     obligation_scope,
     parse_evidence_envelope,
     receipt_core,
     run_stamp,
+    semantic_match,
     stdlib_bundle_digest,
     toolchain_identity,
 )
@@ -507,3 +510,62 @@ def test_obligation_scope_is_stable_and_prefixed() -> None:
     assert first == obligation_scope("ob-ev")
     assert first != obligation_scope("ob-other")
     assert first.endswith(b":")
+
+
+def test_semantic_match_ignores_revision_only() -> None:
+    current = _bound(repository_revision="r2", repository_fingerprint="p2")
+    candidate = _bound(repository_revision="r1", repository_fingerprint="p1")
+    assert semantic_match(candidate, current) is True
+    assert semantic_match(_bound(closure_identity="other"), current) is False
+    assert semantic_match(_bound(closure_trusted=False), current) is False
+    assert semantic_match(_bound(closure_fileset="other/1"), current) is False
+    assert semantic_match(_bound(toolchain_identity="other"), current) is False
+    assert semantic_match(_bound(definition_identity="other"), current) is False
+
+
+def _history_evidence(evidence_id: str, bound: dict, previous: str | None) -> dict:
+    return {
+        "evidence_id": evidence_id,
+        "verdict": "PASS",
+        "bound": bound,
+        "producer": VERIFY_VERSION,
+        "selected_test_identities": ["t1"],
+        "previous_evidence_id": previous,
+    }
+
+
+def _recall_world(head: dict, history: list[dict], bound: dict) -> dict:
+    return {
+        "obligation": _obligation(),
+        "bound": bound,
+        "inventory_identities": ["t1"],
+        "receipt": head,
+        "history": history,
+    }
+
+
+def test_find_recall_candidate_walks_chain_newest_first() -> None:
+    world_bound = _bound()
+    old = _history_evidence("old", _bound(), None)
+    mid = _history_evidence("mid", _bound(closure_identity="other"), "old")
+    head = _history_evidence("head", _bound(closure_identity="another"), "mid")
+    world = _recall_world(head, [head, mid, old], world_bound)
+    assert find_recall_candidate(world)["evidence_id"] == "old"
+
+
+def test_find_recall_candidate_rejects_mismatch_and_gaps() -> None:
+    world_bound = _bound()
+    head = _history_evidence("head", _bound(closure_identity="another"), "mid")
+    # No match anywhere on the chain.
+    world = _recall_world(head, [head], world_bound)
+    assert find_recall_candidate(world) is None
+    # Chain leaves known history.
+    orphan = _history_evidence("orphan", _bound(), "missing-parent")
+    world = _recall_world(head, [head, orphan], world_bound)
+    assert find_recall_candidate(world) is None
+    # Producer drift disqualifies even an exact semantic match.
+    stale = _history_evidence("stale", _bound(), None)
+    stale["producer"] = "mncs-test-verify/0.0.0"
+    head2 = _history_evidence("head2", _bound(closure_identity="x"), "stale")
+    world = _recall_world(head2, [head2, stale], world_bound)
+    assert find_recall_candidate(world) is None
