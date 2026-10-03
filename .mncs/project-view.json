@@ -1,0 +1,69 @@
+{
+  "capabilities": [
+    {
+      "contract": "test-provider",
+      "fingerprint_sources": [
+        "native/mncs/test/",
+        "schemas/"
+      ],
+      "invocation": {
+        "kind": "executable",
+        "path": "bin/mncs-test-provider",
+        "toolchain": {
+          "path": "target/release/mncs",
+          "repository": "mncs-language"
+        },
+        "toolchain_env": "MNCS"
+      },
+      "kind": "native-test-provider",
+      "stability": "experimental",
+      "version": "1"
+    }
+  ],
+  "dependencies": [
+    {
+      "contract": "mncs-language.compiler-inventory",
+      "envelope": {
+        "op": "any"
+      },
+      "required": true
+    },
+    {
+      "contract": "ravel.verification-plan",
+      "envelope": {
+        "op": "any"
+      },
+      "required": true
+    },
+    {
+      "contract": "ravel.verification-obligation-plan",
+      "envelope": {
+        "op": "any"
+      },
+      "required": false
+    },
+    {
+      "contract": "mncs-stdlib.stdlib-source",
+      "envelope": {
+        "op": "any"
+      },
+      "evidence_refs": [
+        "native/mncs/test/obligation_selection.mncs",
+        "native/mncs/test/provider.mncs",
+        "native/mncs/test/provider_admission_probe.mncs",
+        "native/mncs/test/provider_failure_probe.mncs",
+        "native/mncs/test/verification_coherence.mncs"
+      ],
+      "required": true,
+      "scope": "native runtime imports; legacy pre-extraction toolchains may bind equivalent language library sources"
+    }
+  ],
+  "entry": [
+    "python3 -m unittest discover -s tests -p test_*.py"
+  ],
+  "purpose": "Native testing, verification, and conformance framework for MNCS and the broader project family: language-owned test declarations executed through the compiler-owned mncs test entrypoint, with native mncs.test.* modules owning assertion, suite, runner-policy, property, and snapshot semantics.",
+  "repository": "mncs-test",
+  "schema_version": "mncs.project-view/1",
+  "source_identity": "sha256:2287aa17045eeffe57c39d3face52943e052b34da469b84524b85ac3fab5cf92",
+  "structure": {}
+}

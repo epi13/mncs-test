@@ -1,6 +1,19 @@
 # mncs-test
 
 <!-- MNCS:generated:begin -->
+## Project entry
+
+Native testing, verification, and conformance framework for MNCS and the broader project family: language-owned test declarations executed through the compiler-owned mncs test entrypoint, with native mncs.test.* modules owning assertion, suite, runner-policy, property, and snapshot semantics.
+
+```bash
+python3 -m unittest discover -s tests -p test_*.py
+```
+
+Declared capabilities (declarations do not establish execution health):
+
+- `test-provider/1` — native-test-provider (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
 <!-- MNCS:generated:end -->
 
 Native testing, verification, and conformance framework for MNCS and the
