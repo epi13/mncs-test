@@ -13,8 +13,8 @@
   "desired_direction": "Vault-indexed closure history: Store answers 'newest verdict for closure C' per obligation; native policy admits a history hit as a distinct reason (closure_recalled) with produced/current revision provenance and a regression/fixed transition against the latest evidence. Bound history depth explicitly.",
   "severity": "minor",
   "disposition": "documented_with_conservative_fallback",
-  "workaround": "Re-execution: always sound, transition labels (regression/fixed) still computed against the latest evidence.",
-  "status": "open",
+  "workaround": "Closed 2026-10-03: head-anchored lineage walk finds the newest vaulted evidence for the exact semantic world; native policy verifies admission on a second coherence pass; recalled reuse is distinct (recalled-closure source, recall note with head context, recalled transition). Projection and lineage stay head-anchored. Regression: test_closure_recall_reuses_identical_semantics, test_recall_requires_exact_semantics.",
+  "status": "closed",
   "relevant_files": [
     "tools/mncs_test_verify.py",
     "native/mncs/test/verification_coherence_v2.mncs"

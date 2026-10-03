@@ -27,8 +27,8 @@ The current campaign records:
 | `MNCS-TEST-P-012` | _pending_ | toolchain cache | cache key collides across debug/release; clear or namespace per toolchain |
 | `MNCS-TEST-P-013` | _pending_ | forge/actions | family proof still invokes legacy `run --manifest`; native envelopes validate |
 | `MNCS-TEST-P-014` | _pending_ | compiler inventory | no resolved module closure; contract requested, host superset stands |
-| `MNCS-TEST-P-015` | _pending_ | test evidence admission | receipt rollback undetected; unreadable Store fails open |
-| `MNCS-TEST-P-016` | _pending_ | test coherence policy | single-evidence policy; no closure-history recall |
+| `MNCS-TEST-P-015` | closed | test evidence admission | vault-head authority; projections repaired; fail-closed outage |
+| `MNCS-TEST-P-016` | closed | test coherence policy | lineage recall with native second-pass admission |
 
 When a pressure is repaired, update both this record and its Commons state,
 add a regression/conformance witness, and remove the workaround before
