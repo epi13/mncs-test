@@ -13,8 +13,8 @@
   "desired_direction": "Bind receipts to a monotonic per-obligation generation (vault-owned counter or hash-chained previous_evidence_id verification against vault history); treat an unreadable vault as UNKNOWN rather than match when the receipt is not freshly executed.",
   "severity": "minor",
   "disposition": "documented_with_conservative_fallback",
-  "workaround": "None: content addressing still rejects tampered cores, and the previous_evidence_id chain records (but does not enforce) lineage.",
-  "status": "open",
+  "workaround": "Closed 2026-10-03: vault-head authority with lineage-chain tips; receipt files are projections repaired Store->file; unreadable authority fails closed (fresh execution, never silent reuse); admit-before-write ordering; --no-store keeps explicit degraded file authority. Regression: test_receipt_rollback_reuses_store_head_without_executing, test_store_unreadable_refuses_cached_reuse, projection-recovery tests.",
+  "status": "closed",
   "relevant_files": [
     "tools/mncs_test_verify.py"
   ],

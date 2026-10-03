@@ -158,10 +158,14 @@ Soundness rules, never violated to look fast:
   proves selection equivalence from wildcard/exact patterns only);
 - verifier upgrades invalidate (the verifier implementation is digested
   into the repository fingerprint);
-- corrupt receipts heal by re-execution; deterministic execution makes
+- corrupt or missing receipt files heal from vault authority (the
+  Store head is re-projected; re-execution happens only when no
+  authoritative evidence matches); deterministic execution makes
   concurrent races converge (the Store reports DUPLICATE, receipts stay
   valid);
-- PASS→FAIL transitions report `REGRESSION`, FAIL→PASS report `FIXED`.
+- PASS→FAIL transitions report `REGRESSION`, FAIL→PASS report `FIXED`;
+  history recall across an intervening different verdict reports a
+  `recalled` transition and never pretends it executed now.
 
 The repository fingerprint binds the revision, MNCS-source status,
 verification manifests, the verifier implementation, outside
@@ -186,6 +190,26 @@ v1 stays frozen for the environment ambient flow. `verify --changed`
 is the affected-test dry run: same measurement and native
 coherence, no execution or writes, reporting `would-reuse` /
 `would-execute` with the moved identities named per obligation.
+
+Evidence authority lives in the Store vault, not the receipt files
+(pressures MNCS-TEST-P-015/P-016, both closed). Each admission is an
+immutable vault object under an obligation-scoped identity carrying
+core + lineage + producer; the head is the lineage-chain tip, with a
+deterministic smallest-id rule for concurrent forks. Receipt files
+are projections repaired Store→file when divergent; unreadable
+authority fails closed (fresh execution, never silent reuse); only
+`--no-store` accepts file authority, explicitly degraded. When the
+head is stale, the host walks the head-anchored chain for the newest
+vaulted evidence matching this exact semantic world and native
+policy verifies admission on a second pass; recalled reuse is
+reported distinctly (`recalled-closure`, recall note, head context).
+
+Policy generations, steady state: v1 (`/1`) serves the environment's
+ambient verification flow and the frozen oracle's compatibility
+baseline (both live); v2 (`/2`) is canonical for provider
+verification (`mncs-test-verify` direct and via `mncs-env test`).
+Result envelopes are identical (`/1`); converging ambient to v2
+needs environment-owned closure measurement and stays future work.
 
 ## Native digest
 
