@@ -32,7 +32,7 @@
           "tests/self_suite.mncs"
         ],
         "library_paths": [
-          "../mncs-language/library"
+          "../mncs-stdlib/library"
         ],
         "declaration_identities": [
           "*"

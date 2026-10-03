@@ -1,0 +1,25 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-012",
+  "title": "run-app cache key collides across toolchain builds",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. The owning layer is mncs-language (branch-active).",
+  "verified_language_profile": "0.18",
+  "target_layer": "toolchain artifact cache",
+  "observed_need": "The native-application cache key must bind the exact compiler build (binary identity), so debug and release toolchains never share a cache entry.",
+  "current_language_behavior": "The cache key binds source, libraries, compiler identity string, inventory, profile, backend, grants, and interface identity. Debug and release builds of the same source report the same nominal identities, so a cache entry written by target/debug/mncs collides with target/release/mncs. Admission then fails closed with 'backend artifact identity does not validate; refusing' instead of recompiling.",
+  "why_insufficient": "Fail-closed is correct, but the collision turns routine mixed-toolchain use (debug for development, release for environment routing) into a hard failure that requires manual cache deletion. The cache cannot distinguish the two producers.",
+  "minimal_reproducer": "Run bin/mncs-test-selection once with MNCS=target/debug/mncs, then invoke mncs.test-obligation-selection/1 through mncs-env (which binds target/release/mncs): the second admission fails until native-applications/.mncs is removed.",
+  "desired_direction": "Fold the compiler binary build identity into the cache key (or namespace the cache root per toolchain), so cross-build reuse becomes a miss, not a refusal.",
+  "severity": "minor",
+  "disposition": "documented_with_mitigation",
+  "workaround": "Delete the descriptor-local cache (now gitignored) when switching toolchains, or set MNCS_NATIVE_APPLICATION_CACHE_DIR per toolchain.",
+  "status": "open",
+  "relevant_files": [
+    "bin/mncs-test-selection",
+    "native-applications/obligation-selection.json"
+  ],
+  "relevant_tests": [
+    "tests/test_obligation_selection.py::test_selection_adapter_routes_to_the_native_kernel"
+  ]
+}

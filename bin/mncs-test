@@ -33,8 +33,22 @@ fi
 if [[ -n "$MNCS_PATH" ]]; then
     LANGUAGE_ROOT="$(cd "$(dirname "$MNCS_PATH")/../.." && pwd)"
     AUTO_LIBRARY_PATH=""
-    if [[ -d "$LANGUAGE_ROOT/library" ]]; then
-        AUTO_LIBRARY_PATH="$LANGUAGE_ROOT/library"
+    # The standard library lives in the mncs-stdlib checkout: an explicit
+    # MNCS_STDLIB_ROOT wins (empty disables stdlib derivation for hermetic
+    # runs), else a mncs-stdlib sibling of the language checkout, else the
+    # legacy in-language tree.
+    STDLIB_LIBRARY=""
+    if [[ -n "${MNCS_STDLIB_ROOT+x}" ]]; then
+        if [[ -n "$MNCS_STDLIB_ROOT" && -d "$MNCS_STDLIB_ROOT/library" ]]; then
+            STDLIB_LIBRARY="$MNCS_STDLIB_ROOT/library"
+        fi
+    elif [[ -d "$LANGUAGE_ROOT/../mncs-stdlib/library" ]]; then
+        STDLIB_LIBRARY="$LANGUAGE_ROOT/../mncs-stdlib/library"
+    elif [[ -d "$LANGUAGE_ROOT/library" ]]; then
+        STDLIB_LIBRARY="$LANGUAGE_ROOT/library"
+    fi
+    if [[ -n "$STDLIB_LIBRARY" ]]; then
+        AUTO_LIBRARY_PATH="$STDLIB_LIBRARY"
     fi
     if [[ -d "$SCRIPT_DIR/../native" ]]; then
         TEST_NATIVE_LIBRARY="$(cd "$SCRIPT_DIR/../native" && pwd)"

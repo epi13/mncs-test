@@ -3102,7 +3102,8 @@ def _coherence_identity_values(obligation: dict[str, Any]) -> list[str]:
     values = [obligation.get("identity", "")]
     values.extend(obligation.get("declared_patterns", []) or [])
     values.extend(obligation.get("inventory_test_identities", []) or [])
-    for section in (obligation.get("current", {}) or {}, obligation.get("evidence", {}) or {}):
+    for section in (obligation.get("current", {}) or {}, obligation.get("evidence", {}) or {},
+                    obligation.get("external_evidence", {}) or {}):
         if isinstance(section, dict):
             values.extend(
                 value for value in section.values() if isinstance(value, str)

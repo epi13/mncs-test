@@ -17,6 +17,14 @@ test addition_is_stable() -> (result: TestResult) {
 }
 ```
 
+Both imports are required. The runner folds results through
+`mncs.test.suite::empty`/`observe` inside the test program's retained
+session, so a suite that omits `use mncs.test.suite;` fails before any
+test executes with `execution target module does not match program`
+(exit 3). That diagnostic names neither the missing import nor the
+remedy; the toolchain should either auto-link the harness or say so
+(pressure MNCS-TEST-P-010).
+
 The minimal manifest names the source/module and policy only:
 
 ```toml
@@ -31,7 +39,7 @@ libraries = ["native"]
 Run and filter through the canonical native entrypoint:
 
 ```bash
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   /path/to/mncs test addition_tests.mncs --filter addition
 ```
 

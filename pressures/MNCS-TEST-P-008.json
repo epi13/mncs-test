@@ -1,0 +1,25 @@
+{
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. File the family counterpart when checkouts reunite.",
+  "current_language_behavior": "mncs-test origin/main c2d9c62 calls contracts.executor_is_external, which exists on MNCS-Commons main (2db2908) but not on older campaign-branch checkouts. The run-app strict admission then fails the whole coherence application with MNE131.",
+  "desired_direction": "Converge back to the single Commons predicate once family checkouts reunite on main; keep mncs-test main green against any checkout carrying the stable ExecutorKind.external_integration variant.",
+  "disposition": "contained_local_predicate",
+  "id": "MNCS-TEST-P-008",
+  "minimal_reproducer": "With MNCS-Commons checked out on campaign/doctor-remediation-contract-20261002 (pre-2db2908), run python3 -m pytest tests/test_verification_coherence.py -q: without the local predicate, run-app admission fails with MNE131 at verification_coherence.mncs evaluate_status.",
+  "observed_need": "mncs-test main must elaborate against whatever Commons checkout the workspace carries, including campaign branches that predate new family predicates.",
+  "relevant_files": [
+    "native/mncs/test/verification_coherence.mncs",
+    "native-applications/test-verification-coherence.json"
+  ],
+  "relevant_tests": [
+    "tests/test_verification_coherence.py"
+  ],
+  "schema_version": "mncs-test.pressure/1",
+  "severity": "major",
+  "status": "open",
+  "target_layer": "family contract skew",
+  "title": "Family predicate skew breaks strict native admission",
+  "verified_language_profile": "0.18",
+  "why_insufficient": "run-app admission fails closed on any unresolvable call target, so one missing family predicate disables the entire coherence policy instead of degrading the single branch that needs it.",
+  "workaround": "Local executor_is_external match on contracts.ExecutorKind.external_integration in verification_coherence.mncs; remove once checkouts reunite."
+}

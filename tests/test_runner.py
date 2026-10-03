@@ -19,6 +19,20 @@ EMBED_LIBRARY = Path(
 )
 LIVE = MNCS.is_file() and os.access(MNCS, os.X_OK)
 
+
+def _stdlib_library() -> Path:
+    """Standard-library tree: explicit root, else family sibling, else legacy."""
+    explicit = os.environ.get("MNCS_STDLIB_ROOT")
+    if explicit:
+        return Path(explicit) / "library"
+    sibling = REPO.parent / "mncs-stdlib"
+    if (sibling / "stdlib-manifest.json").is_file():
+        return sibling / "library"
+    return LANGUAGE / "library"
+
+
+STDLIB_LIBRARY = _stdlib_library()
+
 sys.path.insert(0, str(REPO / "tools"))
 import mncs_test  # noqa: E402
 from family_contract import verification_plan_contract  # noqa: E402
@@ -35,7 +49,7 @@ class RunnerTests(unittest.TestCase):
         )
 
     def live_args(self) -> tuple[str, ...]:
-        arguments = ("--mncs", str(MNCS), "--library", str(LANGUAGE / "library"))
+        arguments = ("--mncs", str(MNCS), "--library", str(STDLIB_LIBRARY))
         if EMBED_LIBRARY.is_file():
             arguments += ("--embed-library", str(EMBED_LIBRARY))
         return arguments
@@ -60,7 +74,7 @@ class RunnerTests(unittest.TestCase):
             "--mncs",
             str(MNCS),
             "--library",
-            str(LANGUAGE / "library"),
+            str(STDLIB_LIBRARY),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         document = json.loads(completed.stdout)
@@ -84,7 +98,7 @@ class RunnerTests(unittest.TestCase):
     def test_compiler_issued_test_identity_from_another_source_is_rejected(self):
         environment = os.environ.copy()
         environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
-            [str(LANGUAGE / "library"), str(REPO / "native"), str(REPO)]
+            [str(STDLIB_LIBRARY), str(REPO / "native"), str(REPO)]
         )
         foreign = subprocess.run(
             [str(MNCS), "declaration-inventory", str(REPO / "tests/fixtures/first_class_failing.mncs")],
@@ -360,7 +374,7 @@ class RunnerTests(unittest.TestCase):
     def test_verification_plan_selects_exact_identity_and_keeps_check_compact(self):
         source = REPO / "tests" / "self_suite.mncs"
         environment = dict(os.environ)
-        environment["MNCS_LIBRARY_PATH"] = str(REPO / "native") + os.pathsep + str(LANGUAGE / "library")
+        environment["MNCS_LIBRARY_PATH"] = str(REPO / "native") + os.pathsep + str(STDLIB_LIBRARY)
         inventory_process = subprocess.run(
             [str(MNCS), "test-inventory", str(source)],
             cwd=REPO,
@@ -591,7 +605,7 @@ class RunnerTests(unittest.TestCase):
             "--artifacts",
             "/tmp/mncs-test-unsupported-unittest-artifacts",
             "--library",
-            str(LANGUAGE / "library"),
+            str(STDLIB_LIBRARY),
         )
         self.assertEqual(completed.returncode, 6, completed.stdout)
         document = json.loads(Path("/tmp/mncs-test-unsupported-unittest-result.json").read_text(encoding="utf-8"))
@@ -605,7 +619,7 @@ class RunnerTests(unittest.TestCase):
             (
                 str(REPO / "native"),
                 str(REPO),
-                str(LANGUAGE / "library"),
+                str(STDLIB_LIBRARY),
                 str(COMMONS / "src" / "mncs_commons" / "mesh"),
             )
         )

@@ -1,0 +1,24 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-013",
+  "title": "Forge/Actions family proof still invokes the legacy manifest runner",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. Owning layers are mncs-forge and mncs-actions (both branch-active).",
+  "verified_language_profile": "0.18",
+  "target_layer": "forge/actions invocation",
+  "observed_need": "Forge-owned execution should invoke the native test path (per-suite `mncs test` with --result/--check-result, the identity-bound provider batch, or mncs-test-verify at obligation granularity) instead of the legacy manifest runner.",
+  "current_language_behavior": "Forge's mncs_development builds `mncs-test run --manifest ... --result ... --check-result ...` invocations and delegates family proof to mncs-actions with a configured runner prefix. The canonical bin/mncs-test deliberately rejects the legacy run/discover/validate-manifest/run-check/replay subcommands (exit 2); only bin/mncs-test-compat (the frozen Python oracle) still serves them.",
+  "why_insufficient": "The native envelopes already satisfy Forge's validators (verified: mncs.test-result/1 carries provider/verdict/tests/run_id, mncs.check-result/1 carries provider/verdict in {PASS,FAIL,UNKNOWN}), so only the invocation shape blocks native Forge-owned execution. mncs-test cannot migrate its consumers unilaterally.",
+  "minimal_reproducer": "Point a Forge/Actions test prefix at bin/mncs-test: the `run --manifest` call exits 2 with 'legacy mncs-test subcommands are compatibility-only'. Point it at bin/mncs-test-compat and the legacy flow works.",
+  "desired_direction": "Move the Actions test runner prefix to a native entry: per-suite `mncs test` (native envelopes already validate), the mncs-test-provider batch for identity-bound execution, or mncs-test-verify for obligation-level runs with receipts and digests.",
+  "severity": "major",
+  "disposition": "documented_upstream_migration",
+  "workaround": "None in mncs-test: the compat adapter remains available for the legacy flow, and the native envelopes are validated as Forge-consumable.",
+  "status": "open",
+  "relevant_files": [
+    "bin/mncs-test",
+    "bin/mncs-test-compat",
+    "bin/mncs-test-verify"
+  ],
+  "relevant_tests": []
+}

@@ -7,7 +7,7 @@
   "profile": "0.18",
   "interface_identity": "ac4e8b2c2aa8febb75d80c324067803392d1d4c1e88b8fc9fb20f6d99df45e38",
   "libraries": [
-    "../../mncs-language/library",
+    "../../mncs-stdlib/library",
     "../native",
     ".."
   ],

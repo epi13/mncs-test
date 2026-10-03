@@ -18,6 +18,20 @@ LANGUAGE_ROOT = ROOT.parent / "mncs-language"
 COMMONS_ROOT = ROOT.parent / "MNCS-Commons"
 MNCS = Path(os.environ.get("MNCS_BINARY", LANGUAGE_ROOT / "target/debug/mncs"))
 
+
+def _stdlib_library() -> Path:
+    """Standard-library tree: explicit root, else family sibling, else legacy."""
+    explicit = os.environ.get("MNCS_STDLIB_ROOT")
+    if explicit:
+        return Path(explicit) / "library"
+    sibling = ROOT.parent / "mncs-stdlib"
+    if (sibling / "stdlib-manifest.json").is_file():
+        return sibling / "library"
+    return LANGUAGE_ROOT / "library"
+
+
+STDLIB_LIBRARY = _stdlib_library()
+
 CURRENT = {
     "definition_identity": "def-1",
     "subject_identity": "subj-1",
@@ -50,7 +64,7 @@ def compiler_environment() -> dict[str, str]:
     environment = dict(os.environ)
     environment["MNCS_LIBRARY_PATH"] = ":".join(
         [
-            str(LANGUAGE_ROOT / "library"),
+            str(STDLIB_LIBRARY),
             str(COMMONS_ROOT / "src/mncs_commons/mesh"),
             str(ROOT / "native"),
             str(ROOT),
@@ -79,12 +93,22 @@ def evidence_for(current: dict[str, str], verdict: str = "PASS", evidence_id: st
     return evidence
 
 
+EXTERNAL_EMPTY = {
+    "obligation": "",
+    "subject_digest": "",
+    "verdict": "UNKNOWN",
+    "evidence_id": "",
+}
+
+
 def obligation(identity: str, current: dict[str, str], **overrides) -> dict:
     item: dict = {
         "identity": identity,
         "lifecycle": "permanent",
         "executor_kind": "native_first_class_test",
         "runnable_native": True,
+        "external_evidence_present": False,
+        "external_evidence": dict(EXTERNAL_EMPTY),
         "current": dict(current),
         "declared_patterns": ["*"],
         "inventory_test_identities": ["t1"],
@@ -96,6 +120,12 @@ def obligation(identity: str, current: dict[str, str], **overrides) -> dict:
     }
     item.update(overrides)
     return item
+
+
+def external_admission(identity: str, verdict: str = "PASS",
+                       evidence_id: str = "ext-1") -> dict:
+    return {"obligation": identity, "subject_digest": "sha256:subject",
+            "verdict": verdict, "evidence_id": evidence_id}
 
 
 def evaluate(obligations: list[dict], max_executions: int = 8) -> dict:
@@ -186,6 +216,67 @@ def test_exclusion_matrix_never_queues() -> None:
     assert got["ob-noprov"] == ("escalation_required", "provider_unavailable")
     assert got["ob-unres"] == ("selection_unresolved", "selection_unresolved")
     assert got["ob-trunc"] == ("selection_unresolved", "selection_unresolved")
+    assert result["run_queue"] == []
+
+
+def test_bound_external_evidence_satisfies_external_obligation() -> None:
+    result = evaluate(
+        [
+            obligation(
+                "ob-ext",
+                CURRENT,
+                executor_kind="external_integration",
+                runnable_native=False,
+                external_evidence_present=True,
+                external_evidence=external_admission("ob-ext", verdict="PASS"),
+            ),
+        ]
+    )
+    (verdict,) = result["verdicts"]
+    assert verdict["status"] == "current"
+    assert verdict["reason"] == "evidence_current"
+    assert verdict["verdict_known"] is True
+    assert verdict["verdict"] == "PASS"
+    assert verdict["evidence_id"] == "ext-1"
+    assert result["run_queue"] == []
+
+
+def test_external_fail_is_current_knowledge() -> None:
+    result = evaluate(
+        [
+            obligation(
+                "ob-ext",
+                CURRENT,
+                executor_kind="external_integration",
+                runnable_native=False,
+                external_evidence_present=True,
+                external_evidence=external_admission("ob-ext", verdict="FAIL"),
+            ),
+        ]
+    )
+    (verdict,) = result["verdicts"]
+    assert verdict["status"] == "current"
+    assert verdict["verdict"] == "FAIL"
+    assert result["summary"]["failed"] == 1
+    assert result["run_queue"] == []
+
+
+def test_misbound_external_evidence_never_satisfies() -> None:
+    result = evaluate(
+        [
+            obligation(
+                "ob-ext",
+                CURRENT,
+                executor_kind="external_integration",
+                runnable_native=False,
+                external_evidence_present=True,
+                external_evidence=external_admission("ob-other", verdict="PASS"),
+            ),
+        ]
+    )
+    (verdict,) = result["verdicts"]
+    assert verdict["status"] == "not_selected"
+    assert verdict["reason"] == "executor_not_runnable"
     assert result["run_queue"] == []
 
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-010",
+  "title": "Unexported harness link fails with an internal execution error",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. The owning layer is mncs-language (branch-active, stdlib extraction).",
+  "verified_language_profile": "0.18",
+  "target_layer": "toolchain test entrypoint",
+  "observed_need": "Every `mncs test` source must `use mncs.test.suite`, otherwise the retained-session suite initializer fails. A missing import should be a precise diagnostic, or the harness should link automatically.",
+  "current_language_behavior": "`mncs test` invokes mncs.test.suite::empty/observe inside the test program's retained session. A suite that imports only mncs.test.assertions fails with `error: native suite initializer did not return SuiteSummary: CallOutput { status: \"invalid_request\", ... failure_reason: Some(\"execution target module does not match program\") ... }` (exit 3), naming neither the missing import nor the remedy.",
+  "why_insufficient": "The failure is a Rust-debug dump of an internal CallOutput. New suite authors cannot infer the `use mncs.test.suite` requirement from it; agents must escape to toolchain source to understand a one-line fix.",
+  "minimal_reproducer": "Compile and run a two-test suite importing only mncs.test.assertions (see /tmp/sparktest-lib/sparktest/fail_suite.mncs during spark-test run): `mncs test` exits 3 with 'execution target module does not match program'; adding `use mncs.test.suite;` makes it pass.",
+  "desired_direction": "Either the toolchain auto-links the harness modules into the test session, or it emits a targeted diagnostic naming the missing `use mncs.test.suite` import.",
+  "severity": "major",
+  "disposition": "documented_with_mitigation",
+  "workaround": "docs/writing-tests.md now states the `use mncs.test.suite` requirement; all shipped suites import it. No mncs-test-side code change can fix the diagnostic quality.",
+  "status": "open",
+  "relevant_files": [
+    "docs/writing-tests.md",
+    "tests/self_suite.mncs"
+  ],
+  "relevant_tests": []
+}

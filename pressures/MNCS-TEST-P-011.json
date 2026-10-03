@@ -1,0 +1,25 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-011",
+  "title": "Toolchain component skew breaks embed consumers silently",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. The owning layer is mncs-language build/packaging (branch-active).",
+  "verified_language_profile": "0.18",
+  "target_layer": "toolchain packaging",
+  "observed_need": "The `mncs` binary and libmncs_embed.so must be built and versioned together; a refreshed binary with a stale embed library must fail with a component-skew diagnostic, not an AttributeError.",
+  "current_language_behavior": "The workspace carried a current `mncs` binary (Oct 1) with a stale libmncs_embed.so (Sep 24). ctypes consumers failed with `undefined symbol: mncs_session_callable_bindings`, which reads as a source-level API break rather than a stale artifact. Rebuilding the embed package fixed it with no source change.",
+  "why_insufficient": "Nothing binds the two artifacts: no version gate, no build receipt, and `cargo build -p mncs-embed` freshness depends on which packages the last builder happened to compile.",
+  "minimal_reproducer": "At spark-test baseline, tests/test_runner.py::test_first_class_failing_assertion_uses_native_suite_fold errored with the undefined-symbol AttributeError; after rebuilding libmncs_embed.so the full 22-test suite passed unmodified.",
+  "desired_direction": "Version-gate the embed ABI (build receipts or a symbol/version handshake at session open) and document the canonical full-toolchain build so partial rebuilds cannot ship skew.",
+  "severity": "minor",
+  "disposition": "documented_upstream_defect",
+  "workaround": "Rebuild libmncs_embed.so from the same checkout before running the embed-backed suite. No mncs-test source change needed or made.",
+  "status": "open",
+  "relevant_files": [
+    "tools/mncs_test.py",
+    "tests/test_runner.py"
+  ],
+  "relevant_tests": [
+    "tests/test_runner.py"
+  ]
+}

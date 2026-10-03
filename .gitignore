@@ -5,3 +5,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+# run-app compiled-artifact cache (MNCS_NATIVE_APPLICATION_CACHE_DIR override
+# available for hermetic runs).
+native-applications/.mncs/
+# Native-transport scratch dirs (removed on clean exit; crash residue only).
+.mncs-test-app-*/
+.mncs-test-coherence-*/
+.mncs-test-obligation-selection-*/
+.mncs-test-digest-*/

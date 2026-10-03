@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Canonical executable adapter for provider-owned family verification.
+#
+# Usage: mncs-test-verify [--repo DIR] [--mncs PATH] [--format text|json] ...
+#
+# Evaluates one repository's verification obligations the native way:
+# measure, native coherence selection, identity-bound execution, native
+# digest, content-addressed receipts, Store vault. See
+# tools/mncs_test_verify.py for the transport; policy lives in
+# mncs.test.verification_coherence and mncs.test.digest.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/../tools/mncs_test_verify.py" "$@"

@@ -1,0 +1,23 @@
+{
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. The owning layer is mncs-doctor (also branch-active).",
+  "current_language_behavior": "mncs-doctor release binary reports DOC102 'unknown profile 0.18' for every 0.18 MNCS source and fails header-health, version-drift, and migration-availability checks, while the reference toolchain accepts 0.18 as current and all native tests pass under it.",
+  "desired_direction": "Doctor's profile registry tracks the reference toolchain profile (0.18 current); DOC102 fires only for genuinely unknown profiles.",
+  "disposition": "documented_upstream_defect",
+  "id": "MNCS-TEST-P-009",
+  "minimal_reproducer": "Run mncs-doctor doctor --root mncs-test --json: 9x DOC102 'unknown profile 0.18' findings on files the toolchain compiles and executes successfully.",
+  "observed_need": "Doctor health gates must agree with the toolchain about the current language profile, otherwise `doctor --check` can never pass on a healthy native repository.",
+  "relevant_files": [
+    "native/mncs/test/*.mncs",
+    "tests/self_suite.mncs"
+  ],
+  "relevant_tests": [],
+  "schema_version": "mncs-test.pressure/1",
+  "severity": "major",
+  "status": "open",
+  "target_layer": "doctor profile registry",
+  "title": "Doctor profile registry predates current toolchain profile",
+  "verified_language_profile": "0.18",
+  "why_insufficient": "Downgrading mncs-test sources to an older profile to satisfy Doctor would break the reference toolchain, which is authoritative for profile currency.",
+  "workaround": "None in mncs-test: DOC102 findings on 0.18 sources are ignored as Doctor-side staleness until the registry is updated."
+}

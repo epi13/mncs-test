@@ -31,12 +31,12 @@ self-suite from this repository:
 
 ```bash
 MNCS=/path/to/mncs-language/target/debug/mncs
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   "$MNCS" test tests/self_suite.mncs --format text
 
 # Transparent native packaging adapter.
 MNCS="$MNCS" \
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   ./bin/mncs-test
 ```
 
@@ -45,6 +45,42 @@ The example test module contains arithmetic and boolean assertions, a real
 snapshot witness, an explicit skip, and a native no-fallback policy check. The
 successful run is `6` passed and `1` skipped. Machine consumers should use the
 default JSON output or an explicitly requested `--check-result` artifact.
+
+## Family verification
+
+`bin/mncs-test-verify` evaluates one repository's verification obligations
+the native way and reports one compact digest:
+
+```bash
+./bin/mncs-test-verify --repo . --format text
+```
+
+```text
+mncs-test verify: mncs-test @ 157903ab14d7 (3 obligations, 7 tests considered) -> INCOMPLETE
+  reused: 1 · executed: 0 · pass: 1 · fail: 0 · unknown: 2 ...
+  [reused] mncs-test.identity-bound-provider-execution: PASS (reused)
+  ...
+```
+
+The host measures the world (git, content digests, compiler
+`test-inventory` without execution); the native coherence policy decides
+current/queued/deferred/excluded; queued native suites execute
+identity-bound through `mncs test`; the native digest renders each
+outcome; receipts bind world to verdict content-addressed and atomically;
+and the repo-local Store vaults the timeless evidence core. Unmeasurable
+is UNKNOWN (never queued blindly, never green); only single-source
+native obligations execute; a recorded FAIL stays a FAIL; selection
+changes re-execute. Exit codes are `0` pass, `1` fail, `3` incomplete,
+`2` harness error.
+
+From an entered MNCS session the same operation is one command:
+
+```bash
+mncs-env test <session> --checkout mncs-test
+```
+
+The invocation is routed through the session's bound
+`mncs.test-verify/1` capability and recorded in the session store.
 
 ## Native test surface
 
@@ -224,14 +260,19 @@ The survey and disposition of pre-existing host-language tests is in
 ## Development
 
 ```bash
-python3 -m py_compile tools/mncs_test.py
+python3 -m py_compile tools/mncs_test.py tools/mncs_test_verify.py \
+  tools/mncs_test_digest.py tools/mncs_test_native.py
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m pytest tests/test_obligation_selection.py \
+  tests/test_verification_coherence.py tests/test_digest.py \
+  tests/test_verify.py -q
 MNCS=/path/to/mncs-language/target/debug/mncs
-MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-language/library" \
+MNCS_LIBRARY_PATH="$(pwd)/native:/path/to/mncs-stdlib/library" \
   "$MNCS" test tests/self_suite.mncs --format text
+./bin/mncs-test-verify --repo . --format text
 
 # Explicit compatibility/oracle validation only.
-./bin/mncs-test-compat run --mncs "$MNCS" --library /path/to/mncs-language/library --format text
+./bin/mncs-test-compat run --mncs "$MNCS" --library /path/to/mncs-stdlib/library --format text
 ```
 
 Keep native semantics in MNCS and update the local/Commons pressure record
