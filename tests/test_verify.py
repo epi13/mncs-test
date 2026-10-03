@@ -244,3 +244,54 @@ def test_cli_adapter_reports_compactly(tmp_path: Path) -> None:
     )
     assert warm.returncode == 3
     assert "[reused] fixture.suite: PASS (reused)" in warm.stdout
+
+
+def test_required_selection_proves_only_exact_matches(tmp_path: Path) -> None:
+    from mncs_test_verify import required_selection
+
+    def world(patterns, inventory):
+        return {
+            "obligation": {"executor": {"declaration_identities": patterns}},
+            "inventory_identities": inventory,
+        }
+
+    assert required_selection(world(["*"], ["a", "b"])) == ["a", "b"]
+    assert required_selection(world(["a"], ["a", "b"])) == ["a"]
+    assert required_selection(world(["b", "a"], ["a", "b"])) == ["b", "a"]
+    # Unprovable patterns refuse: substrings, globs, and unknown identities.
+    assert required_selection(world(["a*"], ["a", "b"])) is None
+    assert required_selection(world([""], ["a", "b"])) is None
+    assert required_selection(world(["c"], ["a", "b"])) is None
+    assert required_selection(world(["*", "c"], ["a", "b"])) == ["a", "b"]
+
+
+def test_evidence_identity_is_stable_over_run_anchored_fields(tmp_path: Path) -> None:
+    from mncs_test_verify import evidence_id_for, receipt_core, write_receipt, read_receipt
+
+    receipts = tmp_path / "receipts"
+    base = {
+        "schema_version": "mncs.test-receipt/1",
+        "obligation_identity": "ob",
+        "verdict": "PASS",
+        "bound": {"definition_identity": "d"},
+        "verifier_identity": "v",
+        "selected_test_identities": ["t"],
+        "digest": {"summary": {"verdict": "PASS"}},
+        "result_sha256": "r",
+    }
+    first = dict(base, recorded_at="t1", artifact_dir="a1", producer="p")
+    first["evidence_id"] = evidence_id_for(receipt_core(first))
+    write_receipt(receipts, first)
+    assert read_receipt(receipts, "ob") is not None
+    # Same core, different run anchoring: identical evidence, still valid.
+    second = dict(base, recorded_at="t2", artifact_dir="a2", producer="p")
+    second["evidence_id"] = evidence_id_for(receipt_core(second))
+    assert second["evidence_id"] == first["evidence_id"]
+    write_receipt(receipts, second)
+    assert read_receipt(receipts, "ob") is not None
+    # A tampered verdict invalidates the receipt without touching the bound world.
+    tampered = dict(second, verdict="FAIL")
+    assert read_receipt(receipts, "ob") is not None  # file still holds `second`
+    tampered["evidence_id"] = second["evidence_id"]
+    write_receipt(receipts, tampered)
+    assert read_receipt(receipts, "ob") is None
