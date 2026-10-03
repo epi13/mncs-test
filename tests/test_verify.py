@@ -153,7 +153,8 @@ def test_cold_executes_warm_reuses_irrelevant_preserves(tmp_path: Path) -> None:
     assert suite["verdict"] == "PASS"
     assert warm["summary"]["executed"] == 0
     assert warm["stats"]["suite_runs"] == 0
-    assert any("store object matches" in note for note in suite["notes"])
+    assert suite.get("store_generation") is not None
+    assert not any("stale" in note or "rollback" in note for note in suite["notes"])
 
     with (repo / "README.md").open("a", encoding="utf-8") as stream:
         stream.write("\nAn unrelated documentation change.\n")
@@ -202,6 +203,92 @@ def test_committed_relevant_change_reruns(tmp_path: Path) -> None:
     assert suite["action"] == "executed"
     assert suite["verdict"] == "FAIL"
     assert suite["transition"] == "regression"
+
+
+def test_receipt_rollback_reuses_store_head_without_executing(tmp_path: Path) -> None:
+    """P-015: a restored old receipt must not roll back authoritative knowledge.
+
+    World is at B (broken suite). The file projection is rolled back to
+    the old PASS evidence, but the Store head is the newer FAIL. The
+    system must reuse the authoritative FAIL head without executing and
+    repair the file projection.
+    """
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    receipts_dir = repo / ".mncs" / "test-receipts"
+    path = receipt_path(receipts_dir, "fixture.suite")
+    old_bytes = path.read_bytes()
+    old_id = read_receipt(receipts_dir, "fixture.suite")["evidence_id"]
+    suite_path = repo / "fv" / "tiny.mncs"
+    suite_path.write_text(
+        TINY_SUITE.replace("equals_i64(1, 1, 9001)", "equals_i64(2, 1, 9001)"),
+        encoding="utf-8",
+    )
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    head_id = read_receipt(receipts_dir, "fixture.suite")["evidence_id"]
+    assert head_id != old_id
+    # Rollback attack: restore the older valid receipt bytes.
+    path.write_bytes(old_bytes)
+    assert read_receipt(receipts_dir, "fixture.suite")["evidence_id"] == old_id
+    rolled = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(rolled, "fixture.suite")
+    assert suite["verdict"] == "FAIL"
+    assert rolled["stats"]["suite_runs"] == 0
+    assert any("stale" in note or "rollback" in note for note in suite["notes"])
+    repaired = read_receipt(receipts_dir, "fixture.suite")
+    assert repaired is not None and repaired["evidence_id"] == head_id
+
+
+def test_receipt_rollback_without_head_match_reexecutes(tmp_path: Path) -> None:
+    """P-015: stale projection + no matching head evidence forces execution.
+
+    World restored to A while the Store head is the B FAIL. The file
+    claims the old PASS, but authority says the projection is stale and
+    nothing authoritative matches the current world, so the obligation
+    must execute (historical recall arrives with P-016).
+    """
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    receipts_dir = repo / ".mncs" / "test-receipts"
+    path = receipt_path(receipts_dir, "fixture.suite")
+    old_bytes = path.read_bytes()
+    suite_path = repo / "fv" / "tiny.mncs"
+    suite_path.write_text(
+        TINY_SUITE.replace("equals_i64(1, 1, 9001)", "equals_i64(2, 1, 9001)"),
+        encoding="utf-8",
+    )
+    regressed = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    head_id = entry_by_id(regressed, "fixture.suite")["evidence_id"]
+    suite_path.write_text(TINY_SUITE, encoding="utf-8")
+    path.write_bytes(old_bytes)
+    restored = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(restored, "fixture.suite")
+    assert suite["action"] == "executed"
+    assert suite["verdict"] == "PASS"
+    assert restored["stats"]["suite_runs"] == 1
+    assert any("stale" in note or "rollback" in note for note in suite["notes"])
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["previous_evidence_id"] == head_id
+
+
+def test_store_unreadable_refuses_cached_reuse(tmp_path: Path) -> None:
+    """P-015: an unreadable Store never silently approves cached reuse."""
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    warm = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    assert entry_by_id(warm, "fixture.suite")["action"] == "reused"
+    store_dir = repo / ".mncs" / "test-store"
+    import shutil as _shutil
+
+    _shutil.rmtree(store_dir)
+    store_dir.write_text("not a store", encoding="utf-8")
+    try:
+        outage = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    finally:
+        store_dir.unlink()
+    suite = entry_by_id(outage, "fixture.suite")
+    assert suite["action"] != "reused"
+    assert any("authority" in note or "Store" in note or "store" in note for note in suite["notes"])
 
 
 def test_changed_reports_affected_without_executing(tmp_path: Path) -> None:
@@ -261,17 +348,39 @@ def test_relevant_change_regresses_then_fixes(tmp_path: Path) -> None:
     assert suite["transition"] == "fixed"
 
 
-def test_corrupt_receipt_heals_by_reexecution(tmp_path: Path) -> None:
+def test_corrupt_projection_heals_from_authority(tmp_path: Path) -> None:
     repo = make_fixture_repo(tmp_path / "repo")
     verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
-    path = receipt_path(repo / ".mncs" / "test-receipts", "fixture.suite")
-    assert read_receipt(repo / ".mncs" / "test-receipts", "fixture.suite") is not None
+    receipts_dir = repo / ".mncs" / "test-receipts"
+    path = receipt_path(receipts_dir, "fixture.suite")
+    head_id = read_receipt(receipts_dir, "fixture.suite")["evidence_id"]
     path.write_text("{corrupt", encoding="utf-8")
     healed = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
     suite = entry_by_id(healed, "fixture.suite")
-    assert suite["action"] == "executed"
+    assert suite["action"] == "reused"
     assert suite["verdict"] == "PASS"
-    assert read_receipt(repo / ".mncs" / "test-receipts", "fixture.suite") is not None
+    assert healed["stats"]["suite_runs"] == 0
+    assert any("rebuilt" in note or "repaired" in note for note in suite["notes"])
+    repaired = read_receipt(receipts_dir, "fixture.suite")
+    assert repaired is not None and repaired["evidence_id"] == head_id
+
+
+def test_missing_projection_rebuilds_from_authority(tmp_path: Path) -> None:
+    """Crash-after-admit recovery: vault committed, projection missing."""
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    receipts_dir = repo / ".mncs" / "test-receipts"
+    path = receipt_path(receipts_dir, "fixture.suite")
+    head_id = read_receipt(receipts_dir, "fixture.suite")["evidence_id"]
+    path.unlink()
+    healed = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(healed, "fixture.suite")
+    assert suite["action"] == "reused"
+    assert suite["verdict"] == "PASS"
+    assert healed["stats"]["suite_runs"] == 0
+    assert any("rebuilt" in note for note in suite["notes"])
+    rebuilt = read_receipt(receipts_dir, "fixture.suite")
+    assert rebuilt is not None and rebuilt["evidence_id"] == head_id
 
 
 def test_concurrent_cold_runs_converge_without_corruption(tmp_path: Path) -> None:

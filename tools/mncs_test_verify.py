@@ -73,6 +73,8 @@ COHERENCE_REQUEST_SCHEMA_V2 = "mncs.test-verification-coherence-request/2"
 RECEIPT_SCHEMA = "mncs.test-receipt/1"
 REPORT_SCHEMA = "mncs.test-verify-report/1"
 STORE_RECEIPT_SCHEMA = b"mncs.test-receipt/1"
+EVIDENCE_ENVELOPE_SCHEMA = "mncs.test-evidence/1"
+MAX_HISTORY_SCAN = 64
 
 MAX_OBLIGATIONS = 32
 MAX_IDENTITIES = 64
@@ -791,6 +793,79 @@ def evidence_id_for(core: dict) -> str:
     return sha256_hex(canonical_json(core))
 
 
+def obligation_scope(identity: str) -> bytes:
+    """Store identity prefix scoping one obligation's evidence history."""
+    return f"{sha256_hex(identity.encode())[:16]}:".encode()
+
+
+def evidence_envelope(receipt: dict, previous_evidence_id: str | None) -> bytes:
+    """Pack the vault payload: timeless core plus authority lineage.
+
+    The evidence_id still hashes the core alone, so file receipts and
+    vault objects name evidence identically; lineage and producer ride
+    alongside for head resolution and freshness checks.
+    """
+    return canonical_json(
+        {
+            "schema_version": EVIDENCE_ENVELOPE_SCHEMA,
+            "core": receipt_core(receipt),
+            "previous_evidence_id": previous_evidence_id,
+            "producer": receipt.get("producer"),
+        }
+    )
+
+
+def parse_evidence_envelope(
+    payload: bytes, obligation_identity: str, evidence_id: str
+) -> dict | None:
+    """Validate one vault object into a receipt-shaped evidence dict.
+
+    Returns None for anything malformed or mis-bound: callers treat
+    that as unavailable authority, never as reusable evidence.
+    """
+    try:
+        envelope = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    if envelope.get("schema_version") != EVIDENCE_ENVELOPE_SCHEMA:
+        return None
+    core = envelope.get("core")
+    if not isinstance(core, dict):
+        return None
+    if core.get("obligation_identity") != obligation_identity:
+        return None
+    if core.get("verdict") not in EVIDENCE_VERDICTS:
+        return None
+    if not isinstance(core.get("bound"), dict) or not isinstance(core.get("digest"), dict):
+        return None
+    if not isinstance(core.get("verifier_identity"), str):
+        return None
+    if not isinstance(core.get("selected_test_identities"), list):
+        return None
+    if not isinstance(core.get("result_sha256"), str):
+        return None
+    if evidence_id_for(core) != evidence_id:
+        return None
+    previous = envelope.get("previous_evidence_id")
+    if previous is not None and not isinstance(previous, str):
+        return None
+    return {
+        "schema_version": RECEIPT_SCHEMA,
+        "obligation_identity": obligation_identity,
+        "verdict": core["verdict"],
+        "bound": core["bound"],
+        "verifier_identity": core.get("verifier_identity"),
+        "selected_test_identities": core.get("selected_test_identities"),
+        "digest": core.get("digest"),
+        "result_sha256": core.get("result_sha256"),
+        "evidence_id": evidence_id,
+        "previous_evidence_id": previous,
+        "producer": envelope.get("producer"),
+    }
+
+
 def read_receipt(receipts_dir: Path, identity: str) -> dict | None:
     """Read one receipt; corrupt or foreign receipts are ignored (re-execute)."""
     path = receipt_path(receipts_dir, identity)
@@ -857,20 +932,23 @@ def admit_receipt_to_store(
     relations: list[bytes],
     provenance: list[bytes],
 ) -> dict:
-    """Admit one receipt to the repo-local Store with CAS retries."""
+    """Admit one receipt to the repo-local Store with CAS retries.
+
+    The domain identity scopes the immutable evidence object under its
+    obligation, so each obligation's history is a bounded prefix scan
+    and the newest generation among the matches is the authoritative
+    head. Identical evidence re-admits as DUPLICATE.
+    """
     outcome: dict = {"status": "skipped", "detail": None, "generation": None}
     loaded, reason = load_store_api()
     if loaded is None:
         outcome["detail"] = reason
         return outcome
     EmbeddedStore, StoreError, StoreResultCode = loaded
-    # Content-derived domain identity over the timeless core: each
-    # distinct evidence core is its own immutable object, so identical
-    # evidence re-admits as DUPLICATE and re-execution never rebinds an
-    # identity (which the Store correctly refuses). File receipts are the
-    # mutable obligation -> evidence_id index; the Store is the vault.
-    domain_identity = receipt["evidence_id"].encode()
-    payload = canonical_json(receipt_core(receipt))
+    domain_identity = obligation_scope(receipt["obligation_identity"]) + receipt[
+        "evidence_id"
+    ].encode("ascii")
+    payload = evidence_envelope(receipt, receipt.get("previous_evidence_id"))
     descriptor = canonical_json(receipt.get("digest", {}))
     try:
         store = EmbeddedStore(store_dir)
@@ -915,28 +993,101 @@ def admit_receipt_to_store(
             pass
 
 
-def verify_receipt_in_store(store_dir: Path, receipt: dict) -> tuple[bool, str]:
-    """Confirm the Store holds the same receipt bytes (mismatch is conflict)."""
+def resolve_obligation_evidence(store_dir: Path, identity: str) -> dict:
+    """Resolve authoritative evidence for one obligation from the Store.
+
+    Returns {"status", "detail", "head", "history", "generation"} where
+    status is one of:
+    - "ok": head (maybe None) and bounded history are authoritative;
+    - "empty": no vault exists yet, so no evidence was ever admitted;
+    - "unavailable": authority cannot be read (fail closed, never reuse);
+    - "overflow": history exceeds the scan bound (fail closed on reuse).
+
+    The head is the newest generation among the obligation's immutable
+    evidence publications. Local receipt files are projections of this
+    authority, never the authority itself.
+    """
+    resolved: dict = {
+        "status": "unavailable",
+        "detail": None,
+        "head": None,
+        "history": [],
+        "generation": None,
+    }
+    if not store_dir.is_dir():
+        if store_dir.exists():
+            resolved["detail"] = "store path is not a directory"
+            return resolved
+        resolved["status"] = "empty"
+        resolved["detail"] = "no vault yet"
+        return resolved
     loaded, reason = load_store_api()
     if loaded is None:
-        return True, f"store unavailable: {reason}"
-    EmbeddedStore, StoreError, _codes = loaded
+        resolved["detail"] = reason
+        return resolved
+    EmbeddedStore, _StoreError, _codes = loaded
     try:
         store = EmbeddedStore(store_dir, read_only=True)
     except Exception as error:
-        return True, f"store open failed: {error}"
+        resolved["detail"] = f"store open failed: {error}"
+        return resolved
     try:
         try:
-            stored = store.get_bound_object(
-                STORE_RECEIPT_SCHEMA, receipt["evidence_id"].encode()
-            )
-        except StoreError:
-            return True, "no store object yet"
+            generation = store.current_generation
+            found = store.find_bound_objects(STORE_RECEIPT_SCHEMA, obligation_scope(identity))
         except Exception as error:
-            return True, f"store read failed: {error}"
-        if stored.payload != canonical_json(receipt_core(receipt)):
-            return False, "store object differs from the file receipt"
-        return True, "store object matches"
+            resolved["detail"] = f"store read failed: {error}"
+            return resolved
+        if len(found) > MAX_HISTORY_SCAN:
+            resolved["status"] = "overflow"
+            resolved["detail"] = (
+                f"obligation history exceeds the scan bound of {MAX_HISTORY_SCAN}"
+            )
+            resolved["generation"] = generation
+            return resolved
+        history: list[dict] = []
+        for stored in found:
+            try:
+                suffix = stored.domain_identity.decode("ascii")
+            except UnicodeDecodeError:
+                resolved["detail"] = "vault holds a malformed evidence identity"
+                return resolved
+            evidence_id = suffix[len(obligation_scope(identity).decode("ascii")):]
+            parsed = parse_evidence_envelope(stored.payload, identity, evidence_id)
+            if parsed is None:
+                resolved["detail"] = "vault holds malformed evidence"
+                return resolved
+            history.append(parsed)
+        # Head is the lineage-chain tip: the evidence no other admitted
+        # evidence points to. (Store projections stamp every object with
+        # the projection generation, so per-object commit order is not
+        # available cheaply; the previous_evidence_id chain is the
+        # ordering the test layer owns.) Concurrent divergent evidence
+        # forks the chain; the deterministic smallest-id tip wins and
+        # the fork is reported, so independent verifiers converge.
+        pointed = {item.get("previous_evidence_id") for item in history}
+        tips = sorted(
+            (item for item in history if item["evidence_id"] not in pointed),
+            key=lambda item: item["evidence_id"],
+        )
+        if not tips and history:
+            resolved["detail"] = "evidence lineage is cyclic; refusing authority"
+            return resolved
+        head = tips[0] if tips else None
+        resolved["status"] = "ok"
+        if not history:
+            resolved["detail"] = "no evidence admitted yet"
+        elif len(tips) > 1:
+            resolved["detail"] = (
+                f"history fork: {len(tips)} chain tips; "
+                f"using {head['evidence_id'][:12]} deterministically"
+            )
+        else:
+            resolved["detail"] = "authority resolved"
+        resolved["head"] = head
+        resolved["history"] = history
+        resolved["generation"] = generation
+        return resolved
     finally:
         try:
             store.close()
@@ -1198,6 +1349,8 @@ def verify_repository(
         "digest_runs": 0,
         "closure_files": 0,
         "closure_bytes": 0,
+        "store_reads": 0,
+        "store_writes": 0,
     }
 
     repository, obligations, inventory_relpath = load_obligations(repo)
@@ -1273,6 +1426,8 @@ def verify_repository(
                 inventory_timeout,
                 stats,
                 inventory_relpath,
+                store_dir,
+                admit_store,
             )
         except VerifyError as error:
             entries[identity] = {
@@ -1387,6 +1542,8 @@ def measure_obligation(
     inventory_timeout: float,
     stats: dict,
     inventory_relpath: str,
+    store_dir: Path,
+    admit_store: bool,
 ) -> dict:
     identity = bound_text(obligation["identity"], "obligation identity", MAX_IDENTITY_BYTES)
     executor = obligation.get("executor", {})
@@ -1463,7 +1620,48 @@ def measure_obligation(
         "inventory_identities": inventory_identities,
         "inventory_truncated": inventory_truncated,
         "test_count": test_count,
-        "receipt": read_receipt(receipts_dir, identity),
+        **resolve_world_evidence(identity, receipts_dir, store_dir, admit_store, stats),
+    }
+
+
+def resolve_world_evidence(
+    identity: str,
+    receipts_dir: Path,
+    store_dir: Path,
+    admit_store: bool,
+    stats: dict,
+) -> dict:
+    """Resolve the evidence a coherence decision may use.
+
+    With Store admission enabled, evidence comes only from the
+    authoritative vault head: the local receipt file is a projection
+    used solely for staleness comparison and diagnostics. With
+    --no-store the operator explicitly accepts file authority (no
+    rollback protection) and the file is the evidence.
+    """
+    file_receipt = read_receipt(receipts_dir, identity)
+    if not admit_store:
+        return {
+            "receipt": file_receipt,
+            "file_receipt": file_receipt,
+            "history": [],
+            "authority": {
+                "status": "disabled",
+                "detail": "Store admission disabled; file authority without rollback protection",
+                "generation": None,
+            },
+        }
+    stats["store_reads"] = stats.get("store_reads", 0) + 1
+    authority = resolve_obligation_evidence(store_dir, identity)
+    return {
+        "receipt": authority["head"],
+        "file_receipt": file_receipt,
+        "history": authority["history"],
+        "authority": {
+            "status": authority["status"],
+            "detail": authority["detail"],
+            "generation": authority["generation"],
+        },
     }
 
 
@@ -1530,6 +1728,62 @@ def bound_diff(world: dict) -> list[str]:
     return moved
 
 
+def repair_projection(receipts_dir: Path, world: dict) -> str | None:
+    """Rebuild the file projection when it diverges from the Store head.
+
+    Returns a note for the entry, or None when the projection already
+    matches (or no head exists to project). Repair only ever copies
+    Store -> file, so it cannot roll authority backward. Failures are
+    reported, never raised: the projection is convenience, the Store
+    stays authoritative.
+    """
+    head = world.get("receipt")
+    if head is None:
+        return None
+    filed = world.get("file_receipt")
+    if filed is not None and filed.get("evidence_id") == head.get("evidence_id"):
+        return None
+    history = world.get("history", [])
+    parent_id = head.get("previous_evidence_id")
+    parent = next(
+        (item for item in history if item["evidence_id"] == parent_id), None
+    )
+    previous_verdict = parent.get("verdict") if parent else None
+    authority_generation = world.get("authority", {}).get("generation")
+    projected = {
+        "schema_version": RECEIPT_SCHEMA,
+        "obligation_identity": head["obligation_identity"],
+        "verdict": head["verdict"],
+        "bound": head["bound"],
+        "verifier_identity": head["verifier_identity"],
+        "selected_test_identities": head["selected_test_identities"],
+        "digest": head["digest"],
+        "result_sha256": head["result_sha256"],
+        "artifact_dir": None,
+        "previous_verdict": previous_verdict,
+        "previous_evidence_id": head.get("previous_evidence_id"),
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "producer": head.get("producer"),
+        "evidence_id": head["evidence_id"],
+        "projection_rebuilt": True,
+        "store_generation": authority_generation,
+    }
+    try:
+        write_receipt(receipts_dir, projected)
+    except OSError as error:
+        return f"projection repair failed ({error}); Store head remains authoritative"
+    claimed = filed.get("evidence_id") if filed else None
+    if claimed is None:
+        return (
+            f"projection rebuilt from Store head {head['evidence_id'][:12]} "
+            f"(vault generation {authority_generation})"
+        )
+    return (
+        f"stale projection repaired: file claimed {claimed[:12]}, "
+        f"authority head is {head['evidence_id'][:12]}"
+    )
+
+
 def act_on_verdict(
     world: dict,
     verdict: dict,
@@ -1563,6 +1817,19 @@ def act_on_verdict(
         "resolved_test_identities": resolved,
         "notes": [],
     }
+    if admit_store and not dry_run:
+        repair_note = repair_projection(receipts_dir, world)
+        if repair_note:
+            entry["notes"].append(repair_note)
+    authority = world.get("authority", {})
+    if authority.get("status") not in ("ok", "disabled", "empty") and status in (
+        "current",
+        "stale",
+        "new_execution_required",
+    ):
+        entry["notes"].append(
+            f"evidence authority {authority.get('status')}: {authority.get('detail')}"
+        )
     if status == "current":
         receipt = world["receipt"]
         if receipt is None:  # Native policy trusts evidence we cannot read: re-check.
@@ -1611,24 +1878,13 @@ def act_on_verdict(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
             )
-        if admit_store:
-            if not dry_run:
-                store_dir.mkdir(parents=True, exist_ok=True)
-            match, note = verify_receipt_in_store(store_dir, receipt)
-            entry["notes"].append(f"store cross-check: {note}")
-            if not match:
-                entry["status"] = "contradictory"
-                entry["reason"] = "evidence_conflict"
-                entry["notes"].append("file receipt and store object disagree; refusing reuse")
-                return entry
-            if note == "no store object yet" and not dry_run:
-                # A receipt that never reached the vault (crash between
-                # file write and admission, or an older producer): backfill
-                # it now. Admission is idempotent on the evidence core.
-                # Dry runs never write: they only report the gap.
-                entry["store"] = admit_receipt_to_store(
-                    store_dir, receipt, relations=[], provenance=[]
-                )
+        # The receipt consulted here is already authoritative: with
+        # Store admission it is the vault head (the file is a projection
+        # repaired above when divergent), and with --no-store the
+        # operator explicitly accepts file authority. No cross-check
+        # remains: a check that fails open on unreadable authority was
+        # the P-015 hole.
+        entry["store_generation"] = world.get("authority", {}).get("generation")
         entry["action"] = "would_reuse" if dry_run else "reused"
         entry["verdict"] = receipt["verdict"]
         if reason == "closure_current":
@@ -1788,6 +2044,30 @@ def finish_execution(
             "producer": VERIFY_VERSION,
         }
         receipt["evidence_id"] = evidence_id_for(receipt_core(receipt))
+        # Authority first, projection second: admit the evidence to the
+        # vault before writing the file projection, so a crash can only
+        # leave "Store committed, projection stale" (rebuildable), never
+        # "projection exists, Store never committed" (unusable). A failed
+        # admission never invalidates the verdict just produced; it only
+        # defers future reuse of this evidence.
+        if admit_store:
+            # Bare admission: the envelope already carries core, lineage,
+            # and producer, and the descriptor carries the digest. Typed
+            # Store relations use a fixed-width taxonomy this client does
+            # not forge; revisit when the relation vocabulary for test
+            # evidence is defined.
+            stats["store_writes"] = stats.get("store_writes", 0) + 1
+            entry["store"] = admit_receipt_to_store(
+                store_dir, receipt, relations=[], provenance=[]
+            )
+        else:
+            entry["store"] = {"status": "skipped", "detail": "store admission disabled"}
+        receipt["store_admission"] = entry["store"]
+        if admit_store and entry["store"]["status"] not in ("admitted", "duplicate"):
+            entry["notes"].append(
+                f"admission deferred ({entry['store'].get('detail')}); "
+                "verdict stands, projection uncommitted"
+            )
         write_receipt(receipts_dir, receipt)
         entry["action"] = "executed"
         entry["verdict"] = verdict
@@ -1795,6 +2075,7 @@ def finish_execution(
         entry["digest"] = digest
         entry["evidence_id"] = receipt["evidence_id"]
         entry["previous_evidence_id"] = previous_evidence_id
+        entry["store_generation"] = entry["store"].get("generation")
         if previous_verdict == "PASS" and verdict == "FAIL":
             entry["transition"] = "regression"
         elif previous_verdict == "FAIL" and verdict == "PASS":
@@ -1803,17 +2084,6 @@ def finish_execution(
             entry["transition"] = "new"
         else:
             entry["transition"] = "stable"
-        if admit_store:
-            # Bare admission: the receipt payload already carries every
-            # linkage field (obligation, subject, artifact, toolchain) and
-            # the descriptor carries the digest. Typed Store relations use
-            # a fixed-width taxonomy this client does not forge; revisit
-            # when the relation vocabulary for test evidence is defined.
-            entry["store"] = admit_receipt_to_store(
-                store_dir, receipt, relations=[], provenance=[]
-            )
-        else:
-            entry["store"] = {"status": "skipped", "detail": "store admission disabled"}
         return entry
     entry["action"] = "not_executed"
     entry["verdict"] = None

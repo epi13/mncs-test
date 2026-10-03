@@ -18,8 +18,13 @@ sys.path.insert(0, str(ROOT / "tools"))
 from mncs_test_native import run_native_app, toolchain_cache_dir  # noqa: E402
 from mncs_test_verify import (  # noqa: E402
     build_coherence_row,
+    evidence_envelope,
+    evidence_id_for,
     finish_execution,
     measure_closure,
+    obligation_scope,
+    parse_evidence_envelope,
+    receipt_core,
     run_stamp,
     stdlib_bundle_digest,
     toolchain_identity,
@@ -449,3 +454,56 @@ def test_coherence_row_v2_defaults_legacy_receipt_untrusted() -> None:
     assert row["evidence"]["closure_identity"] == ""
     assert row["evidence"]["closure_trusted"] is False
     assert row["evidence"]["closure_fileset"] == ""
+
+
+def _receipt() -> dict:
+    return {
+        "schema_version": "mncs.test-receipt/1",
+        "obligation_identity": "ob-ev",
+        "verdict": "PASS",
+        "bound": _bound(),
+        "verifier_identity": "ver",
+        "selected_test_identities": ["t1"],
+        "digest": {"summary": {"verdict": "PASS"}},
+        "result_sha256": "r" * 64,
+        "producer": "mncs-test-verify/0.3.0",
+        "evidence_id": "",
+        "previous_evidence_id": "prev",
+    }
+
+
+def test_evidence_envelope_round_trip() -> None:
+    receipt = _receipt()
+    receipt["evidence_id"] = evidence_id_for(receipt_core(receipt))
+    payload = evidence_envelope(receipt, "prev")
+    parsed = parse_evidence_envelope(payload, "ob-ev", receipt["evidence_id"])
+    assert parsed is not None
+    assert parsed["verdict"] == "PASS"
+    assert parsed["bound"] == _bound()
+    assert parsed["evidence_id"] == receipt["evidence_id"]
+    assert parsed["previous_evidence_id"] == "prev"
+    assert parsed["producer"] == "mncs-test-verify/0.3.0"
+
+
+def test_evidence_envelope_rejects_misbinding() -> None:
+    receipt = _receipt()
+    receipt["evidence_id"] = evidence_id_for(receipt_core(receipt))
+    payload = evidence_envelope(receipt, None)
+    assert parse_evidence_envelope(payload, "other-obligation", receipt["evidence_id"]) is None
+    assert parse_evidence_envelope(payload, "ob-ev", "0" * 64) is None
+    assert parse_evidence_envelope(b"not json", "ob-ev", receipt["evidence_id"]) is None
+    tampered = json.loads(payload.decode())
+    tampered["core"]["verdict"] = "FAIL"
+    assert (
+        parse_evidence_envelope(
+            json.dumps(tampered).encode(), "ob-ev", receipt["evidence_id"]
+        )
+        is None
+    )
+
+
+def test_obligation_scope_is_stable_and_prefixed() -> None:
+    first = obligation_scope("ob-ev")
+    assert first == obligation_scope("ob-ev")
+    assert first != obligation_scope("ob-other")
+    assert first.endswith(b":")
