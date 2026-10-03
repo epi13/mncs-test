@@ -24,5 +24,7 @@
   "relevant_tests": [
     "tests/test_verify.py",
     "tests/test_verifier_units.py"
-  ]
+  ],
+  "ownership_split_20261003": "Compiler agent (black-regulus, 2026-10-03): mncs-compiler does not compute semantic_fingerprint, so fingerprint transitivity and inventory batching belong to the inventory owner's contract (mncs-language test-inventory, crates/mncs-compiler/src/inventory.rs in the language checkout). The compiler-owned piece is the resolution_closure block content (module/artifact identities, closure digest, compile configuration); scoping follows the agent's in-flight nested-SSA verification debug. No test-side action precedes that.",
+  "fingerprint_transitivity_20261003": "Answered by reading the owner implementation (no contract change needed to rule it out): per-test semantic_fingerprint is fingerprint_json(canonical_function(test fn)) (mncs-language crates/mncs-model/src/identity.rs), i.e. the test's own canonical body with callees named by identity only. A callee edit does NOT move the caller's fingerprint, so per-test affected-selection on fingerprints alone would be unsound. Obligation granularity stands."
 }

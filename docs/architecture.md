@@ -210,6 +210,45 @@ baseline (both live); v2 (`/2`) is canonical for provider
 verification (`mncs-test-verify` direct and via `mncs-env test`).
 Result envelopes are identical (`/1`); converging ambient to v2
 needs environment-owned closure measurement and stays future work.
+Re-audited 2026-10-03: `mncs-environment/mncs_env/verification.py`
+still consumes request `/1`, so the split stays deliberate.
+
+Run cost model (measured 2026-10-03 on this repo, 4 obligations):
+
+- one verify run holds at most one read-only and one read-write
+  Store handle (`RunStores` in `tools/mncs_test_verify.py`), opened
+  lazily and closed explicitly even on failure; open failures are
+  cached so an unreadable vault reports `unavailable` per obligation
+  without repaying the failing open. Sharing is sound because
+  `current_generation` re-reads the head file on every access and
+  `find_bound_objects` rebuilds its projection when the head moves.
+- each distinct source closure is measured once per run (pure
+  function of libraries/repo/manifest/toolchain); `closure_files`
+  counts actual hashing work, not obligations times files.
+- warm verify (0 suites): ~2.5s, 6 subprocesses
+  (2 inventory, 1 coherence, toolchain, 2 git), 1 store open:
+  ~1.5s Store session open (Store-owned artifact verification),
+  ~0.4s native coherence, ~0.36s compiler inventory, the rest
+  measurement. Previously ~7s with 4 store opens.
+- cold verify (2 suites, existing vault): ~6.2s, 10 subprocesses,
+  2 store opens (1 shared reader, 1 shared writer). A first-ever run
+  with no vault opens nothing for reads (`empty` without opening)
+  and opens the writer once for admission.
+- coherence is already one native batch per pass (initial plus, only
+  when stale rows have recall candidates, one recall pass); one
+  malformed obligation cannot contaminate the others.
+- the remaining warm floor is owned elsewhere: Store session init
+  (pressure MNCS-TEST-P-017) and `mncs` process startup per
+  inventory/coherence call. No test-owned resident daemon exists:
+  it would amortize only the Store open while adding lifecycle and
+  staleness risk, so the fix belongs in the Store layer.
+
+Per-test selection stays out: per-test `semantic_fingerprint` is the
+canonical form of the test function itself
+(`mncs-model/src/identity.rs`), so a callee edit does not move the
+caller's fingerprint. Fingerprints are not transitive; obligation
+granularity stands until a compiler contract states otherwise
+(P-014 notes).
 
 ## Native digest
 

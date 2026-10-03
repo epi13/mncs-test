@@ -20,5 +20,6 @@
     "bin/mncs-test-compat",
     "bin/mncs-test-verify"
   ],
-  "relevant_tests": []
+  "relevant_tests": [],
+  "recheck_20261003": "Still open: mncs_development._test_command (mncs-forge/src/mncs_forge/application/mncs_development.py:437) still emits legacy `run --manifest`. Forge checkout is on another agent's campaign branch (not touched). The peer session contacted (pine-hydra) is the ambient projection-rollout worker, not the Forge owner, so no live Forge owner received the requirement this campaign; the exact native invocation is recorded here: `mncs test SOURCE [--library R ...] [--test-identity ID ... | --verification-plan FILE] --result FILE --format json` (reference: execute_suite in tools/mncs_test_verify.py)."
 }

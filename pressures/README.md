@@ -29,6 +29,7 @@ The current campaign records:
 | `MNCS-TEST-P-014` | _pending_ | compiler inventory | no resolved module closure; contract requested, host superset stands |
 | `MNCS-TEST-P-015` | closed | test evidence admission | vault-head authority; projections repaired; fail-closed outage |
 | `MNCS-TEST-P-016` | closed | test coherence policy | lineage recall with native second-pass admission |
+| `MNCS-TEST-P-017` | _pending_ | store session | EmbeddedStore open ~1.5s; shared per run, floor is Store-owned |
 
 When a pressure is repaired, update both this record and its Commons state,
 add a regression/conformance witness, and remove the workaround before
