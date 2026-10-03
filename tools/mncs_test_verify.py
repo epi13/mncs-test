@@ -20,6 +20,9 @@ Soundness rules (never violated to look fast):
 * The native coherence module owns every reuse decision; this file only
   measures and transports. It never reuses a result the native policy did
   not call current.
+* Evidence may be reused across repository revisions only when a
+  trusted semantic closure proves every relevant input unchanged;
+  untrusted or differing closures fall back to revision binding.
 * Anything unmeasurable (missing toolchain, missing git, invalid suite,
   oversized dependency closure, unknown vocabulary) is UNKNOWN, never
   queued blindly and never green.
@@ -42,6 +45,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -64,6 +68,8 @@ VERIFY_VERSION = "mncs-test-verify/0.3.0"
 OBLIGATION_INVENTORY_SCHEMA = "mncs-family.verification-obligation-inventory/v1"
 COHERENCE_REQUEST_SCHEMA = "mncs.test-verification-coherence-request/1"
 COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
+COHERENCE_DESCRIPTOR_V2 = "test-verification-coherence-v2.json"
+COHERENCE_REQUEST_SCHEMA_V2 = "mncs.test-verification-coherence-request/2"
 RECEIPT_SCHEMA = "mncs.test-receipt/1"
 REPORT_SCHEMA = "mncs.test-verify-report/1"
 STORE_RECEIPT_SCHEMA = b"mncs.test-receipt/1"
@@ -75,6 +81,33 @@ MAX_FINGERPRINT_BYTES = 128
 MAX_PATTERNS = 8
 MAX_DEP_FILES = 512
 MAX_DEP_BYTES = 8 * 1024 * 1024
+MAX_CLOSURE_FILES = 8192
+MAX_CLOSURE_BYTES = 64 * 1024 * 1024
+# Closure fileset rule: only MNCS sources plus the repository's own
+# verification manifests contribute. Grounded in toolchain behavior:
+# module resolution reads `{dotted}.mncs` candidates only, and
+# `mncs test` executes bodies with zero grants, so non-source files
+# provably cannot influence compilation or execution. Non-source
+# invalidation dependencies stay bound separately through
+# invalidation_identity. Bump the tag if the rule ever changes; the
+# tag travels as its own bound field so old closures never match new.
+CLOSURE_FILESET = "mncs+manifests/1"
+# Closure-pruned directory names (any depth): version-control metadata,
+# derived bytecode, and verification's own volatile outputs. None of
+# these are compilation inputs; hashing them would make the closure
+# self-invalidating (receipts, caches) or revision-bound (.git).
+CLOSURE_PRUNE_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".jj",
+        "__pycache__",
+        "test-receipts",
+        "test-artifacts",
+        "test-store",
+    }
+)
 MAX_STATUS_BYTES = 65536
 MAX_DIAGNOSTIC_TEXT = 2048
 MAX_STDERR_TEXT = 4096
@@ -143,31 +176,19 @@ def find_mncs(explicit: str | None, repo: Path) -> str:
     )
 
 
-def toolchain_identity(mncs: str, cache_dir: Path) -> tuple[str, str, bool]:
-    """Identify the toolchain binary as version + content digest (cached).
+def toolchain_identity(mncs: str) -> tuple[str, str]:
+    """Identify the toolchain binary as version + content digest.
 
-    Returns (identity, version, probed): probed is True when the version
-    subprocess actually ran (a cache hit runs nothing).
+    The digest is recomputed on every run (~0.5s for a 231MB binary):
+    a cached identity would be an unprotected trust assumption, and a
+    poisoned or stale cache entry would silently reuse evidence across
+    a toolchain change. No state, no trust.
     """
     binary = Path(mncs)
     try:
-        stat = binary.stat()
+        binary.stat()
     except OSError as error:
         raise VerifyError(f"toolchain is unavailable: {error}") from error
-    cache_path = cache_dir / ".toolchain.json"
-    try:
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        cached = None
-    if (
-        isinstance(cached, dict)
-        and cached.get("path") == str(binary)
-        and cached.get("size") == stat.st_size
-        and cached.get("mtime_ns") == stat.st_mtime_ns
-        and isinstance(cached.get("identity"), str)
-        and isinstance(cached.get("version"), str)
-    ):
-        return cached["identity"], cached["version"], False
     try:
         completed = subprocess.run(
             [str(binary), "--version"], capture_output=True, text=True, check=False, timeout=30
@@ -182,18 +203,7 @@ def toolchain_identity(mncs: str, cache_dir: Path) -> tuple[str, str, bool]:
                 digest.update(chunk)
     except OSError as error:
         raise VerifyError(f"toolchain digest failed: {error}") from error
-    identity = sha256_hex(f"{version}\n{digest.hexdigest()}".encode())
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(cache_path, json.dumps(
-        {
-            "path": str(binary),
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "version": version,
-            "identity": identity,
-        }
-    ))
-    return identity, version, True
+    return sha256_hex(f"{version}\n{digest.hexdigest()}".encode()), version
 
 
 def git_head(repo: Path) -> str:
@@ -236,8 +246,10 @@ def verifier_key() -> str:
         "tools/mncs_test_native.py",
         "native/mncs/test/digest.mncs",
         "native/mncs/test/verification_coherence.mncs",
+        "native/mncs/test/verification_coherence_v2.mncs",
         "native-applications/test-digest.json",
         "native-applications/test-verification-coherence.json",
+        "native-applications/test-verification-coherence-v2.json",
     ]
     digest = hashlib.sha256(VERIFY_VERSION.encode())
     for member in members:
@@ -256,21 +268,70 @@ def _status_paths(line: str) -> list[str]:
     return [body.strip().strip('"')]
 
 
+def _collect_outside_files(root: Path, raw: str) -> list[tuple[str, Path, str]]:
+    """Collect (logical path, physical file, kind) under an outside root.
+
+    Symlinks are followed and attributed to their logical path, so a
+    symlinked library root contributes its content instead of a silent
+    gap. Directory identity is guarded by (device, inode): a symlink
+    cycle revisits an identity and is skipped rather than looping.
+    Dangling or exotic links fail closed.
+    """
+    found: list[tuple[str, Path, str]] = []
+    seen: set[tuple[int, int]] = set()
+    stack: list[tuple[Path, str]] = [(root, "")]
+    while stack:
+        current, rel = stack.pop()
+        try:
+            identity = current.stat()
+        except OSError as error:
+            raise VerifyError(f"outside library root is unreadable: {raw}") from error
+        key = (identity.st_dev, identity.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            children = sorted(current.iterdir(), key=lambda p: p.name)
+        except OSError as error:
+            raise VerifyError(f"outside library root is unreadable: {raw}") from error
+        for child in children:
+            child_rel = f"{rel}/{child.name}" if rel else child.name
+            if child.is_symlink():
+                target = child.resolve()
+                if target.is_dir():
+                    stack.append((target, child_rel))
+                elif target.is_file():
+                    found.append((child_rel, target, "link"))
+                else:
+                    raise VerifyError(
+                        f"outside library root has an unresolvable link: {raw}"
+                    )
+            elif child.is_dir():
+                stack.append((child, child_rel))
+            elif child.is_file():
+                found.append((child_rel, child, "file"))
+    return found
+
+
 def repository_fingerprint(
     repo: Path,
     inventory_relpath: str,
     outside_roots: list[str],
     stats: dict,
+    *,
+    mncs: str,
 ) -> tuple[str, str]:
     """Measure (revision, fingerprint) with irrelevant-change tolerance.
 
     The fingerprint binds the revision, the status of every file that can
     influence a native run (MNCS sources anywhere in the repo plus the
-    verification manifests), the verifier implementation, and the content
-    of library roots outside the repo. Documentation, scripts, and other
-    non-source worktree changes provably cannot affect module resolution
-    or suite semantics, so they preserve reuse. Anything else fails
-    closed to unmeasurable.
+    verification manifests), the verifier implementation, the content
+    of library roots outside the repo, the ambient stdlib-root
+    authority, and the ambient stdlib bundle. Documentation, scripts,
+    and other non-source worktree changes provably cannot affect
+    module resolution or suite semantics (resolution reads `.mncs`
+    candidates only; test bodies run with zero grants), so they
+    preserve reuse. Anything else fails closed to unmeasurable.
     """
     revision = git_head(repo)
     stats["subprocesses"] += 1
@@ -285,30 +346,97 @@ def repository_fingerprint(
     filtered = "\n".join(kept)
     if len(filtered.encode("utf-8")) > MAX_STATUS_BYTES:
         raise VerifyError("relevant git status exceeds the measurement bound")
+    stdlib_marker, stdlib_extra = stdlib_root_authority(mncs)
+    all_outside = sorted(set(outside_roots))
+    if stdlib_extra is not None and str(stdlib_extra) not in all_outside:
+        all_outside.append(str(stdlib_extra))
     outside_bits: list[str] = []
     byte_count = 0
-    for raw in sorted(set(outside_roots)):
-        root = Path(raw)
+    seen_roots: set[str] = set()
+    for raw in all_outside:
+        try:
+            root = Path(raw).resolve()
+        except OSError:
+            outside_bits.append(f"missing:{raw}")
+            continue
         if not root.is_dir():
             outside_bits.append(f"missing:{raw}")
             continue
+        if str(root) in seen_roots:
+            continue
+        seen_roots.add(str(root))
         entries: list[str] = []
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.is_symlink():
-                continue
+        for relpath, physical, kind in _collect_outside_files(root, raw):
             try:
-                content = path.read_bytes()
+                content = physical.read_bytes()
             except OSError as error:
                 raise VerifyError(f"outside library root is unreadable: {raw}") from error
             byte_count += len(content)
             if byte_count > MAX_DEP_BYTES:
                 raise VerifyError("outside library roots exceed the measurement bound")
-            entries.append(f"{path.relative_to(root).as_posix()}={sha256_hex(content)}")
-        outside_bits.append(f"root:{raw}\n" + "\n".join(entries))
+            entries.append(f"{kind}:{relpath}={sha256_hex(content)}")
+        outside_bits.append(f"root:{raw}\n" + "\n".join(sorted(entries)))
     fingerprint = sha256_hex(
-        "\n".join([revision, filtered, verifier_key(), *outside_bits]).encode()
+        "\n".join(
+            [
+                revision,
+                filtered,
+                verifier_key(),
+                stdlib_bundle_digest(),
+                stdlib_marker,
+                *outside_bits,
+            ]
+        ).encode()
     )
     return revision, fingerprint
+
+
+def stdlib_root_authority(mncs: str) -> tuple[str, Path | None]:
+    """Measure the ambient stdlib-root resolution authority.
+
+    Beyond explicit library roots, the toolchain consults a default
+    stdlib root: MNCS_STDLIB_ROOT names one explicitly, a set-but-empty
+    value disables discovery, and an unset variable falls back to the
+    mncs-stdlib sibling of the language checkout backing the binary
+    (`<exe-dir>/../../mncs-stdlib/library`). Returns a head marker plus
+    the extra root to measure, or None when discovery yields nothing.
+    """
+    override = os.environ.get("MNCS_STDLIB_ROOT")
+    if override is not None:
+        if not override.strip():
+            return "stdlib-root:disabled", None
+        return f"stdlib-root:pinned:{override}", Path(override) / "library"
+    binary = Path(mncs)
+    if not binary.is_absolute():
+        located = shutil.which(mncs)
+        binary = Path(located) if located else Path.cwd() / binary
+    try:
+        sibling = binary.resolve().parents[3] / "mncs-stdlib" / "library"
+    except IndexError:
+        return "stdlib-root:absent", None
+    if sibling.is_dir():
+        return f"stdlib-root:sibling:{sibling}", sibling
+    return "stdlib-root:absent", None
+
+
+def stdlib_bundle_digest() -> str:
+    """Digest the ambient stdlib bundle (or record its absence).
+
+    The toolchain admits MNCS_STDLIB_BUNDLE as an alternate stdlib source
+    alongside explicit library roots. A set-then-unset (or changed) bundle
+    must invalidate evidence exactly like a changed library file; an
+    always-unset bundle digests to a stable constant.
+    """
+    raw = os.environ.get("MNCS_STDLIB_BUNDLE", "").strip()
+    if not raw:
+        return "stdlib-bundle:unset"
+    try:
+        content = Path(raw).read_bytes()
+    except OSError as error:
+        raise VerifyError(f"stdlib bundle is unreadable: {error}") from error
+    if len(content) > MAX_DEP_BYTES:
+        raise VerifyError("stdlib bundle exceeds the measurement bound")
+    return f"stdlib-bundle:sha256:{sha256_hex(content)}"
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +517,142 @@ def measure_invalidation(repo: Path, obligation: dict) -> str:
         if file_count > MAX_DEP_FILES or byte_count > MAX_DEP_BYTES:
             raise VerifyError("invalidation closure exceeds the measurement bound")
     return sha256_hex("\n".join(entries).encode())
+
+
+def measure_closure(
+    libraries: list[str],
+    stats: dict,
+    *,
+    mncs: str,
+    repo: Path,
+    inventory_relpath: str,
+) -> tuple[str, bool]:
+    """Measure the obligation's semantic source closure (superset, bounded).
+
+    The closure digests every file a native execution of the obligation
+    can read: every MNCS source under each library root (declared
+    roots, the repository, the runner's native root, the ambient
+    stdlib root), the repository's own verification manifests, the
+    verifier implementation, and the ambient stdlib bundle. It is a
+    deliberate superset, not a compiler-resolved dependency set:
+    anything the compiler could consult is covered, so equal closures
+    prove no relevant input changed. Toolchain, inventory, subject,
+    definition, executor, and invalidation identities travel as
+    separate fields and are compared separately by native policy.
+
+    The MNCS-only fileset is grounded in toolchain behavior, not
+    guessed: module resolution reads `{dotted}.mncs` candidates only,
+    and `mncs test` executes bodies with zero grants, so non-source
+    files cannot influence compilation or execution. The fileset tag
+    travels as its own bound field so a future rule change can never
+    match an old closure.
+
+    Symlinks are followed (a symlinked library root still contributes
+    its content); symlink cycles, dangling links, missing roots, and
+    unreadable files yield an untrusted closure rather than a silent
+    gap. Version-control metadata, nested native-app caches, and
+    verification's own volatile outputs are pruned from the walk.
+
+    Any anomaly yields ("", False): native policy treats an untrusted
+    closure as absent and falls back to the legacy revision-bound rule.
+    Closure measurement never fails an obligation by itself.
+    """
+    try:
+        manifests = {
+            (repo / ".mncs" / "project.json").resolve(),
+            (repo / inventory_relpath).resolve(),
+        }
+    except OSError:
+        return "", False
+    entries: list[str] = []
+    file_count = 0
+    byte_count = 0
+
+    def hash_file(logical: Path, physical: Path, tag: str, kind: str) -> bool:
+        nonlocal file_count, byte_count
+        try:
+            resolved = physical.resolve()
+            if resolved.suffix != ".mncs" and resolved not in manifests:
+                return True
+            digest = hashlib.sha256()
+            with physical.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    digest.update(chunk)
+            size = physical.stat().st_size
+        except OSError:
+            return False
+        file_count += 1
+        byte_count += size
+        if file_count > MAX_CLOSURE_FILES or byte_count > MAX_CLOSURE_BYTES:
+            return False
+        entries.append(f"{tag}:{kind}:{logical.as_posix()}={digest.hexdigest()}")
+        return True
+
+    def walk(root: Path, real_root: Path, tag: str) -> bool:
+        # The stack carries logical paths (symlink targets are descended
+        # through the link), so entries stay stable when a root's target
+        # moves; identity and cycle checks use resolved paths.
+        stack = [root]
+        visited = {real_root}
+        while stack:
+            current = stack.pop()
+            try:
+                children = sorted(current.iterdir(), key=lambda p: p.name)
+            except OSError:
+                return False
+            for child in children:
+                try:
+                    if child.is_symlink():
+                        target = child.resolve()
+                        if target.is_dir():
+                            if target in visited:
+                                return False
+                            visited.add(target)
+                            stack.append(child)
+                        elif target.is_file():
+                            if not hash_file(child, target, tag, "link"):
+                                return False
+                        else:
+                            return False
+                        continue
+                    if child.is_dir():
+                        if child.name in CLOSURE_PRUNE_DIRS:
+                            continue
+                        if child.name == ".mncs" and current != root:
+                            continue
+                        stack.append(child)
+                    elif child.is_file():
+                        if not hash_file(child, child, tag, "file"):
+                            return False
+                    # Sockets, fifos, devices: not compilable inputs; ignore.
+                except OSError:
+                    return False
+        return True
+
+    try:
+        stdlib_marker, stdlib_extra = stdlib_root_authority(mncs)
+        head = [CLOSURE_FILESET, verifier_key(), stdlib_bundle_digest(), stdlib_marker]
+    except VerifyError:
+        return "", False
+    roots = list(libraries)
+    if stdlib_extra is not None:
+        roots.append(str(stdlib_extra))
+    seen: set[str] = set()
+    for index, raw in enumerate(roots):
+        try:
+            real = Path(raw).resolve()
+        except OSError:
+            return "", False
+        if not real.is_dir():
+            return "", False
+        if str(real) in seen:
+            continue
+        seen.add(str(real))
+        if not walk(Path(raw), real, f"root{index}"):
+            return "", False
+    stats["closure_files"] = stats.get("closure_files", 0) + file_count
+    stats["closure_bytes"] = stats.get("closure_bytes", 0) + byte_count
+    return sha256_hex("\n".join([*head, *sorted(entries)]).encode()), True
 
 
 def _file_digest(path: Path) -> str:
@@ -697,6 +961,9 @@ def empty_evidence() -> dict:
         "inventory_identity": "",
         "repository_revision": "",
         "repository_fingerprint": "",
+        "closure_identity": "",
+        "closure_trusted": False,
+        "closure_fileset": "",
         "verdict": "UNKNOWN",
         "evidence_id": "",
     }
@@ -746,8 +1013,11 @@ def build_coherence_row(
             "inventory_identity",
             "repository_revision",
             "repository_fingerprint",
+            "closure_identity",
+            "closure_fileset",
         ):
             evidence[key] = stored.get(key, "")
+        evidence["closure_trusted"] = stored.get("closure_trusted", False) is True
         evidence["verifier_identity"] = receipt.get("verifier_identity", "")
         evidence["verdict"] = receipt.get("verdict", "UNKNOWN")
         evidence["evidence_id"] = receipt.get("evidence_id", "")
@@ -755,6 +1025,13 @@ def build_coherence_row(
     runnable_native = kind == NATIVE_KIND and len(
         (executor.get("source_paths", []) if isinstance(executor, dict) else [])
     ) == 1
+    closure_identity = bound.get("closure_identity", "")
+    if not isinstance(closure_identity, str):
+        raise VerifyError("closure identity must be a string")
+    bound_text(closure_identity, "closure identity", MAX_FINGERPRINT_BYTES, allow_empty=True)
+    if not isinstance(bound.get("closure_trusted"), bool):
+        raise VerifyError("closure trust must be a boolean")
+    bound_text(bound.get("closure_fileset"), "closure fileset", MAX_FINGERPRINT_BYTES)
     return {
         "identity": obligation["identity"],
         "lifecycle": lifecycle,
@@ -784,13 +1061,13 @@ def evaluate_coherence(
 ) -> dict:
     try:
         return run_native_app(
-            "test-verification-coherence.json",
+            COHERENCE_DESCRIPTOR_V2,
             {
-                "schema_version": COHERENCE_REQUEST_SCHEMA,
+                "schema_version": COHERENCE_REQUEST_SCHEMA_V2,
                 "max_executions": max_executions,
                 "obligations": rows,
             },
-            request_schema=COHERENCE_REQUEST_SCHEMA,
+            request_schema=COHERENCE_REQUEST_SCHEMA_V2,
             result_schema=COHERENCE_RESULT_SCHEMA,
             mncs=mncs,
             cwd=cwd,
@@ -905,6 +1182,7 @@ def verify_repository(
     coherence_timeout: float = 120.0,
     max_failures: int = 8,
     admit_store: bool = True,
+    dry_run: bool = False,
 ) -> dict:
     repo = repo.resolve()
     receipts_dir = repo / ".mncs" / "test-receipts"
@@ -918,6 +1196,8 @@ def verify_repository(
         "suite_runs": 0,
         "coherence_runs": 0,
         "digest_runs": 0,
+        "closure_files": 0,
+        "closure_bytes": 0,
     }
 
     repository, obligations, inventory_relpath = load_obligations(repo)
@@ -936,9 +1216,15 @@ def verify_repository(
         else:
             measurable.append(obligation)
 
+    stale_cache = receipts_dir / ".toolchain.json"
+    if stale_cache.is_file():
+        try:
+            stale_cache.unlink()
+        except OSError:
+            pass
     try:
-        toolchain, toolchain_version, toolchain_probed = toolchain_identity(mncs, receipts_dir)
-        stats["subprocesses"] += 1 if toolchain_probed else 0
+        toolchain, toolchain_version = toolchain_identity(mncs)
+        stats["subprocesses"] += 1
         provider_available = True
         toolchain_note = None
     except VerifyError as error:
@@ -961,7 +1247,7 @@ def verify_repository(
                     outside_roots.append(str(resolved))
     try:
         revision, repo_fingerprint = repository_fingerprint(
-            repo, inventory_relpath, outside_roots, stats
+            repo, inventory_relpath, outside_roots, stats, mncs=mncs
         )
         git_note = None
     except VerifyError as error:
@@ -986,6 +1272,7 @@ def verify_repository(
                 receipts_dir,
                 inventory_timeout,
                 stats,
+                inventory_relpath,
             )
         except VerifyError as error:
             entries[identity] = {
@@ -1066,9 +1353,10 @@ def verify_repository(
             max_failures,
             admit_store,
             stats,
+            dry_run,
         )
 
-    removed = collect_garbage(artifacts_root)
+    removed = 0 if dry_run else collect_garbage(artifacts_root)
     return assemble_report(
         repository,
         revision,
@@ -1082,6 +1370,7 @@ def verify_repository(
         toolchain_note,
         git_note,
         max_executions,
+        dry_run,
     )
 
 
@@ -1097,6 +1386,7 @@ def measure_obligation(
     receipts_dir: Path,
     inventory_timeout: float,
     stats: dict,
+    inventory_relpath: str,
 ) -> dict:
     identity = bound_text(obligation["identity"], "obligation identity", MAX_IDENTITY_BYTES)
     executor = obligation.get("executor", {})
@@ -1149,6 +1439,9 @@ def measure_obligation(
         )
         subject_fingerprint = executor_identity[:MAX_FINGERPRINT_BYTES]
         inventory_identity = "no-native-inventory"
+    closure_identity, closure_trusted = measure_closure(
+        libraries, stats, mncs=mncs, repo=repo, inventory_relpath=inventory_relpath
+    )
     bound = {
         "definition_identity": definition,
         "subject_identity": subject_identity,
@@ -1159,6 +1452,9 @@ def measure_obligation(
         "inventory_identity": inventory_identity,
         "repository_revision": revision,
         "repository_fingerprint": repo_fingerprint,
+        "closure_identity": closure_identity,
+        "closure_trusted": closure_trusted,
+        "closure_fileset": CLOSURE_FILESET,
     }
     return {
         "obligation": obligation,
@@ -1197,6 +1493,43 @@ def required_selection(world: dict) -> list[str] | None:
     return required
 
 
+def bound_diff(world: dict) -> list[str]:
+    """Name the bound fields that differ from the recorded receipt.
+
+    Obligation-level affected-ness only: the system can prove WHICH
+    obligation would rerun and WHICH identity moved, not which test
+    inside the suite is affected (that needs the compiler-resolved
+    closure of MNCS-TEST-P-014).
+    """
+    receipt = world.get("receipt")
+    if receipt is None:
+        return ["no prior evidence"]
+    stored = receipt.get("bound", {})
+    current = world.get("bound", {})
+    fields = (
+        "definition_identity",
+        "subject_identity",
+        "subject_fingerprint",
+        "executor_identity",
+        "invalidation_identity",
+        "toolchain_identity",
+        "inventory_identity",
+        "closure_identity",
+    )
+    moved = [key for key in fields if stored.get(key) != current.get(key)]
+    if stored.get("closure_trusted", False) is not True:
+        moved.append("closure_untrusted_before")
+    if current.get("closure_trusted", False) is not True:
+        moved.append("closure_untrusted_now")
+    if stored.get("closure_fileset") != current.get("closure_fileset"):
+        moved.append("closure_fileset")
+    if stored.get("repository_revision") != current.get("repository_revision"):
+        moved.append("repository_revision")
+    if stored.get("repository_fingerprint") != current.get("repository_fingerprint"):
+        moved.append("repository_fingerprint")
+    return moved
+
+
 def act_on_verdict(
     world: dict,
     verdict: dict,
@@ -1211,6 +1544,7 @@ def act_on_verdict(
     max_failures: int,
     admit_store: bool,
     stats: dict,
+    dry_run: bool = False,
 ) -> dict:
     obligation = world["obligation"]
     identity = obligation["identity"]
@@ -1244,6 +1578,10 @@ def act_on_verdict(
             if required is None:
                 entry["notes"].append("required selection is unprovable; leaving unresolved")
                 return entry
+            if dry_run:
+                entry["action"] = "would_execute"
+                entry["notes"].append("affected: verifier changed since the receipt")
+                return entry
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
@@ -1265,12 +1603,17 @@ def act_on_verdict(
             entry["notes"].append(
                 "recorded selection differs from the required selection; re-executing"
             )
+            if dry_run:
+                entry["action"] = "would_execute"
+                entry["notes"].append("affected: test selection changed")
+                return entry
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
             )
         if admit_store:
-            store_dir.mkdir(parents=True, exist_ok=True)
+            if not dry_run:
+                store_dir.mkdir(parents=True, exist_ok=True)
             match, note = verify_receipt_in_store(store_dir, receipt)
             entry["notes"].append(f"store cross-check: {note}")
             if not match:
@@ -1278,22 +1621,37 @@ def act_on_verdict(
                 entry["reason"] = "evidence_conflict"
                 entry["notes"].append("file receipt and store object disagree; refusing reuse")
                 return entry
-            if note == "no store object yet":
+            if note == "no store object yet" and not dry_run:
                 # A receipt that never reached the vault (crash between
                 # file write and admission, or an older producer): backfill
                 # it now. Admission is idempotent on the evidence core.
+                # Dry runs never write: they only report the gap.
                 entry["store"] = admit_receipt_to_store(
                     store_dir, receipt, relations=[], provenance=[]
                 )
-        entry["action"] = "reused"
+        entry["action"] = "would_reuse" if dry_run else "reused"
         entry["verdict"] = receipt["verdict"]
-        entry["verdict_source"] = "reused"
+        if reason == "closure_current":
+            produced = receipt.get("bound", {}).get("repository_revision", "?")
+            current = world["bound"].get("repository_revision", "?")
+            entry["notes"].append(
+                f"closure reuse: produced at {str(produced)[:12]}, "
+                f"reused at {str(current)[:12]}; semantic closure identical"
+            )
+            entry["verdict_source"] = "reused-closure"
+        else:
+            entry["verdict_source"] = "reused"
         entry["digest"] = receipt.get("digest")
         entry["evidence_id"] = receipt.get("evidence_id")
         return entry
     if status in ("new_execution_required", "stale") and queued and not verdict.get(
         "deferred", False
     ):
+        if dry_run:
+            entry["action"] = "would_execute"
+            moved = bound_diff(world)
+            entry["notes"].append(f"affected: {', '.join(moved)}")
+            return entry
         return execute_bound_suite(
             world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
             suite_timeout, max_failures, admit_store, stats, resolved,
@@ -1302,6 +1660,12 @@ def act_on_verdict(
         entry["action"] = "deferred"
         return entry
     return entry
+
+
+def run_stamp() -> str:
+    # Unique across processes: timestamp alone can collide between two
+    # concurrent verifiers, which would interleave result.json bytes.
+    return f"{time.time_ns():x}-{os.getpid():x}-{secrets.token_hex(4)}"
 
 
 def execute_bound_suite(
@@ -1335,8 +1699,9 @@ def execute_bound_suite(
         entry["action"] = "not_executed"
         entry["notes"].append("resolved selection is empty; refusing to broaden silently")
         return entry
-    run_stamp = f"{time.time_ns():x}"
-    artifacts_dir = artifacts_root / f"{sha256_hex(identity.encode())[:16]}-{run_stamp}"
+    artifacts_dir = artifacts_root / (
+        f"{sha256_hex(identity.encode())[:16]}-{run_stamp()}"
+    )
     stats["subprocesses"] += 1
     stats["suite_runs"] += 1
     execution = execute_suite(
@@ -1384,8 +1749,27 @@ def finish_execution(
             entry["notes"].append(f"digest failed: {error}")
             return entry
         verdict = {"pass": "PASS", "fail": "FAIL", "unsupported": "UNKNOWN"}[outcome]
+        entry["coverage"] = {
+            "considered": world["test_count"],
+            "selected": len(resolved),
+            "complete": not world["inventory_truncated"],
+        }
+        if world["inventory_truncated"]:
+            # Native selection expresses at most 64 identities: the executed
+            # subset is a useful signal but never a verdict over the whole
+            # inventory. Report it, write no receipt, stay UNKNOWN.
+            entry["action"] = "executed"
+            entry["verdict"] = "UNKNOWN"
+            entry["verdict_source"] = "executed-partial"
+            entry["digest"] = digest
+            entry["notes"].append(
+                f"inventory truncated: executed {len(resolved)} of "
+                f"{world['test_count']} tests; no receipt written"
+            )
+            return entry
         previous = world["receipt"]
         previous_verdict = previous.get("verdict") if previous else None
+        previous_evidence_id = previous.get("evidence_id") if previous else None
         receipt = {
             "schema_version": RECEIPT_SCHEMA,
             "obligation_identity": identity,
@@ -1399,6 +1783,7 @@ def finish_execution(
             "result_sha256": sha256_hex(canonical_json(result)),
             "artifact_dir": artifacts_dir.name,
             "previous_verdict": previous_verdict,
+            "previous_evidence_id": previous_evidence_id,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "producer": VERIFY_VERSION,
         }
@@ -1409,6 +1794,7 @@ def finish_execution(
         entry["verdict_source"] = "executed"
         entry["digest"] = digest
         entry["evidence_id"] = receipt["evidence_id"]
+        entry["previous_evidence_id"] = previous_evidence_id
         if previous_verdict == "PASS" and verdict == "FAIL":
             entry["transition"] = "regression"
         elif previous_verdict == "FAIL" and verdict == "PASS":
@@ -1453,6 +1839,7 @@ def assemble_report(
     toolchain_note: str | None,
     git_note: str | None,
     max_executions: int,
+    dry_run: bool,
 ) -> dict:
     ordered = [entries[obligation["identity"]] for obligation in obligations]
     tests_considered = sum(item["test_count"] for item in measured.values())
@@ -1460,7 +1847,10 @@ def assemble_report(
         "obligations": len(obligations),
         "tests_considered": tests_considered,
         "reused": 0,
+        "reused_closure": 0,
         "executed": 0,
+        "would_reuse": 0,
+        "would_execute": 0,
         "pass": 0,
         "fail": 0,
         "unknown": 0,
@@ -1475,8 +1865,16 @@ def assemble_report(
         action = entry.get("action")
         if action == "reused":
             summary["reused"] += 1
+            if entry.get("verdict_source") == "reused-closure":
+                summary["reused_closure"] += 1
         elif action == "executed":
             summary["executed"] += 1
+        elif action == "would_reuse":
+            summary["would_reuse"] += 1
+            if entry.get("verdict_source") == "reused-closure":
+                summary["reused_closure"] += 1
+        elif action == "would_execute":
+            summary["would_execute"] += 1
         elif action == "deferred":
             summary["deferred"] += 1
         elif action == "not_executed":
@@ -1499,7 +1897,7 @@ def assemble_report(
             store[outcome] += 1
     if summary["fail"] > 0:
         overall = "FAIL"
-    elif summary["unknown"] > 0 or summary["unresolved"] > 0:
+    elif summary["unknown"] > 0 or summary["unresolved"] > 0 or summary["would_execute"] > 0:
         overall = "INCOMPLETE"
     else:
         overall = "PASS"
@@ -1518,25 +1916,39 @@ def assemble_report(
         "toolchain_note": toolchain_note,
         "git_note": git_note,
         "max_executions": max_executions,
+        "dry_run": dry_run,
         "obligations": ordered,
     }
 
 
 def render_report_text(report: dict) -> str:
     summary = report["summary"]
+    dry_run = report.get("dry_run", False)
+    verb = "affected" if dry_run else "verify"
     lines = [
         (
-            f"mncs-test verify: {report['repository']} @ {report['revision'][:12]} "
+            f"mncs-test {verb}: {report['repository']} @ {report['revision'][:12]} "
             f"({summary['obligations']} obligations, "
             f"{summary['tests_considered']} tests considered) -> {report['overall']}"
         ),
-        (
-            f"  reused: {summary['reused']} · executed: {summary['executed']} "
+    ]
+    if dry_run:
+        lines.append(
+            f"  would-reuse: {summary['would_reuse']} "
+            f"({summary['reused_closure']} closure) "
+            f"· would-execute: {summary['would_execute']} "
+            f"· pass: {summary['pass']} · fail: {summary['fail']} "
+            f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "
+            f"· unresolved: {summary['unresolved']}"
+        )
+    else:
+        lines.append(
+            f"  reused: {summary['reused']} ({summary['reused_closure']} closure) "
+            f"· executed: {summary['executed']} "
             f"· pass: {summary['pass']} · fail: {summary['fail']} "
             f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "
             f"· not-executed: {summary['not_executed']} · unresolved: {summary['unresolved']}"
-        ),
-    ]
+        )
     if summary["regressions"] or summary["fixed"]:
         lines.append(
             f"  transitions: {summary['regressions']} regression(s), "
@@ -1551,6 +1963,9 @@ def render_report_text(report: dict) -> str:
             line += f" *** {entry['transition'].upper()} ***"
         if action in ("unresolved", "not_executed", "deferred"):
             line += f" [{entry.get('status')}/{entry.get('reason')}]"
+        coverage = entry.get("coverage") or {}
+        if coverage and not coverage.get("complete", True):
+            line += f" [partial {coverage.get('selected')}/{coverage.get('considered')}]"
         lines.append(line)
         for note in entry.get("notes", [])[:3]:
             lines.append(f"    note: {note}")
@@ -1583,7 +1998,7 @@ def exit_code_for(report: dict) -> int:
     summary = report["summary"]
     if summary["fail"] > 0:
         return 1
-    if summary["unknown"] > 0 or summary["unresolved"] > 0:
+    if summary["unknown"] > 0 or summary["unresolved"] > 0 or summary["would_execute"] > 0:
         return 3
     return 0
 
@@ -1599,6 +2014,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--report-out", type=Path, default=None)
     parser.add_argument("--no-store", action="store_true")
+    parser.add_argument(
+        "--changed",
+        action="store_true",
+        help="dry run: report which obligations are affected without executing anything",
+    )
     parser.add_argument("--version", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.version:
@@ -1615,6 +2035,7 @@ def main(argv: list[str] | None = None) -> int:
             inventory_timeout=arguments.inventory_timeout,
             max_failures=arguments.max_failures,
             admit_store=not arguments.no_store,
+            dry_run=arguments.changed,
         )
     except VerifyError as error:
         print(f"error: {error}", file=sys.stderr)

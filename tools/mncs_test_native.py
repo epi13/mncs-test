@@ -13,7 +13,10 @@ native-first path.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,6 +28,25 @@ class NativeTransportError(ValueError):
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def toolchain_cache_dir(mncs: str) -> Path:
+    """Scope the run-app artifact cache to the invoking toolchain binary.
+
+    Debug and release builds of the same source report identical nominal
+    identities but produce mutually unvalidating artifacts; sharing one
+    descriptor-local cache turns routine mixed-toolchain use into a hard
+    admission refusal (pressure MNCS-TEST-P-012). Each toolchain binary
+    path gets its own cache namespace. An explicit
+    MNCS_NATIVE_APPLICATION_CACHE_DIR still wins when set.
+    """
+    located = shutil.which(mncs) or mncs
+    try:
+        canonical = str(Path(located).resolve())
+    except OSError:
+        canonical = str(located)
+    scope = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    return repo_root() / "native-applications" / ".mncs" / "toolchains" / scope
 
 
 def run_native_app(
@@ -58,11 +80,11 @@ def run_native_app(
             request_path.write_text(json.dumps(request), encoding="utf-8")
             relative_request = request_path.relative_to(cwd).as_posix()
             relative_result = result_path.relative_to(cwd).as_posix()
-            completed = subprocess.run(
+            command = [mncs, "run-app", str(descriptor)]
+            if "MNCS_NATIVE_APPLICATION_CACHE_DIR" not in environment:
+                command.extend(("--cache-dir", str(toolchain_cache_dir(mncs))))
+            command.extend(
                 [
-                    mncs,
-                    "run-app",
-                    str(descriptor),
                     "--grant-structured",
                     grant,
                     "--step-budget",
@@ -70,7 +92,10 @@ def run_native_app(
                     "--",
                     relative_request,
                     relative_result,
-                ],
+                ]
+            )
+            completed = subprocess.run(
+                command,
                 cwd=str(cwd),
                 env=environment,
                 capture_output=True,

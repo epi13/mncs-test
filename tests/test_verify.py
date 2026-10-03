@@ -163,6 +163,78 @@ def test_cold_executes_warm_reuses_irrelevant_preserves(tmp_path: Path) -> None:
     assert irrelevant["stats"]["suite_runs"] == 0
 
 
+def test_committed_irrelevant_change_reuses_via_closure(tmp_path: Path) -> None:
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    produced = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True, timeout=60,
+    ).stdout.strip()
+    with (repo / "README.md").open("a", encoding="utf-8") as stream:
+        stream.write("\nA committed documentation change.\n")
+    _run_git(repo, "add", "README.md")
+    _run_git(repo, "commit", "-qm", "docs: irrelevant change")
+    reused = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(reused, "fixture.suite")
+    assert suite["action"] == "reused"
+    assert suite["verdict"] == "PASS"
+    assert suite["verdict_source"] == "reused-closure"
+    assert reused["summary"]["reused_closure"] == 1
+    assert reused["stats"]["suite_runs"] == 0
+    assert any(
+        produced[:12] in note and "semantic closure identical" in note
+        for note in suite["notes"]
+    )
+
+
+def test_committed_relevant_change_reruns(tmp_path: Path) -> None:
+    repo = make_fixture_repo(tmp_path / "repo")
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite_path = repo / "fv" / "tiny.mncs"
+    suite_path.write_text(
+        TINY_SUITE.replace("equals_i64(1, 1, 9001)", "equals_i64(2, 1, 9001)"),
+        encoding="utf-8",
+    )
+    _run_git(repo, "add", "fv/tiny.mncs")
+    _run_git(repo, "commit", "-qm", "suite: break one assertion")
+    regressed = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    suite = entry_by_id(regressed, "fixture.suite")
+    assert suite["action"] == "executed"
+    assert suite["verdict"] == "FAIL"
+    assert suite["transition"] == "regression"
+
+
+def test_changed_reports_affected_without_executing(tmp_path: Path) -> None:
+    repo = make_fixture_repo(tmp_path / "repo")
+    dry_cold = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0, dry_run=True)
+    suite = entry_by_id(dry_cold, "fixture.suite")
+    assert suite["action"] == "would_execute"
+    assert dry_cold["summary"]["would_execute"] == 1
+    assert dry_cold["stats"]["suite_runs"] == 0
+    assert list((repo / ".mncs" / "test-receipts").glob("*.json")) == [] if (
+        repo / ".mncs" / "test-receipts"
+    ).exists() else True
+
+    verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    dry_warm = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0, dry_run=True)
+    suite = entry_by_id(dry_warm, "fixture.suite")
+    assert suite["action"] == "would_reuse"
+    assert dry_warm["summary"]["would_reuse"] == 1
+    assert dry_warm["stats"]["suite_runs"] == 0
+
+    (repo / "fv" / "tiny.mncs").write_text(
+        TINY_SUITE.replace("equals_i64(1, 1, 9001)", "equals_i64(2, 1, 9001)"),
+        encoding="utf-8",
+    )
+    dry_affected = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0, dry_run=True)
+    suite = entry_by_id(dry_affected, "fixture.suite")
+    assert suite["action"] == "would_execute"
+    assert any(
+        "affected:" in note and "closure_identity" in note for note in suite["notes"]
+    )
+    assert dry_affected["stats"]["suite_runs"] == 0
+
+
 def test_relevant_change_regresses_then_fixes(tmp_path: Path) -> None:
     repo = make_fixture_repo(tmp_path / "repo")
     verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)

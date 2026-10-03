@@ -164,12 +164,28 @@ Soundness rules, never violated to look fast:
 - PASS→FAIL transitions report `REGRESSION`, FAIL→PASS report `FIXED`.
 
 The repository fingerprint binds the revision, MNCS-source status,
-verification manifests, the verifier implementation, and outside
-library-root content, so documentation/script changes preserve reuse
-while any suite edit re-executes. Per-obligation file precision needs
-the compiler to report a resolved module closure (pressure
-MNCS-TEST-P-014). Exit codes are `0` pass, `1` fail, `3` incomplete,
-`2` harness error.
+verification manifests, the verifier implementation, outside
+library-root content, and the ambient stdlib-root authority
+(measured since the v2 campaign closed that hole), so
+documentation/script changes preserve reuse while any suite edit
+re-executes. Per-obligation file precision needs the compiler to
+report a resolved module closure (pressure MNCS-TEST-P-014; contract
+requested in `docs/compiler-closure-contract.md`). Exit codes are
+`0` pass, `1` fail, `3` incomplete, `2` harness error.
+
+Coherence policy v2 (`mncs.test.verification_coherence_v2`,
+request `/2`) adds semantic closure reuse: evidence stays admissible
+across revisions with reason `closure_current` when both sides carry
+a trusted, equal source closure under the same fileset rule, even
+when the revisions differ. The host closure covers every `.mncs`
+file under the obligation's library roots plus the repo manifests,
+the verifier, and the ambient stdlib authorities; the MNCS-only
+fileset is grounded in toolchain behavior (resolution reads
+`.mncs` candidates only; test bodies run with zero grants). Policy
+v1 stays frozen for the environment ambient flow. `verify --changed`
+is the affected-test dry run: same measurement and native
+coherence, no execution or writes, reporting `would-reuse` /
+`would-execute` with the moved identities named per obligation.
 
 ## Native digest
 
@@ -215,11 +231,11 @@ contract belongs to mncs-doctor's provider.
 
 The native `mncs.test-result/1` and `mncs.check-result/1` envelopes
 satisfy Forge's provider validators (schema, provider, verdict
-vocabulary, per-test id/verdict, run identity). Forge/Actions family
-proof still invokes the legacy `run --manifest` flow, which the
-canonical adapter rejects by design; migrating the runner prefix to a
-native entry (per-suite `mncs test`, the provider batch, or
-`mncs-test-verify`) is Forge/Actions-owned work (pressure
+vocabulary, per-test id/verdict, run identity). Actions
+selective-family-proof already invokes direct-executable runners
+natively (legacy `run --manifest` only for `.py` runners); the
+remaining legacy bit is Forge's own `mncs_development._test_command`
+in the single-repo invoke path, which is Forge-owned work (pressure
 MNCS-TEST-P-013).
 
 ## Failure taxonomy

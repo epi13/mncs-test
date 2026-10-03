@@ -35,7 +35,22 @@ if [[ ! -f "$DESCRIPTOR" ]]; then
     exit 3
 fi
 
+# Toolchain-scoped artifact cache: debug and release builds of the same
+# source produce mutually unvalidating artifacts, so each toolchain binary
+# gets its own cache namespace. An explicit
+# MNCS_NATIVE_APPLICATION_CACHE_DIR still wins when set.
+CACHE_ARGS=()
+if [[ -z "${MNCS_NATIVE_APPLICATION_CACHE_DIR:-}" ]]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+        _MNCS_RESOLVED="$(command -v "$MNCS_BIN" 2>/dev/null || printf '%s' "$MNCS_BIN")"
+        _MNCS_CANON="$(realpath -m "$_MNCS_RESOLVED" 2>/dev/null || printf '%s' "$_MNCS_RESOLVED")"
+        _MNCS_SCOPE="$(printf '%s' "$_MNCS_CANON" | sha256sum | cut -c1-16)"
+        CACHE_ARGS=(--cache-dir "$SCRIPT_DIR/../native-applications/.mncs/toolchains/$_MNCS_SCOPE")
+    fi
+fi
+
 exec "$MNCS_BIN" run-app "$DESCRIPTOR" \
+    ${CACHE_ARGS[@]+"${CACHE_ARGS[@]}"} \
     --grant-structured test_artifact \
     --step-budget 1048576 \
     -- "$1" "$2"

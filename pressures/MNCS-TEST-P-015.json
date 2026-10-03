@@ -1,0 +1,24 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-015",
+  "title": "Receipt rollback is undetected; unreadable Store fails open to reuse",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed. Owning layer is mncs-test evidence admission (Store generation/monotonicity contract may belong to mncs-store).",
+  "verified_language_profile": "0.18",
+  "target_layer": "test evidence admission",
+  "observed_need": "Swapping a receipt file for an older valid receipt (same schema, valid evidence_id) is admitted without remark, and verify_receipt_in_store returns match=True when the vault is unavailable or unreadable. Primary integrity rests on content-addressed evidence_id, but freshness/monotonicity is unchecked.",
+  "current_language_behavior": "read_receipt validates schema, obligation, verdict vocabulary, and evidence_id over the core; act_on_verdict cross-checks the file receipt against the vault object for the same evidence_id only. No generation counter, no newest-wins rule, no alarm when the vault cannot be read.",
+  "why_insufficient": "A stale PASS can mask a newer FAIL that exists only in the vault (or nowhere, after a crash between execution and file write in the other direction). Corruption that preserves evidence_id validity (bitrot in non-core fields, whole-file rollback) is silent.",
+  "minimal_reproducer": "Record PASS at rev A, execute FAIL at rev B, restore the rev-A receipt file: the next verify reuses PASS (legacy or closure match) with no remark that newer evidence existed.",
+  "desired_direction": "Bind receipts to a monotonic per-obligation generation (vault-owned counter or hash-chained previous_evidence_id verification against vault history); treat an unreadable vault as UNKNOWN rather than match when the receipt is not freshly executed.",
+  "severity": "minor",
+  "disposition": "documented_with_conservative_fallback",
+  "workaround": "None: content addressing still rejects tampered cores, and the previous_evidence_id chain records (but does not enforce) lineage.",
+  "status": "open",
+  "relevant_files": [
+    "tools/mncs_test_verify.py"
+  ],
+  "relevant_tests": [
+    "tests/test_verify.py"
+  ]
+}

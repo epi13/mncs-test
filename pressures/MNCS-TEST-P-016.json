@@ -1,0 +1,25 @@
+{
+  "schema_version": "mncs-test.pressure/1",
+  "id": "MNCS-TEST-P-016",
+  "title": "Single-evidence policy cannot reuse older closure-identical evidence",
+  "commons_pressure_id": null,
+  "commons_coordination": "No Commons record filed. Owning layer is mncs-test coherence/Store history indexing.",
+  "verified_language_profile": "0.18",
+  "target_layer": "test coherence policy",
+  "observed_need": "Coherence admits at most one evidence record per obligation (the current receipt file). When the semantic closure returns to a previously executed value (A PASS, B FAIL, C identical-to-A), the obligation re-executes even though vaulted evidence for that exact closure exists.",
+  "current_language_behavior": "Demonstrated: PASS recorded, assertion broken (FAIL regression), assertion restored: the restore re-executes (correct, since the latest evidence is FAIL with a different closure) although PASS evidence for the identical closure exists in history. The system answers 'not current' instead of 'executed before with this closure'.",
+  "why_insufficient": "Re-execution is sound but wasteful, and the report cannot distinguish 'never executed with these inputs' from 'executed with these exact inputs N revisions ago'. The latter is valuable regression-cycle signal.",
+  "minimal_reproducer": "See docs/compiler-closure-contract.md fixtures note; scratch demo rev A (PASS) -> rev C (FAIL) -> rev D (closure == A): rev D executes rather than citing rev A.",
+  "desired_direction": "Vault-indexed closure history: Store answers 'newest verdict for closure C' per obligation; native policy admits a history hit as a distinct reason (closure_recalled) with produced/current revision provenance and a regression/fixed transition against the latest evidence. Bound history depth explicitly.",
+  "severity": "minor",
+  "disposition": "documented_with_conservative_fallback",
+  "workaround": "Re-execution: always sound, transition labels (regression/fixed) still computed against the latest evidence.",
+  "status": "open",
+  "relevant_files": [
+    "tools/mncs_test_verify.py",
+    "native/mncs/test/verification_coherence_v2.mncs"
+  ],
+  "relevant_tests": [
+    "tests/test_verify.py"
+  ]
+}

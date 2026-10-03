@@ -10,15 +10,19 @@
   "current_language_behavior": "`mncs test-inventory` reports the source module's subject identity/fingerprint plus per-test declaration/test-case identities, spans, signatures, effects, and capabilities, but no resolved import closure. mncs-test-verify therefore fingerprints every MNCS source in the repository: docs/scripts changes preserve reuse, but any suite edit conservatively invalidates every obligation in the repo.",
   "why_insufficient": "Host-side import resolution would duplicate compiler knowledge (forbidden by the test tool's own architecture). Only the compiler can state authoritatively which files it read.",
   "minimal_reproducer": "In a two-suite repository, edit suite A and run mncs-test-verify: obligation B re-executes even though its subject, inventory, and invalidation closure are unchanged, because the shared repository fingerprint covers suite A.",
-  "desired_direction": "Extend mncs.test-inventory/1 with the resolved module/file closure (content identities); mncs-test-verify will bind per-obligation fingerprints to it and compute affected sets precisely.",
+  "desired_direction": "Extend mncs.test-inventory/1 with a resolution_closure block (complete flag, per-module content identities, closure digest, compile configuration) per docs/compiler-closure-contract.md; mncs-test-verify will bind per-obligation reuse to it and keep the host superset as fallback.",
   "severity": "minor",
   "disposition": "documented_with_conservative_fallback",
-  "workaround": "Repository-wide MNCS-source fingerprinting: sound (a superset of what can matter), merely imprecise across obligations.",
-  "status": "open",
+  "workaround": "Host-measured source superset (every .mncs under library roots + manifests + verifier + stdlib authorities), committed as v2 closure_current reuse: sound, proves doc changes irrelevant, imprecise across suites/modules.",
+  "status": "contract_requested",
   "relevant_files": [
-    "tools/mncs_test_verify.py"
+    "tools/mncs_test_verify.py",
+    "native/mncs/test/verification_coherence_v2.mncs",
+    "docs/compiler-closure-contract.md",
+    "tests/closure_suite.mncs"
   ],
   "relevant_tests": [
-    "tests/test_verify.py"
+    "tests/test_verify.py",
+    "tests/test_verifier_units.py"
   ]
 }
