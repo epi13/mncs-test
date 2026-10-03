@@ -497,6 +497,9 @@ def test_native_application_refuses_mismatched_interface_descriptor() -> None:
     try:
         temporary.write(json.dumps(descriptor))
         temporary.close()
+        # Cold provider compile takes ~55s unloaded and several minutes
+        # when other agents saturate the box; size the timeout for a
+        # shared loaded machine, not a quiet one.
         completed = subprocess.run(
             [
                 str(MNCS),
@@ -513,7 +516,7 @@ def test_native_application_refuses_mismatched_interface_descriptor() -> None:
             capture_output=True,
             text=True,
             check=False,
-            timeout=180,
+            timeout=300,
         )
     finally:
         path.unlink()
