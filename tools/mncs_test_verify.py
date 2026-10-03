@@ -42,6 +42,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -143,31 +144,19 @@ def find_mncs(explicit: str | None, repo: Path) -> str:
     )
 
 
-def toolchain_identity(mncs: str, cache_dir: Path) -> tuple[str, str, bool]:
-    """Identify the toolchain binary as version + content digest (cached).
+def toolchain_identity(mncs: str) -> tuple[str, str]:
+    """Identify the toolchain binary as version + content digest.
 
-    Returns (identity, version, probed): probed is True when the version
-    subprocess actually ran (a cache hit runs nothing).
+    The digest is recomputed on every run (~0.5s for a 231MB binary):
+    a cached identity would be an unprotected trust assumption, and a
+    poisoned or stale cache entry would silently reuse evidence across
+    a toolchain change. No state, no trust.
     """
     binary = Path(mncs)
     try:
-        stat = binary.stat()
+        binary.stat()
     except OSError as error:
         raise VerifyError(f"toolchain is unavailable: {error}") from error
-    cache_path = cache_dir / ".toolchain.json"
-    try:
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        cached = None
-    if (
-        isinstance(cached, dict)
-        and cached.get("path") == str(binary)
-        and cached.get("size") == stat.st_size
-        and cached.get("mtime_ns") == stat.st_mtime_ns
-        and isinstance(cached.get("identity"), str)
-        and isinstance(cached.get("version"), str)
-    ):
-        return cached["identity"], cached["version"], False
     try:
         completed = subprocess.run(
             [str(binary), "--version"], capture_output=True, text=True, check=False, timeout=30
@@ -182,18 +171,7 @@ def toolchain_identity(mncs: str, cache_dir: Path) -> tuple[str, str, bool]:
                 digest.update(chunk)
     except OSError as error:
         raise VerifyError(f"toolchain digest failed: {error}") from error
-    identity = sha256_hex(f"{version}\n{digest.hexdigest()}".encode())
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(cache_path, json.dumps(
-        {
-            "path": str(binary),
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "version": version,
-            "identity": identity,
-        }
-    ))
-    return identity, version, True
+    return sha256_hex(f"{version}\n{digest.hexdigest()}".encode()), version
 
 
 def git_head(repo: Path) -> str:
@@ -266,11 +244,11 @@ def repository_fingerprint(
 
     The fingerprint binds the revision, the status of every file that can
     influence a native run (MNCS sources anywhere in the repo plus the
-    verification manifests), the verifier implementation, and the content
-    of library roots outside the repo. Documentation, scripts, and other
-    non-source worktree changes provably cannot affect module resolution
-    or suite semantics, so they preserve reuse. Anything else fails
-    closed to unmeasurable.
+    verification manifests), the verifier implementation, the content
+    of library roots outside the repo, and the ambient stdlib bundle.
+    Documentation, scripts, and other non-source worktree changes
+    provably cannot affect module resolution or suite semantics, so they
+    preserve reuse. Anything else fails closed to unmeasurable.
     """
     revision = git_head(repo)
     stats["subprocesses"] += 1
@@ -306,9 +284,31 @@ def repository_fingerprint(
             entries.append(f"{path.relative_to(root).as_posix()}={sha256_hex(content)}")
         outside_bits.append(f"root:{raw}\n" + "\n".join(entries))
     fingerprint = sha256_hex(
-        "\n".join([revision, filtered, verifier_key(), *outside_bits]).encode()
+        "\n".join(
+            [revision, filtered, verifier_key(), stdlib_bundle_digest(), *outside_bits]
+        ).encode()
     )
     return revision, fingerprint
+
+
+def stdlib_bundle_digest() -> str:
+    """Digest the ambient stdlib bundle (or record its absence).
+
+    The toolchain admits MNCS_STDLIB_BUNDLE as an alternate stdlib source
+    alongside explicit library roots. A set-then-unset (or changed) bundle
+    must invalidate evidence exactly like a changed library file; an
+    always-unset bundle digests to a stable constant.
+    """
+    raw = os.environ.get("MNCS_STDLIB_BUNDLE", "").strip()
+    if not raw:
+        return "stdlib-bundle:unset"
+    try:
+        content = Path(raw).read_bytes()
+    except OSError as error:
+        raise VerifyError(f"stdlib bundle is unreadable: {error}") from error
+    if len(content) > MAX_DEP_BYTES:
+        raise VerifyError("stdlib bundle exceeds the measurement bound")
+    return f"stdlib-bundle:sha256:{sha256_hex(content)}"
 
 
 # ---------------------------------------------------------------------------
@@ -936,9 +936,15 @@ def verify_repository(
         else:
             measurable.append(obligation)
 
+    stale_cache = receipts_dir / ".toolchain.json"
+    if stale_cache.is_file():
+        try:
+            stale_cache.unlink()
+        except OSError:
+            pass
     try:
-        toolchain, toolchain_version, toolchain_probed = toolchain_identity(mncs, receipts_dir)
-        stats["subprocesses"] += 1 if toolchain_probed else 0
+        toolchain, toolchain_version = toolchain_identity(mncs)
+        stats["subprocesses"] += 1
         provider_available = True
         toolchain_note = None
     except VerifyError as error:
@@ -1304,6 +1310,12 @@ def act_on_verdict(
     return entry
 
 
+def run_stamp() -> str:
+    # Unique across processes: timestamp alone can collide between two
+    # concurrent verifiers, which would interleave result.json bytes.
+    return f"{time.time_ns():x}-{os.getpid():x}-{secrets.token_hex(4)}"
+
+
 def execute_bound_suite(
     world: dict,
     entry: dict,
@@ -1335,8 +1347,9 @@ def execute_bound_suite(
         entry["action"] = "not_executed"
         entry["notes"].append("resolved selection is empty; refusing to broaden silently")
         return entry
-    run_stamp = f"{time.time_ns():x}"
-    artifacts_dir = artifacts_root / f"{sha256_hex(identity.encode())[:16]}-{run_stamp}"
+    artifacts_dir = artifacts_root / (
+        f"{sha256_hex(identity.encode())[:16]}-{run_stamp()}"
+    )
     stats["subprocesses"] += 1
     stats["suite_runs"] += 1
     execution = execute_suite(
@@ -1384,8 +1397,27 @@ def finish_execution(
             entry["notes"].append(f"digest failed: {error}")
             return entry
         verdict = {"pass": "PASS", "fail": "FAIL", "unsupported": "UNKNOWN"}[outcome]
+        entry["coverage"] = {
+            "considered": world["test_count"],
+            "selected": len(resolved),
+            "complete": not world["inventory_truncated"],
+        }
+        if world["inventory_truncated"]:
+            # Native selection expresses at most 64 identities: the executed
+            # subset is a useful signal but never a verdict over the whole
+            # inventory. Report it, write no receipt, stay UNKNOWN.
+            entry["action"] = "executed"
+            entry["verdict"] = "UNKNOWN"
+            entry["verdict_source"] = "executed-partial"
+            entry["digest"] = digest
+            entry["notes"].append(
+                f"inventory truncated: executed {len(resolved)} of "
+                f"{world['test_count']} tests; no receipt written"
+            )
+            return entry
         previous = world["receipt"]
         previous_verdict = previous.get("verdict") if previous else None
+        previous_evidence_id = previous.get("evidence_id") if previous else None
         receipt = {
             "schema_version": RECEIPT_SCHEMA,
             "obligation_identity": identity,
@@ -1399,6 +1431,7 @@ def finish_execution(
             "result_sha256": sha256_hex(canonical_json(result)),
             "artifact_dir": artifacts_dir.name,
             "previous_verdict": previous_verdict,
+            "previous_evidence_id": previous_evidence_id,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "producer": VERIFY_VERSION,
         }
@@ -1409,6 +1442,7 @@ def finish_execution(
         entry["verdict_source"] = "executed"
         entry["digest"] = digest
         entry["evidence_id"] = receipt["evidence_id"]
+        entry["previous_evidence_id"] = previous_evidence_id
         if previous_verdict == "PASS" and verdict == "FAIL":
             entry["transition"] = "regression"
         elif previous_verdict == "FAIL" and verdict == "PASS":
@@ -1551,6 +1585,9 @@ def render_report_text(report: dict) -> str:
             line += f" *** {entry['transition'].upper()} ***"
         if action in ("unresolved", "not_executed", "deferred"):
             line += f" [{entry.get('status')}/{entry.get('reason')}]"
+        coverage = entry.get("coverage") or {}
+        if coverage and not coverage.get("complete", True):
+            line += f" [partial {coverage.get('selected')}/{coverage.get('considered')}]"
         lines.append(line)
         for note in entry.get("notes", [])[:3]:
             lines.append(f"    note: {note}")
