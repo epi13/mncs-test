@@ -313,6 +313,27 @@ def test_closure_follows_symlinked_roots_and_fails_closed(tmp_path: Path) -> Non
     (sibling / "lib" / "dep.mncs").write_text("module dep { changed }\n")
     changed, trusted_changed = _closure(repo, str(sibling))
     assert trusted_changed and changed != direct
+    # Entries use logical paths: repointing the link at an identical
+    # target preserves the closure.
+    via_link, _ = measure_closure(
+        [str(repo), str(repo / "sibling-lib")],
+        {},
+        mncs="mncs-absent",
+        repo=repo,
+        inventory_relpath=".mncs/project.json",
+    )
+    moved = tmp_path / "moved-lib"
+    sibling.rename(moved)
+    (repo / "sibling-lib").unlink()
+    (repo / "sibling-lib").symlink_to(moved, target_is_directory=True)
+    restated, trusted_restated = measure_closure(
+        [str(repo), str(repo / "sibling-lib")],
+        {},
+        mncs="mncs-absent",
+        repo=repo,
+        inventory_relpath=".mncs/project.json",
+    )
+    assert trusted_restated and restated == via_link
     (tmp_path / "cycle").symlink_to(tmp_path / "cycle", target_is_directory=True)
     cyclic, trusted_cyclic = _closure(repo, str(tmp_path / "cycle"))
     assert (cyclic, trusted_cyclic) == ("", False)

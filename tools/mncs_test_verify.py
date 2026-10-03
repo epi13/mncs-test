@@ -588,8 +588,11 @@ def measure_closure(
         entries.append(f"{tag}:{kind}:{logical.as_posix()}={digest.hexdigest()}")
         return True
 
-    def walk(real_root: Path, tag: str) -> bool:
-        stack = [real_root]
+    def walk(root: Path, real_root: Path, tag: str) -> bool:
+        # The stack carries logical paths (symlink targets are descended
+        # through the link), so entries stay stable when a root's target
+        # moves; identity and cycle checks use resolved paths.
+        stack = [root]
         visited = {real_root}
         while stack:
             current = stack.pop()
@@ -605,7 +608,7 @@ def measure_closure(
                             if target in visited:
                                 return False
                             visited.add(target)
-                            stack.append(target)
+                            stack.append(child)
                         elif target.is_file():
                             if not hash_file(child, target, tag, "link"):
                                 return False
@@ -615,7 +618,7 @@ def measure_closure(
                     if child.is_dir():
                         if child.name in CLOSURE_PRUNE_DIRS:
                             continue
-                        if child.name == ".mncs" and current != real_root:
+                        if child.name == ".mncs" and current != root:
                             continue
                         stack.append(child)
                     elif child.is_file():
@@ -645,7 +648,7 @@ def measure_closure(
         if str(real) in seen:
             continue
         seen.add(str(real))
-        if not walk(real, f"root{index}"):
+        if not walk(Path(raw), real, f"root{index}"):
             return "", False
     stats["closure_files"] = stats.get("closure_files", 0) + file_count
     stats["closure_bytes"] = stats.get("closure_bytes", 0) + byte_count
