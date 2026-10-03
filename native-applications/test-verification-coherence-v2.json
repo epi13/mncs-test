@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.verification-coherence-v2",
+  "source": "../native/mncs/test/verification_coherence_v2.mncs",
+  "module": "mncs.test.verification_coherence_v2",
+  "entry_function": "coherence_app_v2",
+  "profile": "0.18",
+  "interface_identity": "3478254eb97b79bf670ef268596374f55739ac6a85d6b37906c67caef959e808",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native",
+    "../../MNCS-Commons/src/mncs_commons/mesh/mncs"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

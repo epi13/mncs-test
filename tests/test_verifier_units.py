@@ -17,7 +17,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from mncs_test_native import run_native_app, toolchain_cache_dir  # noqa: E402
 from mncs_test_verify import (  # noqa: E402
+    build_coherence_row,
     finish_execution,
+    measure_closure,
     run_stamp,
     stdlib_bundle_digest,
     toolchain_identity,
@@ -236,3 +238,147 @@ def test_executed_entry_carries_previous_evidence_link(tmp_path: Path) -> None:
     assert result["previous_evidence_id"] == "previous-evidence"
     stored = json.loads(next((tmp_path / "receipts").glob("*.json")).read_text())
     assert stored["previous_evidence_id"] == "previous-evidence"
+
+
+def _closure_repo(root: Path) -> Path:
+    repo = root / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "suite.mncs").write_text("test one {}\n")
+    (repo / "src" / "other.mncs").write_text("module other {}\n")
+    (repo / "README.md").write_text("docs\n")
+    (repo / ".mncs").mkdir()
+    (repo / ".mncs" / "project.json").write_text("{}\n")
+    return repo
+
+
+def test_closure_is_stable_and_content_sensitive(tmp_path: Path) -> None:
+    repo = _closure_repo(tmp_path)
+    first, trusted = measure_closure([str(repo)], {})
+    assert trusted and first
+    again, trusted_again = measure_closure([str(repo)], {})
+    assert trusted_again and again == first
+    (repo / "src" / "other.mncs").write_text("module other { changed }\n")
+    changed, trusted_changed = measure_closure([str(repo)], {})
+    assert trusted_changed and changed != first
+
+
+def test_closure_prunes_volatile_vcs_and_derived(tmp_path: Path) -> None:
+    repo = _closure_repo(tmp_path)
+    before, _ = measure_closure([str(repo)], {})
+    (repo / ".git" / "objects").mkdir(parents=True)
+    (repo / ".git" / "objects" / "pack").write_text("git-bytes\n")
+    (repo / ".mncs" / "test-receipts").mkdir(parents=True)
+    (repo / ".mncs" / "test-receipts" / "r.json").write_text("{}\n")
+    (repo / ".mncs" / "test-artifacts" / "run1").mkdir(parents=True)
+    (repo / ".mncs" / "test-artifacts" / "run1" / "result.json").write_text("{}\n")
+    (repo / "native-applications" / ".mncs" / "toolchains").mkdir(parents=True)
+    (repo / "native-applications" / ".mncs" / "toolchains" / "a.json").write_text("{}\n")
+    (repo / "tools" / "__pycache__").mkdir(parents=True)
+    (repo / "tools" / "__pycache__" / "m.pyc").write_bytes(b"bytecode")
+    after, trusted = measure_closure([str(repo)], {})
+    assert trusted and after == before
+    # The direct-child manifest root is NOT pruned: manifest edits matter.
+    (repo / ".mncs" / "project.json").write_text('{"v": 2}\n')
+    manifest_changed, _ = measure_closure([str(repo)], {})
+    assert manifest_changed != before
+
+
+def test_closure_follows_symlinked_roots_and_fails_closed(tmp_path: Path) -> None:
+    repo = _closure_repo(tmp_path)
+    sibling = tmp_path / "sibling-lib"
+    (sibling / "lib").mkdir(parents=True)
+    (sibling / "lib" / "dep.mncs").write_text("module dep {}\n")
+    (repo / "sibling-lib").symlink_to(sibling, target_is_directory=True)
+    direct, _ = measure_closure([str(repo), str(sibling)], {})
+    assert direct
+    (sibling / "lib" / "dep.mncs").write_text("module dep { changed }\n")
+    changed, trusted_changed = measure_closure([str(repo), str(sibling)], {})
+    assert trusted_changed and changed != direct
+    (tmp_path / "cycle").symlink_to(tmp_path / "cycle", target_is_directory=True)
+    cyclic, trusted_cyclic = measure_closure([str(tmp_path / "cycle")], {})
+    assert (cyclic, trusted_cyclic) == ("", False)
+    missing, trusted_missing = measure_closure([str(tmp_path / "absent")], {})
+    assert (missing, trusted_missing) == ("", False)
+    dangling = repo / "dangling.mncs"
+    dangling.symlink_to(repo / "nowhere.mncs")
+    try:
+        dangled, trusted_dangled = measure_closure([str(repo)], {})
+        assert (dangled, trusted_dangled) == ("", False)
+    finally:
+        dangling.unlink()
+
+
+def test_closure_bounds_fail_closed_without_exceptions(tmp_path: Path) -> None:
+    import mncs_test_verify as verify_module
+
+    repo = _closure_repo(tmp_path)
+    with mock.patch.object(verify_module, "MAX_CLOSURE_FILES", 1):
+        identity, trusted = measure_closure([str(repo)], {})
+    assert (identity, trusted) == ("", False)
+    with mock.patch.object(verify_module, "MAX_CLOSURE_BYTES", 1):
+        identity, trusted = measure_closure([str(repo)], {})
+    assert (identity, trusted) == ("", False)
+
+
+def _obligation() -> dict:
+    return {
+        "identity": "ob-closure",
+        "lifecycle": "permanent",
+        "executor": {
+            "kind": "native_first_class_test",
+            "source_paths": ["src/suite.mncs"],
+            "declaration_identities": ["*"],
+        },
+    }
+
+
+def _bound(**overrides: object) -> dict:
+    bound = {
+        "definition_identity": "d",
+        "subject_identity": "s",
+        "subject_fingerprint": "f",
+        "executor_identity": "e",
+        "invalidation_identity": "i",
+        "toolchain_identity": "t",
+        "inventory_identity": "v",
+        "repository_revision": "r",
+        "repository_fingerprint": "p",
+        "closure_identity": "c" * 64,
+        "closure_trusted": True,
+    }
+    bound.update(overrides)
+    return bound
+
+
+def test_coherence_row_v2_carries_closure_both_sides() -> None:
+    receipt = {
+        "bound": _bound(closure_identity="old"),
+        "verifier_identity": "ver",
+        "verdict": "PASS",
+        "evidence_id": "ev",
+    }
+    row = build_coherence_row(
+        _obligation(), _bound(), ["t1"], False, receipt, True,
+    )
+    assert row["current"]["closure_identity"] == "c" * 64
+    assert row["current"]["closure_trusted"] is True
+    assert row["evidence"]["closure_identity"] == "old"
+    assert row["evidence"]["closure_trusted"] is True
+    assert row["evidence"]["verdict"] == "PASS"
+
+
+def test_coherence_row_v2_defaults_legacy_receipt_untrusted() -> None:
+    stored = _bound()
+    del stored["closure_identity"]
+    del stored["closure_trusted"]
+    receipt = {
+        "bound": stored,
+        "verifier_identity": "ver",
+        "verdict": "PASS",
+        "evidence_id": "ev",
+    }
+    row = build_coherence_row(
+        _obligation(), _bound(), ["t1"], False, receipt, True,
+    )
+    assert row["evidence"]["closure_identity"] == ""
+    assert row["evidence"]["closure_trusted"] is False

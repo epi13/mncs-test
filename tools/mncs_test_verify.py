@@ -20,6 +20,9 @@ Soundness rules (never violated to look fast):
 * The native coherence module owns every reuse decision; this file only
   measures and transports. It never reuses a result the native policy did
   not call current.
+* Evidence may be reused across repository revisions only when a
+  trusted semantic closure proves every relevant input unchanged;
+  untrusted or differing closures fall back to revision binding.
 * Anything unmeasurable (missing toolchain, missing git, invalid suite,
   oversized dependency closure, unknown vocabulary) is UNKNOWN, never
   queued blindly and never green.
@@ -65,6 +68,8 @@ VERIFY_VERSION = "mncs-test-verify/0.3.0"
 OBLIGATION_INVENTORY_SCHEMA = "mncs-family.verification-obligation-inventory/v1"
 COHERENCE_REQUEST_SCHEMA = "mncs.test-verification-coherence-request/1"
 COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
+COHERENCE_DESCRIPTOR_V2 = "test-verification-coherence-v2.json"
+COHERENCE_REQUEST_SCHEMA_V2 = "mncs.test-verification-coherence-request/2"
 RECEIPT_SCHEMA = "mncs.test-receipt/1"
 REPORT_SCHEMA = "mncs.test-verify-report/1"
 STORE_RECEIPT_SCHEMA = b"mncs.test-receipt/1"
@@ -76,6 +81,24 @@ MAX_FINGERPRINT_BYTES = 128
 MAX_PATTERNS = 8
 MAX_DEP_FILES = 512
 MAX_DEP_BYTES = 8 * 1024 * 1024
+MAX_CLOSURE_FILES = 8192
+MAX_CLOSURE_BYTES = 64 * 1024 * 1024
+# Closure-pruned directory names (any depth): version-control metadata,
+# derived bytecode, and verification's own volatile outputs. None of
+# these are compilation inputs; hashing them would make the closure
+# self-invalidating (receipts, caches) or revision-bound (.git).
+CLOSURE_PRUNE_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".jj",
+        "__pycache__",
+        "test-receipts",
+        "test-artifacts",
+        "test-store",
+    }
+)
 MAX_STATUS_BYTES = 65536
 MAX_DIAGNOSTIC_TEXT = 2048
 MAX_STDERR_TEXT = 4096
@@ -214,8 +237,10 @@ def verifier_key() -> str:
         "tools/mncs_test_native.py",
         "native/mncs/test/digest.mncs",
         "native/mncs/test/verification_coherence.mncs",
+        "native/mncs/test/verification_coherence_v2.mncs",
         "native-applications/test-digest.json",
         "native-applications/test-verification-coherence.json",
+        "native-applications/test-verification-coherence-v2.json",
     ]
     digest = hashlib.sha256(VERIFY_VERSION.encode())
     for member in members:
@@ -389,6 +414,114 @@ def measure_invalidation(repo: Path, obligation: dict) -> str:
         if file_count > MAX_DEP_FILES or byte_count > MAX_DEP_BYTES:
             raise VerifyError("invalidation closure exceeds the measurement bound")
     return sha256_hex("\n".join(entries).encode())
+
+
+def measure_closure(libraries: list[str], stats: dict) -> tuple[str, bool]:
+    """Measure the obligation's semantic source closure (superset, bounded).
+
+    The closure digests every file a native execution of the obligation
+    can read: every regular file under each library root (declared
+    roots, the repository, the runner's native root), the verifier
+    implementation, and the ambient stdlib bundle. It is a deliberate
+    superset, not a compiler-resolved dependency set: anything the
+    compiler could consult is covered, so equal closures prove no
+    relevant input changed. Toolchain, inventory, subject, definition,
+    executor, and invalidation identities travel as separate fields and
+    are compared separately by native policy.
+
+    Symlinks are followed (a symlinked library root still contributes
+    its content); symlink cycles, dangling links, missing roots, and
+    unreadable files yield an untrusted closure rather than a silent
+    gap. Version-control metadata, derived bytecode, nested native-app
+    caches, and verification's own volatile outputs are pruned: they
+    are never compilation inputs, and hashing them would make the
+    closure self-invalidating or revision-bound.
+
+    Any anomaly yields ("", False): native policy treats an untrusted
+    closure as absent and falls back to the legacy revision-bound rule.
+    Closure measurement never fails an obligation by itself.
+    """
+    entries: list[str] = []
+    file_count = 0
+    byte_count = 0
+
+    def hash_file(logical: Path, physical: Path, tag: str, kind: str) -> bool:
+        nonlocal file_count, byte_count
+        try:
+            digest = hashlib.sha256()
+            with physical.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    digest.update(chunk)
+            size = physical.stat().st_size
+        except OSError:
+            return False
+        file_count += 1
+        byte_count += size
+        if file_count > MAX_CLOSURE_FILES or byte_count > MAX_CLOSURE_BYTES:
+            return False
+        entries.append(f"{tag}:{kind}:{logical.as_posix()}={digest.hexdigest()}")
+        return True
+
+    def walk(real_root: Path, tag: str) -> bool:
+        stack = [real_root]
+        visited = {real_root}
+        while stack:
+            current = stack.pop()
+            try:
+                children = sorted(current.iterdir(), key=lambda p: p.name)
+            except OSError:
+                return False
+            for child in children:
+                try:
+                    if child.is_symlink():
+                        target = child.resolve()
+                        if target.is_dir():
+                            if target in visited:
+                                return False
+                            visited.add(target)
+                            stack.append(target)
+                        elif target.is_file():
+                            if not hash_file(child, target, tag, "link"):
+                                return False
+                        else:
+                            return False
+                        continue
+                    if child.is_dir():
+                        if child.name in CLOSURE_PRUNE_DIRS:
+                            continue
+                        if child.name == ".mncs" and current != real_root:
+                            continue
+                        stack.append(child)
+                    elif child.is_file():
+                        if child.suffix == ".pyc":
+                            continue
+                        if not hash_file(child, child, tag, "file"):
+                            return False
+                    # Sockets, fifos, devices: not compilable inputs; ignore.
+                except OSError:
+                    return False
+        return True
+
+    try:
+        head = [verifier_key(), stdlib_bundle_digest()]
+    except VerifyError:
+        return "", False
+    seen: set[str] = set()
+    for index, raw in enumerate(libraries):
+        try:
+            real = Path(raw).resolve()
+        except OSError:
+            return "", False
+        if not real.is_dir():
+            return "", False
+        if str(real) in seen:
+            continue
+        seen.add(str(real))
+        if not walk(real, f"root{index}"):
+            return "", False
+    stats["closure_files"] = stats.get("closure_files", 0) + file_count
+    stats["closure_bytes"] = stats.get("closure_bytes", 0) + byte_count
+    return sha256_hex("\n".join([*head, *sorted(entries)]).encode()), True
 
 
 def _file_digest(path: Path) -> str:
@@ -697,6 +830,8 @@ def empty_evidence() -> dict:
         "inventory_identity": "",
         "repository_revision": "",
         "repository_fingerprint": "",
+        "closure_identity": "",
+        "closure_trusted": False,
         "verdict": "UNKNOWN",
         "evidence_id": "",
     }
@@ -746,8 +881,10 @@ def build_coherence_row(
             "inventory_identity",
             "repository_revision",
             "repository_fingerprint",
+            "closure_identity",
         ):
             evidence[key] = stored.get(key, "")
+        evidence["closure_trusted"] = stored.get("closure_trusted", False) is True
         evidence["verifier_identity"] = receipt.get("verifier_identity", "")
         evidence["verdict"] = receipt.get("verdict", "UNKNOWN")
         evidence["evidence_id"] = receipt.get("evidence_id", "")
@@ -755,6 +892,12 @@ def build_coherence_row(
     runnable_native = kind == NATIVE_KIND and len(
         (executor.get("source_paths", []) if isinstance(executor, dict) else [])
     ) == 1
+    closure_identity = bound.get("closure_identity", "")
+    if not isinstance(closure_identity, str):
+        raise VerifyError("closure identity must be a string")
+    bound_text(closure_identity, "closure identity", MAX_FINGERPRINT_BYTES, allow_empty=True)
+    if not isinstance(bound.get("closure_trusted"), bool):
+        raise VerifyError("closure trust must be a boolean")
     return {
         "identity": obligation["identity"],
         "lifecycle": lifecycle,
@@ -784,13 +927,13 @@ def evaluate_coherence(
 ) -> dict:
     try:
         return run_native_app(
-            "test-verification-coherence.json",
+            COHERENCE_DESCRIPTOR_V2,
             {
-                "schema_version": COHERENCE_REQUEST_SCHEMA,
+                "schema_version": COHERENCE_REQUEST_SCHEMA_V2,
                 "max_executions": max_executions,
                 "obligations": rows,
             },
-            request_schema=COHERENCE_REQUEST_SCHEMA,
+            request_schema=COHERENCE_REQUEST_SCHEMA_V2,
             result_schema=COHERENCE_RESULT_SCHEMA,
             mncs=mncs,
             cwd=cwd,
@@ -918,6 +1061,8 @@ def verify_repository(
         "suite_runs": 0,
         "coherence_runs": 0,
         "digest_runs": 0,
+        "closure_files": 0,
+        "closure_bytes": 0,
     }
 
     repository, obligations, inventory_relpath = load_obligations(repo)
@@ -1155,6 +1300,7 @@ def measure_obligation(
         )
         subject_fingerprint = executor_identity[:MAX_FINGERPRINT_BYTES]
         inventory_identity = "no-native-inventory"
+    closure_identity, closure_trusted = measure_closure(libraries, stats)
     bound = {
         "definition_identity": definition,
         "subject_identity": subject_identity,
@@ -1165,6 +1311,8 @@ def measure_obligation(
         "inventory_identity": inventory_identity,
         "repository_revision": revision,
         "repository_fingerprint": repo_fingerprint,
+        "closure_identity": closure_identity,
+        "closure_trusted": closure_trusted,
     }
     return {
         "obligation": obligation,
@@ -1293,7 +1441,16 @@ def act_on_verdict(
                 )
         entry["action"] = "reused"
         entry["verdict"] = receipt["verdict"]
-        entry["verdict_source"] = "reused"
+        if reason == "closure_current":
+            produced = receipt.get("bound", {}).get("repository_revision", "?")
+            current = world["bound"].get("repository_revision", "?")
+            entry["notes"].append(
+                f"closure reuse: produced at {str(produced)[:12]}, "
+                f"reused at {str(current)[:12]}; semantic closure identical"
+            )
+            entry["verdict_source"] = "reused-closure"
+        else:
+            entry["verdict_source"] = "reused"
         entry["digest"] = receipt.get("digest")
         entry["evidence_id"] = receipt.get("evidence_id")
         return entry
@@ -1494,6 +1651,7 @@ def assemble_report(
         "obligations": len(obligations),
         "tests_considered": tests_considered,
         "reused": 0,
+        "reused_closure": 0,
         "executed": 0,
         "pass": 0,
         "fail": 0,
@@ -1509,6 +1667,8 @@ def assemble_report(
         action = entry.get("action")
         if action == "reused":
             summary["reused"] += 1
+            if entry.get("verdict_source") == "reused-closure":
+                summary["reused_closure"] += 1
         elif action == "executed":
             summary["executed"] += 1
         elif action == "deferred":
@@ -1565,7 +1725,8 @@ def render_report_text(report: dict) -> str:
             f"{summary['tests_considered']} tests considered) -> {report['overall']}"
         ),
         (
-            f"  reused: {summary['reused']} · executed: {summary['executed']} "
+            f"  reused: {summary['reused']} ({summary['reused_closure']} closure) "
+            f"· executed: {summary['executed']} "
             f"· pass: {summary['pass']} · fail: {summary['fail']} "
             f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "
             f"· not-executed: {summary['not_executed']} · unresolved: {summary['unresolved']}"
