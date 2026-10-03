@@ -1,5 +1,8 @@
 # mncs-test
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 Native testing, verification, and conformance framework for MNCS and the
 broader MNCS project family.
 
