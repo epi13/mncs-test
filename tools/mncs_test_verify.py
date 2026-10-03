@@ -926,11 +926,86 @@ def load_store_api() -> tuple[object | None, str | None]:
     return None, "mncs-store checkout is unavailable (set MNCS_STORE_PACKAGE_DIR)"
 
 
+class RunStores:
+    """Borrow one Store handle per verify run instead of one per obligation.
+
+    Opening an EmbeddedStore costs ~1.5s (Store session start plus
+    artifact verification), and a multi-obligation run paid that once
+    per obligation for reads that all share one vault. This holder
+    opens lazily -- a read-only handle only when a vault exists to
+    read, a read-write handle only when an admission needs it -- and
+    closes explicitly at run end, so a run holds at most two handles
+    with a bounded descriptor lifetime.
+
+    Sharing is sound: ``current_generation`` re-reads the head file on
+    every access (CAS retries stay live), and ``find_bound_objects``
+    rebuilds its projection whenever the head moved, so this run's own
+    admits and concurrent publishers are observed, never hidden. Open
+    failures are cached too: a vault that cannot be opened reports
+    "unavailable" for every obligation without paying the failing open
+    once per obligation. A missing vault is *not* cached -- it is
+    re-statted on every borrow -- so a vault this run's own admission
+    creates is visible to later borrows.
+    """
+
+    def __init__(self) -> None:
+        self._read: object | None = None
+        self._write: object | None = None
+        self._read_error: str | None = None
+        self._write_error: str | None = None
+        self.read_opens = 0
+        self.write_opens = 0
+
+    def reader(self, store_dir: Path, loaded: object) -> tuple[object | None, str | None]:
+        """Borrow the run's read-only handle, opening it on first use."""
+        if self._read is not None:
+            return self._read, None
+        if self._read_error is not None:
+            return None, self._read_error
+        EmbeddedStore, _StoreError, _codes = loaded  # type: ignore[misc]
+        try:
+            self._read = EmbeddedStore(store_dir, read_only=True)
+        except Exception as error:
+            self._read_error = f"store open failed: {error}"
+            return None, self._read_error
+        self.read_opens += 1
+        return self._read, None
+
+    def writer(self, store_dir: Path, loaded: object) -> tuple[object | None, str | None]:
+        """Borrow the run's read-write handle, opening it on first use."""
+        if self._write is not None:
+            return self._write, None
+        if self._write_error is not None:
+            return None, self._write_error
+        EmbeddedStore, _StoreError, _codes = loaded  # type: ignore[misc]
+        try:
+            self._write = EmbeddedStore(store_dir)
+        except Exception as error:
+            self._write_error = f"store open failed: {error}"
+            return None, self._write_error
+        self.write_opens += 1
+        return self._write, None
+
+    def close(self) -> None:
+        """Release both handles; safe to call more than once."""
+        for handle in (self._read, self._write):
+            if handle is None:
+                continue
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._read = None
+        self._write = None
+
+
 def admit_receipt_to_store(
     store_dir: Path,
     receipt: dict,
     relations: list[bytes],
     provenance: list[bytes],
+    *,
+    stores: RunStores | None = None,
 ) -> dict:
     """Admit one receipt to the repo-local Store with CAS retries.
 
@@ -938,6 +1013,10 @@ def admit_receipt_to_store(
     obligation, so each obligation's history is a bounded prefix scan
     and the newest generation among the matches is the authoritative
     head. Identical evidence re-admits as DUPLICATE.
+
+    Pass the run's ``RunStores`` holder to reuse one read-write handle
+    across admissions; without it each call opens and closes its own
+    handle (the legacy direct-call behavior).
     """
     outcome: dict = {"status": "skipped", "detail": None, "generation": None}
     loaded, reason = load_store_api()
@@ -950,11 +1029,19 @@ def admit_receipt_to_store(
     ].encode("ascii")
     payload = evidence_envelope(receipt, receipt.get("previous_evidence_id"))
     descriptor = canonical_json(receipt.get("digest", {}))
-    try:
-        store = EmbeddedStore(store_dir)
-    except Exception as error:  # Store-owned error taxonomy, transported as text.
-        outcome["detail"] = f"store open failed: {error}"
-        return outcome
+    owned = False
+    if stores is not None:
+        store, detail = stores.writer(store_dir, loaded)
+        if store is None:
+            outcome["detail"] = detail
+            return outcome
+    else:
+        try:
+            store = EmbeddedStore(store_dir)
+        except Exception as error:  # Store-owned error taxonomy, transported as text.
+            outcome["detail"] = f"store open failed: {error}"
+            return outcome
+        owned = True
     try:
         for _ in range(STORE_CAS_RETRIES + 1):
             try:
@@ -987,13 +1074,16 @@ def admit_receipt_to_store(
         outcome["detail"] = "store admit exhausted CAS retries"
         return outcome
     finally:
-        try:
-            store.close()
-        except Exception:
-            pass
+        if owned:
+            try:
+                store.close()
+            except Exception:
+                pass
 
 
-def resolve_obligation_evidence(store_dir: Path, identity: str) -> dict:
+def resolve_obligation_evidence(
+    store_dir: Path, identity: str, *, stores: RunStores | None = None
+) -> dict:
     """Resolve authoritative evidence for one obligation from the Store.
 
     Returns {"status", "detail", "head", "history", "generation"} where
@@ -1006,6 +1096,10 @@ def resolve_obligation_evidence(store_dir: Path, identity: str) -> dict:
     The head is the newest generation among the obligation's immutable
     evidence publications. Local receipt files are projections of this
     authority, never the authority itself.
+
+    Pass the run's ``RunStores`` holder to reuse one read-only handle
+    across obligations; without it each call opens and closes its own
+    handle (the legacy direct-call behavior).
     """
     resolved: dict = {
         "status": "unavailable",
@@ -1026,11 +1120,19 @@ def resolve_obligation_evidence(store_dir: Path, identity: str) -> dict:
         resolved["detail"] = reason
         return resolved
     EmbeddedStore, _StoreError, _codes = loaded
-    try:
-        store = EmbeddedStore(store_dir, read_only=True)
-    except Exception as error:
-        resolved["detail"] = f"store open failed: {error}"
-        return resolved
+    owned = False
+    if stores is not None:
+        store, detail = stores.reader(store_dir, loaded)
+        if store is None:
+            resolved["detail"] = detail
+            return resolved
+    else:
+        try:
+            store = EmbeddedStore(store_dir, read_only=True)
+        except Exception as error:
+            resolved["detail"] = f"store open failed: {error}"
+            return resolved
+        owned = True
     try:
         try:
             generation = store.current_generation
@@ -1089,10 +1191,11 @@ def resolve_obligation_evidence(store_dir: Path, identity: str) -> dict:
         resolved["generation"] = generation
         return resolved
     finally:
-        try:
-            store.close()
-        except Exception:
-            pass
+        if owned:
+            try:
+                store.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -1335,6 +1438,43 @@ def verify_repository(
     admit_store: bool = True,
     dry_run: bool = False,
 ) -> dict:
+    """Verify one repository, sharing one Store session across obligations.
+
+    The run holds at most one read-only and one read-write Store handle
+    (opened lazily, closed explicitly even on failure), and measures
+    each distinct source closure once. See RunStores.
+    """
+    stores = RunStores()
+    try:
+        return _verify_repository_inner(
+            repo,
+            mncs=mncs,
+            max_executions=max_executions,
+            suite_timeout=suite_timeout,
+            inventory_timeout=inventory_timeout,
+            coherence_timeout=coherence_timeout,
+            max_failures=max_failures,
+            admit_store=admit_store,
+            dry_run=dry_run,
+            stores=stores,
+        )
+    finally:
+        stores.close()
+
+
+def _verify_repository_inner(
+    repo: Path,
+    *,
+    mncs: str,
+    max_executions: int = 16,
+    suite_timeout: float = 600.0,
+    inventory_timeout: float = 120.0,
+    coherence_timeout: float = 120.0,
+    max_failures: int = 8,
+    admit_store: bool = True,
+    dry_run: bool = False,
+    stores: RunStores | None = None,
+) -> dict:
     repo = repo.resolve()
     receipts_dir = repo / ".mncs" / "test-receipts"
     artifacts_root = repo / ".mncs" / "test-artifacts"
@@ -1351,7 +1491,10 @@ def verify_repository(
         "closure_bytes": 0,
         "store_reads": 0,
         "store_writes": 0,
+        "store_read_opens": 0,
+        "store_write_opens": 0,
     }
+    closure_cache: dict = {}
 
     repository, obligations, inventory_relpath = load_obligations(repo)
     entries: dict[str, dict] = {}
@@ -1428,6 +1571,8 @@ def verify_repository(
                 inventory_relpath,
                 store_dir,
                 admit_store,
+                stores,
+                closure_cache,
             )
         except VerifyError as error:
             entries[identity] = {
@@ -1563,8 +1708,12 @@ def verify_repository(
             admit_store,
             stats,
             dry_run,
+            stores,
         )
 
+    if stores is not None:
+        stats["store_read_opens"] = stores.read_opens
+        stats["store_write_opens"] = stores.write_opens
     removed = 0 if dry_run else collect_garbage(artifacts_root)
     return assemble_report(
         repository,
@@ -1598,6 +1747,8 @@ def measure_obligation(
     inventory_relpath: str,
     store_dir: Path,
     admit_store: bool,
+    stores: RunStores | None = None,
+    closure_cache: dict | None = None,
 ) -> dict:
     identity = bound_text(obligation["identity"], "obligation identity", MAX_IDENTITY_BYTES)
     executor = obligation.get("executor", {})
@@ -1650,9 +1801,21 @@ def measure_obligation(
         )
         subject_fingerprint = executor_identity[:MAX_FINGERPRINT_BYTES]
         inventory_identity = "no-native-inventory"
-    closure_identity, closure_trusted = measure_closure(
-        libraries, stats, mncs=mncs, repo=repo, inventory_relpath=inventory_relpath
-    )
+    # Obligations in one run usually share the same library roots, so
+    # the closure -- a pure function of (libraries, repo, manifests,
+    # toolchain, environment) -- is measured once per distinct input.
+    # Measuring once is more consistent than re-walking mid-run, never
+    # less: the inputs cannot change meaningfully within one run, and a
+    # mid-run filesystem change is observed identically either way.
+    closure_key = (tuple(libraries), str(repo), inventory_relpath, mncs)
+    if closure_cache is not None and closure_key in closure_cache:
+        closure_identity, closure_trusted = closure_cache[closure_key]
+    else:
+        closure_identity, closure_trusted = measure_closure(
+            libraries, stats, mncs=mncs, repo=repo, inventory_relpath=inventory_relpath
+        )
+        if closure_cache is not None:
+            closure_cache[closure_key] = (closure_identity, closure_trusted)
     bound = {
         "definition_identity": definition,
         "subject_identity": subject_identity,
@@ -1674,7 +1837,9 @@ def measure_obligation(
         "inventory_identities": inventory_identities,
         "inventory_truncated": inventory_truncated,
         "test_count": test_count,
-        **resolve_world_evidence(identity, receipts_dir, store_dir, admit_store, stats),
+        **resolve_world_evidence(
+            identity, receipts_dir, store_dir, admit_store, stats, stores
+        ),
     }
 
 
@@ -1684,6 +1849,7 @@ def resolve_world_evidence(
     store_dir: Path,
     admit_store: bool,
     stats: dict,
+    stores: RunStores | None = None,
 ) -> dict:
     """Resolve the evidence a coherence decision may use.
 
@@ -1708,7 +1874,7 @@ def resolve_world_evidence(
             },
         }
     stats["store_reads"] = stats.get("store_reads", 0) + 1
-    authority = resolve_obligation_evidence(store_dir, identity)
+    authority = resolve_obligation_evidence(store_dir, identity, stores=stores)
     return {
         "receipt": authority["head"],
         "presented": authority["head"],
@@ -1926,6 +2092,7 @@ def act_on_verdict(
     admit_store: bool,
     stats: dict,
     dry_run: bool = False,
+    stores: RunStores | None = None,
 ) -> dict:
     obligation = world["obligation"]
     identity = obligation["identity"]
@@ -1979,6 +2146,7 @@ def act_on_verdict(
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
+                stores=stores,
             )
         # A `current` verdict carries no resolved selection (nothing to
         # execute), so the host proves selection equivalence itself: the
@@ -2004,6 +2172,7 @@ def act_on_verdict(
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
+                stores=stores,
             )
         # The receipt consulted here is already authoritative: with
         # Store admission it is the vault head (the file is a projection
@@ -2050,6 +2219,7 @@ def act_on_verdict(
         return execute_bound_suite(
             world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
             suite_timeout, max_failures, admit_store, stats, resolved,
+            stores=stores,
         )
     if verdict.get("deferred", False):
         entry["action"] = "deferred"
@@ -2076,6 +2246,7 @@ def execute_bound_suite(
     admit_store: bool,
     stats: dict,
     resolved: list[str],
+    stores: RunStores | None = None,
 ) -> dict:
     obligation = world["obligation"]
     identity = obligation["identity"]
@@ -2104,7 +2275,7 @@ def execute_bound_suite(
     )
     return finish_execution(
         world, entry, execution, artifacts_dir, receipts_dir, store_dir,
-        mncs, repo, max_failures, admit_store, stats, resolved,
+        mncs, repo, max_failures, admit_store, stats, resolved, stores=stores,
     )
 
 
@@ -2121,6 +2292,7 @@ def finish_execution(
     admit_store: bool,
     stats: dict,
     resolved: list[str],
+    stores: RunStores | None = None,
 ) -> dict:
     obligation = world["obligation"]
     identity = obligation["identity"]
@@ -2197,7 +2369,7 @@ def finish_execution(
             # evidence is defined.
             stats["store_writes"] = stats.get("store_writes", 0) + 1
             entry["store"] = admit_receipt_to_store(
-                store_dir, receipt, relations=[], provenance=[]
+                store_dir, receipt, relations=[], provenance=[], stores=stores
             )
         else:
             entry["store"] = {"status": "skipped", "detail": "store admission disabled"}
@@ -2402,10 +2574,12 @@ def render_report_text(report: dict) -> str:
         f"{store.get('duplicate', 0)} duplicate · {store.get('skipped', 0)} skipped"
     )
     stats = report.get("stats", {})
+    store_opens = stats.get("store_read_opens", 0) + stats.get("store_write_opens", 0)
     lines.append(
         f"  cost: {stats.get('subprocesses', 0)} subprocesses "
         f"({stats.get('inventory_runs', 0)} inventory, {stats.get('suite_runs', 0)} suite, "
-        f"{stats.get('coherence_runs', 0)} coherence, {stats.get('digest_runs', 0)} digest)"
+        f"{stats.get('coherence_runs', 0)} coherence, {stats.get('digest_runs', 0)} digest; "
+        f"{store_opens} store opens)"
     )
     return "\n".join(lines) + "\n"
 

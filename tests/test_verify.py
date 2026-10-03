@@ -146,6 +146,10 @@ def test_cold_executes_warm_reuses_irrelevant_preserves(tmp_path: Path) -> None:
     assert receipt_path(repo / ".mncs" / "test-receipts", "fixture.suite").is_file()
     assert entry_by_id(cold, "fixture.unbound")["action"] == "unresolved"
     assert entry_by_id(cold, "fixture.hosted")["action"] == "unresolved"
+    # One run shares one Store session: cold reads see no vault (no
+    # opens) and the single admission opens the writer once.
+    assert cold["stats"]["store_read_opens"] == 0
+    assert cold["stats"]["store_write_opens"] == 1
 
     warm = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
     suite = entry_by_id(warm, "fixture.suite")
@@ -155,6 +159,9 @@ def test_cold_executes_warm_reuses_irrelevant_preserves(tmp_path: Path) -> None:
     assert warm["stats"]["suite_runs"] == 0
     assert suite.get("store_generation") is not None
     assert not any("stale" in note or "rollback" in note for note in suite["notes"])
+    # Warm reads across all obligations share one read-only handle.
+    assert warm["stats"]["store_read_opens"] == 1
+    assert warm["stats"]["store_write_opens"] == 0
 
     with (repo / "README.md").open("a", encoding="utf-8") as stream:
         stream.write("\nAn unrelated documentation change.\n")

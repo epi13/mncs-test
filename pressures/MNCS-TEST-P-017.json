@@ -1,0 +1,25 @@
+{
+  "commons_coordination": "No Commons record filed: MNCS-Commons checkout is on another agent's campaign branch. The owning layer is mncs-store (main clean, no live agent observed this campaign).",
+  "commons_pressure_id": null,
+  "current_store_behavior": "EmbeddedStore.__init__ constructs a StoreSession that rebuilds artifact-identity material on every open: it hashes the compiler binary (~231MB), walks and hashes every .mncs source under the Store checkout plus library roots, then reads/compiles the cached native artifact. cProfile on a warm page cache: 1.5-1.7s per open, dominated by session.py __init__ (hashing + _compile_artifact + _read_cached_artifact).",
+  "desired_direction": "Store-owned faster session start: cheaper artifact-identity freshness check (stat-gated rehash, version-stamped cache key), a shareable/persistent session handle for repeated same-process opens, or a documented lightweight read-only open that skips native artifact verification when the caller only needs bound-object reads. mncs-test will consume whatever the Store layer blesses; it will not fork Store internals.",
+  "disposition": "documented_upstream_cost",
+  "id": "MNCS-TEST-P-017",
+  "minimal_reproducer": "python3 -c \"from mncs_store.embedded import EmbeddedStore; EmbeddedStore(vault, read_only=True)\" against any repo-local .mncs/test-store vault, timed: ~1.5s wall on a warm cache. A 4-obligation verify run paid this 4x before mncs-test shared one handle per run (now 1x); the 1x floor remains.",
+  "observed_need": "mncs-test-verify needs a cheap way to open a repo-local evidence vault. After the per-run shared-handle change, the single remaining Store open (~1.5s) is ~60% of a warm zero-suite verification (~2.5s). Every other warm cost is already minimal: coherence 0.4s, inventory 0.36s, toolchain/git/closure under 0.1s combined.",
+  "relevant_files": [
+    "tools/mncs_test_verify.py"
+  ],
+  "relevant_tests": [
+    "tests/test_verify.py",
+    "tests/test_verifier_units.py"
+  ],
+  "schema_version": "mncs-test.pressure/1",
+  "severity": "minor",
+  "status": "open",
+  "target_layer": "store session",
+  "title": "EmbeddedStore open costs ~1.5s per handle (session + artifact verification)",
+  "verified_language_profile": "0.18",
+  "why_insufficient": "Session construction and artifact verification are Store-owned integrity semantics; mncs-test cannot skip or cache them without forging Store trust assumptions. Opening once per run is the test-side minimum without residency, and a test-owned resident daemon would only amortize this one Store cost while adding lifecycle risk.",
+  "workaround": "RunStores: one lazily-opened read-only handle plus one lazily-opened read-write handle per verify run, closed explicitly (warm 7s -> 2.5s). The residual single open is the reported floor."
+}
