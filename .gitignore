@@ -13,3 +13,6 @@ native-applications/.mncs/
 .mncs-test-coherence-*/
 .mncs-test-obligation-selection-*/
 .mncs-test-digest-*/
+# Provider-projection test scratch (removed on clean exit; kill residue only).
+.provider-projection-*/
+native-applications/.phase6-provider-descriptor-*.json
