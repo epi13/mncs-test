@@ -251,20 +251,43 @@ def _closure_repo(root: Path) -> Path:
     return repo
 
 
+def _closure(repo: Path, *roots: str, stats=None, mncs: str = "mncs-absent"):
+    return measure_closure(
+        [str(repo), *roots],
+        {} if stats is None else stats,
+        mncs=mncs,
+        repo=repo,
+        inventory_relpath=".mncs/project.json",
+    )
+
+
 def test_closure_is_stable_and_content_sensitive(tmp_path: Path) -> None:
     repo = _closure_repo(tmp_path)
-    first, trusted = measure_closure([str(repo)], {})
+    first, trusted = _closure(repo)
     assert trusted and first
-    again, trusted_again = measure_closure([str(repo)], {})
+    again, trusted_again = _closure(repo)
     assert trusted_again and again == first
     (repo / "src" / "other.mncs").write_text("module other { changed }\n")
-    changed, trusted_changed = measure_closure([str(repo)], {})
+    changed, trusted_changed = _closure(repo)
     assert trusted_changed and changed != first
+
+
+def test_closure_ignores_non_source_but_tracks_manifests(tmp_path: Path) -> None:
+    repo = _closure_repo(tmp_path)
+    before, _ = _closure(repo)
+    (repo / "README.md").write_text("docs with more words\n")
+    (repo / "notes.txt").write_text("scratch\n")
+    after, trusted = _closure(repo)
+    assert trusted and after == before
+    # The repository manifests are host inputs: manifest edits matter.
+    (repo / ".mncs" / "project.json").write_text('{"v": 2}\n')
+    manifest_changed, _ = _closure(repo)
+    assert manifest_changed != before
 
 
 def test_closure_prunes_volatile_vcs_and_derived(tmp_path: Path) -> None:
     repo = _closure_repo(tmp_path)
-    before, _ = measure_closure([str(repo)], {})
+    before, _ = _closure(repo)
     (repo / ".git" / "objects").mkdir(parents=True)
     (repo / ".git" / "objects" / "pack").write_text("git-bytes\n")
     (repo / ".mncs" / "test-receipts").mkdir(parents=True)
@@ -275,12 +298,8 @@ def test_closure_prunes_volatile_vcs_and_derived(tmp_path: Path) -> None:
     (repo / "native-applications" / ".mncs" / "toolchains" / "a.json").write_text("{}\n")
     (repo / "tools" / "__pycache__").mkdir(parents=True)
     (repo / "tools" / "__pycache__" / "m.pyc").write_bytes(b"bytecode")
-    after, trusted = measure_closure([str(repo)], {})
+    after, trusted = _closure(repo)
     assert trusted and after == before
-    # The direct-child manifest root is NOT pruned: manifest edits matter.
-    (repo / ".mncs" / "project.json").write_text('{"v": 2}\n')
-    manifest_changed, _ = measure_closure([str(repo)], {})
-    assert manifest_changed != before
 
 
 def test_closure_follows_symlinked_roots_and_fails_closed(tmp_path: Path) -> None:
@@ -289,20 +308,20 @@ def test_closure_follows_symlinked_roots_and_fails_closed(tmp_path: Path) -> Non
     (sibling / "lib").mkdir(parents=True)
     (sibling / "lib" / "dep.mncs").write_text("module dep {}\n")
     (repo / "sibling-lib").symlink_to(sibling, target_is_directory=True)
-    direct, _ = measure_closure([str(repo), str(sibling)], {})
+    direct, _ = _closure(repo, str(sibling))
     assert direct
     (sibling / "lib" / "dep.mncs").write_text("module dep { changed }\n")
-    changed, trusted_changed = measure_closure([str(repo), str(sibling)], {})
+    changed, trusted_changed = _closure(repo, str(sibling))
     assert trusted_changed and changed != direct
     (tmp_path / "cycle").symlink_to(tmp_path / "cycle", target_is_directory=True)
-    cyclic, trusted_cyclic = measure_closure([str(tmp_path / "cycle")], {})
+    cyclic, trusted_cyclic = _closure(repo, str(tmp_path / "cycle"))
     assert (cyclic, trusted_cyclic) == ("", False)
-    missing, trusted_missing = measure_closure([str(tmp_path / "absent")], {})
+    missing, trusted_missing = _closure(repo, str(tmp_path / "absent"))
     assert (missing, trusted_missing) == ("", False)
     dangling = repo / "dangling.mncs"
     dangling.symlink_to(repo / "nowhere.mncs")
     try:
-        dangled, trusted_dangled = measure_closure([str(repo)], {})
+        dangled, trusted_dangled = _closure(repo)
         assert (dangled, trusted_dangled) == ("", False)
     finally:
         dangling.unlink()
@@ -313,11 +332,33 @@ def test_closure_bounds_fail_closed_without_exceptions(tmp_path: Path) -> None:
 
     repo = _closure_repo(tmp_path)
     with mock.patch.object(verify_module, "MAX_CLOSURE_FILES", 1):
-        identity, trusted = measure_closure([str(repo)], {})
+        identity, trusted = _closure(repo)
     assert (identity, trusted) == ("", False)
     with mock.patch.object(verify_module, "MAX_CLOSURE_BYTES", 1):
-        identity, trusted = measure_closure([str(repo)], {})
+        identity, trusted = _closure(repo)
     assert (identity, trusted) == ("", False)
+
+
+def test_stdlib_root_authority_tristate(tmp_path: Path, monkeypatch) -> None:
+    import mncs_test_verify as verify_module
+
+    monkeypatch.delenv("MNCS_STDLIB_ROOT", raising=False)
+    marker, extra = verify_module.stdlib_root_authority("mncs-absent")
+    assert (marker, extra) == ("stdlib-root:absent", None)
+    monkeypatch.setenv("MNCS_STDLIB_ROOT", "")
+    marker, extra = verify_module.stdlib_root_authority("mncs-absent")
+    assert (marker, extra) == ("stdlib-root:disabled", None)
+    monkeypatch.setenv("MNCS_STDLIB_ROOT", str(tmp_path))
+    (tmp_path / "library").mkdir()
+    marker, extra = verify_module.stdlib_root_authority("mncs-absent")
+    assert marker == f"stdlib-root:pinned:{tmp_path}"
+    assert extra == tmp_path / "library"
+    repo = _closure_repo(tmp_path)
+    pinned, trusted = _closure(repo)
+    assert trusted and pinned
+    monkeypatch.delenv("MNCS_STDLIB_ROOT")
+    unpinned, _ = _closure(repo)
+    assert unpinned != pinned
 
 
 def _obligation() -> dict:
@@ -345,6 +386,7 @@ def _bound(**overrides: object) -> dict:
         "repository_fingerprint": "p",
         "closure_identity": "c" * 64,
         "closure_trusted": True,
+        "closure_fileset": "mncs+manifests/1",
     }
     bound.update(overrides)
     return bound
@@ -362,8 +404,10 @@ def test_coherence_row_v2_carries_closure_both_sides() -> None:
     )
     assert row["current"]["closure_identity"] == "c" * 64
     assert row["current"]["closure_trusted"] is True
+    assert row["current"]["closure_fileset"] == "mncs+manifests/1"
     assert row["evidence"]["closure_identity"] == "old"
     assert row["evidence"]["closure_trusted"] is True
+    assert row["evidence"]["closure_fileset"] == "mncs+manifests/1"
     assert row["evidence"]["verdict"] == "PASS"
 
 
@@ -371,6 +415,7 @@ def test_coherence_row_v2_defaults_legacy_receipt_untrusted() -> None:
     stored = _bound()
     del stored["closure_identity"]
     del stored["closure_trusted"]
+    del stored["closure_fileset"]
     receipt = {
         "bound": stored,
         "verifier_identity": "ver",
@@ -382,3 +427,4 @@ def test_coherence_row_v2_defaults_legacy_receipt_untrusted() -> None:
     )
     assert row["evidence"]["closure_identity"] == ""
     assert row["evidence"]["closure_trusted"] is False
+    assert row["evidence"]["closure_fileset"] == ""

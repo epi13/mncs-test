@@ -83,6 +83,15 @@ MAX_DEP_FILES = 512
 MAX_DEP_BYTES = 8 * 1024 * 1024
 MAX_CLOSURE_FILES = 8192
 MAX_CLOSURE_BYTES = 64 * 1024 * 1024
+# Closure fileset rule: only MNCS sources plus the repository's own
+# verification manifests contribute. Grounded in toolchain behavior:
+# module resolution reads `{dotted}.mncs` candidates only, and
+# `mncs test` executes bodies with zero grants, so non-source files
+# provably cannot influence compilation or execution. Non-source
+# invalidation dependencies stay bound separately through
+# invalidation_identity. Bump the tag if the rule ever changes; the
+# tag travels as its own bound field so old closures never match new.
+CLOSURE_FILESET = "mncs+manifests/1"
 # Closure-pruned directory names (any depth): version-control metadata,
 # derived bytecode, and verification's own volatile outputs. None of
 # these are compilation inputs; hashing them would make the closure
@@ -259,20 +268,69 @@ def _status_paths(line: str) -> list[str]:
     return [body.strip().strip('"')]
 
 
+def _collect_outside_files(root: Path, raw: str) -> list[tuple[str, Path, str]]:
+    """Collect (logical path, physical file, kind) under an outside root.
+
+    Symlinks are followed and attributed to their logical path, so a
+    symlinked library root contributes its content instead of a silent
+    gap. Directory identity is guarded by (device, inode): a symlink
+    cycle revisits an identity and is skipped rather than looping.
+    Dangling or exotic links fail closed.
+    """
+    found: list[tuple[str, Path, str]] = []
+    seen: set[tuple[int, int]] = set()
+    stack: list[tuple[Path, str]] = [(root, "")]
+    while stack:
+        current, rel = stack.pop()
+        try:
+            identity = current.stat()
+        except OSError as error:
+            raise VerifyError(f"outside library root is unreadable: {raw}") from error
+        key = (identity.st_dev, identity.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            children = sorted(current.iterdir(), key=lambda p: p.name)
+        except OSError as error:
+            raise VerifyError(f"outside library root is unreadable: {raw}") from error
+        for child in children:
+            child_rel = f"{rel}/{child.name}" if rel else child.name
+            if child.is_symlink():
+                target = child.resolve()
+                if target.is_dir():
+                    stack.append((target, child_rel))
+                elif target.is_file():
+                    found.append((child_rel, target, "link"))
+                else:
+                    raise VerifyError(
+                        f"outside library root has an unresolvable link: {raw}"
+                    )
+            elif child.is_dir():
+                stack.append((child, child_rel))
+            elif child.is_file():
+                found.append((child_rel, child, "file"))
+    return found
+
+
 def repository_fingerprint(
     repo: Path,
     inventory_relpath: str,
     outside_roots: list[str],
     stats: dict,
+    *,
+    mncs: str,
 ) -> tuple[str, str]:
     """Measure (revision, fingerprint) with irrelevant-change tolerance.
 
     The fingerprint binds the revision, the status of every file that can
     influence a native run (MNCS sources anywhere in the repo plus the
     verification manifests), the verifier implementation, the content
-    of library roots outside the repo, and the ambient stdlib bundle.
-    Documentation, scripts, and other non-source worktree changes
-    provably cannot affect module resolution or suite semantics, so they
+    of library roots outside the repo, the ambient stdlib-root
+    authority, and the ambient stdlib bundle. Documentation, scripts,
+    and other non-source worktree changes provably cannot affect
+    module resolution or suite semantics (resolution reads `.mncs`
+    candidates only; test bodies run with zero grants), so they
     preserve reuse. Anything else fails closed to unmeasurable.
     """
     revision = git_head(repo)
@@ -288,32 +346,77 @@ def repository_fingerprint(
     filtered = "\n".join(kept)
     if len(filtered.encode("utf-8")) > MAX_STATUS_BYTES:
         raise VerifyError("relevant git status exceeds the measurement bound")
+    stdlib_marker, stdlib_extra = stdlib_root_authority(mncs)
+    all_outside = sorted(set(outside_roots))
+    if stdlib_extra is not None and str(stdlib_extra) not in all_outside:
+        all_outside.append(str(stdlib_extra))
     outside_bits: list[str] = []
     byte_count = 0
-    for raw in sorted(set(outside_roots)):
-        root = Path(raw)
+    seen_roots: set[str] = set()
+    for raw in all_outside:
+        try:
+            root = Path(raw).resolve()
+        except OSError:
+            outside_bits.append(f"missing:{raw}")
+            continue
         if not root.is_dir():
             outside_bits.append(f"missing:{raw}")
             continue
+        if str(root) in seen_roots:
+            continue
+        seen_roots.add(str(root))
         entries: list[str] = []
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.is_symlink():
-                continue
+        for relpath, physical, kind in _collect_outside_files(root, raw):
             try:
-                content = path.read_bytes()
+                content = physical.read_bytes()
             except OSError as error:
                 raise VerifyError(f"outside library root is unreadable: {raw}") from error
             byte_count += len(content)
             if byte_count > MAX_DEP_BYTES:
                 raise VerifyError("outside library roots exceed the measurement bound")
-            entries.append(f"{path.relative_to(root).as_posix()}={sha256_hex(content)}")
-        outside_bits.append(f"root:{raw}\n" + "\n".join(entries))
+            entries.append(f"{kind}:{relpath}={sha256_hex(content)}")
+        outside_bits.append(f"root:{raw}\n" + "\n".join(sorted(entries)))
     fingerprint = sha256_hex(
         "\n".join(
-            [revision, filtered, verifier_key(), stdlib_bundle_digest(), *outside_bits]
+            [
+                revision,
+                filtered,
+                verifier_key(),
+                stdlib_bundle_digest(),
+                stdlib_marker,
+                *outside_bits,
+            ]
         ).encode()
     )
     return revision, fingerprint
+
+
+def stdlib_root_authority(mncs: str) -> tuple[str, Path | None]:
+    """Measure the ambient stdlib-root resolution authority.
+
+    Beyond explicit library roots, the toolchain consults a default
+    stdlib root: MNCS_STDLIB_ROOT names one explicitly, a set-but-empty
+    value disables discovery, and an unset variable falls back to the
+    mncs-stdlib sibling of the language checkout backing the binary
+    (`<exe-dir>/../../mncs-stdlib/library`). Returns a head marker plus
+    the extra root to measure, or None when discovery yields nothing.
+    """
+    override = os.environ.get("MNCS_STDLIB_ROOT")
+    if override is not None:
+        if not override.strip():
+            return "stdlib-root:disabled", None
+        return f"stdlib-root:pinned:{override}", Path(override) / "library"
+    binary = Path(mncs)
+    if not binary.is_absolute():
+        located = shutil.which(mncs)
+        binary = Path(located) if located else Path.cwd() / binary
+    try:
+        sibling = binary.resolve().parents[3] / "mncs-stdlib" / "library"
+    except IndexError:
+        return "stdlib-root:absent", None
+    if sibling.is_dir():
+        return f"stdlib-root:sibling:{sibling}", sibling
+    return "stdlib-root:absent", None
 
 
 def stdlib_bundle_digest() -> str:
@@ -416,31 +519,51 @@ def measure_invalidation(repo: Path, obligation: dict) -> str:
     return sha256_hex("\n".join(entries).encode())
 
 
-def measure_closure(libraries: list[str], stats: dict) -> tuple[str, bool]:
+def measure_closure(
+    libraries: list[str],
+    stats: dict,
+    *,
+    mncs: str,
+    repo: Path,
+    inventory_relpath: str,
+) -> tuple[str, bool]:
     """Measure the obligation's semantic source closure (superset, bounded).
 
     The closure digests every file a native execution of the obligation
-    can read: every regular file under each library root (declared
-    roots, the repository, the runner's native root), the verifier
-    implementation, and the ambient stdlib bundle. It is a deliberate
-    superset, not a compiler-resolved dependency set: anything the
-    compiler could consult is covered, so equal closures prove no
-    relevant input changed. Toolchain, inventory, subject, definition,
-    executor, and invalidation identities travel as separate fields and
-    are compared separately by native policy.
+    can read: every MNCS source under each library root (declared
+    roots, the repository, the runner's native root, the ambient
+    stdlib root), the repository's own verification manifests, the
+    verifier implementation, and the ambient stdlib bundle. It is a
+    deliberate superset, not a compiler-resolved dependency set:
+    anything the compiler could consult is covered, so equal closures
+    prove no relevant input changed. Toolchain, inventory, subject,
+    definition, executor, and invalidation identities travel as
+    separate fields and are compared separately by native policy.
+
+    The MNCS-only fileset is grounded in toolchain behavior, not
+    guessed: module resolution reads `{dotted}.mncs` candidates only,
+    and `mncs test` executes bodies with zero grants, so non-source
+    files cannot influence compilation or execution. The fileset tag
+    travels as its own bound field so a future rule change can never
+    match an old closure.
 
     Symlinks are followed (a symlinked library root still contributes
     its content); symlink cycles, dangling links, missing roots, and
     unreadable files yield an untrusted closure rather than a silent
-    gap. Version-control metadata, derived bytecode, nested native-app
-    caches, and verification's own volatile outputs are pruned: they
-    are never compilation inputs, and hashing them would make the
-    closure self-invalidating or revision-bound.
+    gap. Version-control metadata, nested native-app caches, and
+    verification's own volatile outputs are pruned from the walk.
 
     Any anomaly yields ("", False): native policy treats an untrusted
     closure as absent and falls back to the legacy revision-bound rule.
     Closure measurement never fails an obligation by itself.
     """
+    try:
+        manifests = {
+            (repo / ".mncs" / "project.json").resolve(),
+            (repo / inventory_relpath).resolve(),
+        }
+    except OSError:
+        return "", False
     entries: list[str] = []
     file_count = 0
     byte_count = 0
@@ -448,6 +571,9 @@ def measure_closure(libraries: list[str], stats: dict) -> tuple[str, bool]:
     def hash_file(logical: Path, physical: Path, tag: str, kind: str) -> bool:
         nonlocal file_count, byte_count
         try:
+            resolved = physical.resolve()
+            if resolved.suffix != ".mncs" and resolved not in manifests:
+                return True
             digest = hashlib.sha256()
             with physical.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(65536), b""):
@@ -493,8 +619,6 @@ def measure_closure(libraries: list[str], stats: dict) -> tuple[str, bool]:
                             continue
                         stack.append(child)
                     elif child.is_file():
-                        if child.suffix == ".pyc":
-                            continue
                         if not hash_file(child, child, tag, "file"):
                             return False
                     # Sockets, fifos, devices: not compilable inputs; ignore.
@@ -503,11 +627,15 @@ def measure_closure(libraries: list[str], stats: dict) -> tuple[str, bool]:
         return True
 
     try:
-        head = [verifier_key(), stdlib_bundle_digest()]
+        stdlib_marker, stdlib_extra = stdlib_root_authority(mncs)
+        head = [CLOSURE_FILESET, verifier_key(), stdlib_bundle_digest(), stdlib_marker]
     except VerifyError:
         return "", False
+    roots = list(libraries)
+    if stdlib_extra is not None:
+        roots.append(str(stdlib_extra))
     seen: set[str] = set()
-    for index, raw in enumerate(libraries):
+    for index, raw in enumerate(roots):
         try:
             real = Path(raw).resolve()
         except OSError:
@@ -832,6 +960,7 @@ def empty_evidence() -> dict:
         "repository_fingerprint": "",
         "closure_identity": "",
         "closure_trusted": False,
+        "closure_fileset": "",
         "verdict": "UNKNOWN",
         "evidence_id": "",
     }
@@ -882,6 +1011,7 @@ def build_coherence_row(
             "repository_revision",
             "repository_fingerprint",
             "closure_identity",
+            "closure_fileset",
         ):
             evidence[key] = stored.get(key, "")
         evidence["closure_trusted"] = stored.get("closure_trusted", False) is True
@@ -898,6 +1028,7 @@ def build_coherence_row(
     bound_text(closure_identity, "closure identity", MAX_FINGERPRINT_BYTES, allow_empty=True)
     if not isinstance(bound.get("closure_trusted"), bool):
         raise VerifyError("closure trust must be a boolean")
+    bound_text(bound.get("closure_fileset"), "closure fileset", MAX_FINGERPRINT_BYTES)
     return {
         "identity": obligation["identity"],
         "lifecycle": lifecycle,
@@ -1112,7 +1243,7 @@ def verify_repository(
                     outside_roots.append(str(resolved))
     try:
         revision, repo_fingerprint = repository_fingerprint(
-            repo, inventory_relpath, outside_roots, stats
+            repo, inventory_relpath, outside_roots, stats, mncs=mncs
         )
         git_note = None
     except VerifyError as error:
@@ -1137,6 +1268,7 @@ def verify_repository(
                 receipts_dir,
                 inventory_timeout,
                 stats,
+                inventory_relpath,
             )
         except VerifyError as error:
             entries[identity] = {
@@ -1248,6 +1380,7 @@ def measure_obligation(
     receipts_dir: Path,
     inventory_timeout: float,
     stats: dict,
+    inventory_relpath: str,
 ) -> dict:
     identity = bound_text(obligation["identity"], "obligation identity", MAX_IDENTITY_BYTES)
     executor = obligation.get("executor", {})
@@ -1300,7 +1433,9 @@ def measure_obligation(
         )
         subject_fingerprint = executor_identity[:MAX_FINGERPRINT_BYTES]
         inventory_identity = "no-native-inventory"
-    closure_identity, closure_trusted = measure_closure(libraries, stats)
+    closure_identity, closure_trusted = measure_closure(
+        libraries, stats, mncs=mncs, repo=repo, inventory_relpath=inventory_relpath
+    )
     bound = {
         "definition_identity": definition,
         "subject_identity": subject_identity,
@@ -1313,6 +1448,7 @@ def measure_obligation(
         "repository_fingerprint": repo_fingerprint,
         "closure_identity": closure_identity,
         "closure_trusted": closure_trusted,
+        "closure_fileset": CLOSURE_FILESET,
     }
     return {
         "obligation": obligation,

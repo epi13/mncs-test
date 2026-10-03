@@ -11,11 +11,12 @@ mncs 0.18;
 //
 // The host measures a per-obligation closure over every file the
 // execution can read (a complete superset: every MNCS source under the
-// obligation's library roots, manifests, verifier implementation,
-// ambient bundle, outside roots). It travels as `closure_identity`
-// plus a `closure_trusted` measurement claim. Revision and fingerprint
-// remain in the records as provenance and keep their legacy meaning:
-// a full legacy match is current exactly as in v1.
+// obligation's library roots, the ambient stdlib root, manifests,
+// verifier implementation, ambient bundle, outside roots). It travels
+// as `closure_identity` plus a `closure_trusted` measurement claim
+// and a `closure_fileset` rule tag. Revision and fingerprint remain
+// in the records as provenance and keep their legacy meaning: a full
+// legacy match is current exactly as in v1.
 //
 // Native decision rule (new branch only; everything else mirrors v1):
 // evidence is current with reason `closure_current` when both sides
@@ -29,7 +30,12 @@ mncs 0.18;
 // definition_identity, subject_identity, subject_fingerprint,
 // executor_identity, invalidation_identity, toolchain_identity,
 // inventory_identity, repository_revision, repository_fingerprint,
-// closure_identity, closure_trusted.
+// closure_identity, closure_trusted, closure_fileset.
+//
+// The host fileset rule (MNCS sources plus the repository's own
+// verification manifests) is grounded in toolchain behavior:
+// module resolution reads `{dotted}.mncs` candidates only, and
+// `mncs test` executes bodies with zero grants.
 module mncs.test.verification_coherence_v2;
 
 use mncs.std.application.v1;
@@ -49,6 +55,7 @@ record CoherenceEvidenceV2 {
     repository_fingerprint: [byte; up_to 128],
     closure_identity: [byte; up_to 128],
     closure_trusted: bool,
+    closure_fileset: [byte; up_to 128],
     verdict: contracts.EvidenceVerdict,
     evidence_id: [byte; up_to 128]
 }
@@ -64,7 +71,8 @@ record CoherenceCurrentV2 {
     repository_revision: [byte; up_to 128],
     repository_fingerprint: [byte; up_to 128],
     closure_identity: [byte; up_to 128],
-    closure_trusted: bool
+    closure_trusted: bool,
+    closure_fileset: [byte; up_to 128]
 }
 
 record CoherenceObligationV2 {
@@ -189,6 +197,7 @@ fn closure_admits(evidence: CoherenceEvidenceV2, current: CoherenceCurrentV2) ->
         && current.closure_trusted
         && evidence.closure_identity.len != 0
         && current.closure_identity.len != 0
+        && v1.bytes128_equal(evidence.closure_fileset, current.closure_fileset)
         && v1.bytes128_equal(evidence.closure_identity, current.closure_identity)
         && v1.bytes128_equal(evidence.definition_identity, current.definition_identity)
         && v1.bytes1024_equal(evidence.subject_identity, current.subject_identity)
