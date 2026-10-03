@@ -366,12 +366,16 @@ def test_relevant_change_regresses_then_fixes(tmp_path: Path) -> None:
     assert row["qualified_name"] == "fv.tiny::one"
     assert (row["expected"], row["actual"]) == (2, 1)
 
-    suite_path.write_text(TINY_SUITE, encoding="utf-8")
+    # A byte-identical restoration would recall the original PASS
+    # (test_closure_recall_reuses_identical_semantics); a fixed suite in
+    # a new semantic world must execute with a fixed transition.
+    suite_path.write_text(TINY_SUITE + "\n", encoding="utf-8")
     fixed = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
     suite = entry_by_id(fixed, "fixture.suite")
     assert suite["action"] == "executed"
     assert suite["verdict"] == "PASS"
     assert suite["transition"] == "fixed"
+    assert fixed["stats"]["suite_runs"] == 1
 
 
 def test_corrupt_projection_heals_from_authority(tmp_path: Path) -> None:
