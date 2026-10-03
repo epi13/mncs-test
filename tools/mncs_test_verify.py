@@ -1182,6 +1182,7 @@ def verify_repository(
     coherence_timeout: float = 120.0,
     max_failures: int = 8,
     admit_store: bool = True,
+    dry_run: bool = False,
 ) -> dict:
     repo = repo.resolve()
     receipts_dir = repo / ".mncs" / "test-receipts"
@@ -1352,9 +1353,10 @@ def verify_repository(
             max_failures,
             admit_store,
             stats,
+            dry_run,
         )
 
-    removed = collect_garbage(artifacts_root)
+    removed = 0 if dry_run else collect_garbage(artifacts_root)
     return assemble_report(
         repository,
         revision,
@@ -1368,6 +1370,7 @@ def verify_repository(
         toolchain_note,
         git_note,
         max_executions,
+        dry_run,
     )
 
 
@@ -1490,6 +1493,43 @@ def required_selection(world: dict) -> list[str] | None:
     return required
 
 
+def bound_diff(world: dict) -> list[str]:
+    """Name the bound fields that differ from the recorded receipt.
+
+    Obligation-level affected-ness only: the system can prove WHICH
+    obligation would rerun and WHICH identity moved, not which test
+    inside the suite is affected (that needs the compiler-resolved
+    closure of MNCS-TEST-P-014).
+    """
+    receipt = world.get("receipt")
+    if receipt is None:
+        return ["no prior evidence"]
+    stored = receipt.get("bound", {})
+    current = world.get("bound", {})
+    fields = (
+        "definition_identity",
+        "subject_identity",
+        "subject_fingerprint",
+        "executor_identity",
+        "invalidation_identity",
+        "toolchain_identity",
+        "inventory_identity",
+        "closure_identity",
+    )
+    moved = [key for key in fields if stored.get(key) != current.get(key)]
+    if stored.get("closure_trusted", False) is not True:
+        moved.append("closure_untrusted_before")
+    if current.get("closure_trusted", False) is not True:
+        moved.append("closure_untrusted_now")
+    if stored.get("closure_fileset") != current.get("closure_fileset"):
+        moved.append("closure_fileset")
+    if stored.get("repository_revision") != current.get("repository_revision"):
+        moved.append("repository_revision")
+    if stored.get("repository_fingerprint") != current.get("repository_fingerprint"):
+        moved.append("repository_fingerprint")
+    return moved
+
+
 def act_on_verdict(
     world: dict,
     verdict: dict,
@@ -1504,6 +1544,7 @@ def act_on_verdict(
     max_failures: int,
     admit_store: bool,
     stats: dict,
+    dry_run: bool = False,
 ) -> dict:
     obligation = world["obligation"]
     identity = obligation["identity"]
@@ -1537,6 +1578,10 @@ def act_on_verdict(
             if required is None:
                 entry["notes"].append("required selection is unprovable; leaving unresolved")
                 return entry
+            if dry_run:
+                entry["action"] = "would_execute"
+                entry["notes"].append("affected: verifier changed since the receipt")
+                return entry
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
@@ -1558,12 +1603,17 @@ def act_on_verdict(
             entry["notes"].append(
                 "recorded selection differs from the required selection; re-executing"
             )
+            if dry_run:
+                entry["action"] = "would_execute"
+                entry["notes"].append("affected: test selection changed")
+                return entry
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
             )
         if admit_store:
-            store_dir.mkdir(parents=True, exist_ok=True)
+            if not dry_run:
+                store_dir.mkdir(parents=True, exist_ok=True)
             match, note = verify_receipt_in_store(store_dir, receipt)
             entry["notes"].append(f"store cross-check: {note}")
             if not match:
@@ -1571,14 +1621,15 @@ def act_on_verdict(
                 entry["reason"] = "evidence_conflict"
                 entry["notes"].append("file receipt and store object disagree; refusing reuse")
                 return entry
-            if note == "no store object yet":
+            if note == "no store object yet" and not dry_run:
                 # A receipt that never reached the vault (crash between
                 # file write and admission, or an older producer): backfill
                 # it now. Admission is idempotent on the evidence core.
+                # Dry runs never write: they only report the gap.
                 entry["store"] = admit_receipt_to_store(
                     store_dir, receipt, relations=[], provenance=[]
                 )
-        entry["action"] = "reused"
+        entry["action"] = "would_reuse" if dry_run else "reused"
         entry["verdict"] = receipt["verdict"]
         if reason == "closure_current":
             produced = receipt.get("bound", {}).get("repository_revision", "?")
@@ -1596,6 +1647,11 @@ def act_on_verdict(
     if status in ("new_execution_required", "stale") and queued and not verdict.get(
         "deferred", False
     ):
+        if dry_run:
+            entry["action"] = "would_execute"
+            moved = bound_diff(world)
+            entry["notes"].append(f"affected: {', '.join(moved)}")
+            return entry
         return execute_bound_suite(
             world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
             suite_timeout, max_failures, admit_store, stats, resolved,
@@ -1783,6 +1839,7 @@ def assemble_report(
     toolchain_note: str | None,
     git_note: str | None,
     max_executions: int,
+    dry_run: bool,
 ) -> dict:
     ordered = [entries[obligation["identity"]] for obligation in obligations]
     tests_considered = sum(item["test_count"] for item in measured.values())
@@ -1792,6 +1849,8 @@ def assemble_report(
         "reused": 0,
         "reused_closure": 0,
         "executed": 0,
+        "would_reuse": 0,
+        "would_execute": 0,
         "pass": 0,
         "fail": 0,
         "unknown": 0,
@@ -1810,6 +1869,12 @@ def assemble_report(
                 summary["reused_closure"] += 1
         elif action == "executed":
             summary["executed"] += 1
+        elif action == "would_reuse":
+            summary["would_reuse"] += 1
+            if entry.get("verdict_source") == "reused-closure":
+                summary["reused_closure"] += 1
+        elif action == "would_execute":
+            summary["would_execute"] += 1
         elif action == "deferred":
             summary["deferred"] += 1
         elif action == "not_executed":
@@ -1832,7 +1897,7 @@ def assemble_report(
             store[outcome] += 1
     if summary["fail"] > 0:
         overall = "FAIL"
-    elif summary["unknown"] > 0 or summary["unresolved"] > 0:
+    elif summary["unknown"] > 0 or summary["unresolved"] > 0 or summary["would_execute"] > 0:
         overall = "INCOMPLETE"
     else:
         overall = "PASS"
@@ -1851,26 +1916,39 @@ def assemble_report(
         "toolchain_note": toolchain_note,
         "git_note": git_note,
         "max_executions": max_executions,
+        "dry_run": dry_run,
         "obligations": ordered,
     }
 
 
 def render_report_text(report: dict) -> str:
     summary = report["summary"]
+    dry_run = report.get("dry_run", False)
+    verb = "affected" if dry_run else "verify"
     lines = [
         (
-            f"mncs-test verify: {report['repository']} @ {report['revision'][:12]} "
+            f"mncs-test {verb}: {report['repository']} @ {report['revision'][:12]} "
             f"({summary['obligations']} obligations, "
             f"{summary['tests_considered']} tests considered) -> {report['overall']}"
         ),
-        (
+    ]
+    if dry_run:
+        lines.append(
+            f"  would-reuse: {summary['would_reuse']} "
+            f"({summary['reused_closure']} closure) "
+            f"· would-execute: {summary['would_execute']} "
+            f"· pass: {summary['pass']} · fail: {summary['fail']} "
+            f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "
+            f"· unresolved: {summary['unresolved']}"
+        )
+    else:
+        lines.append(
             f"  reused: {summary['reused']} ({summary['reused_closure']} closure) "
             f"· executed: {summary['executed']} "
             f"· pass: {summary['pass']} · fail: {summary['fail']} "
             f"· unknown: {summary['unknown']} · deferred: {summary['deferred']} "
             f"· not-executed: {summary['not_executed']} · unresolved: {summary['unresolved']}"
-        ),
-    ]
+        )
     if summary["regressions"] or summary["fixed"]:
         lines.append(
             f"  transitions: {summary['regressions']} regression(s), "
@@ -1920,7 +1998,7 @@ def exit_code_for(report: dict) -> int:
     summary = report["summary"]
     if summary["fail"] > 0:
         return 1
-    if summary["unknown"] > 0 or summary["unresolved"] > 0:
+    if summary["unknown"] > 0 or summary["unresolved"] > 0 or summary["would_execute"] > 0:
         return 3
     return 0
 
@@ -1936,6 +2014,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--report-out", type=Path, default=None)
     parser.add_argument("--no-store", action="store_true")
+    parser.add_argument(
+        "--changed",
+        action="store_true",
+        help="dry run: report which obligations are affected without executing anything",
+    )
     parser.add_argument("--version", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.version:
@@ -1952,6 +2035,7 @@ def main(argv: list[str] | None = None) -> int:
             inventory_timeout=arguments.inventory_timeout,
             max_failures=arguments.max_failures,
             admit_store=not arguments.no_store,
+            dry_run=arguments.changed,
         )
     except VerifyError as error:
         print(f"error: {error}", file=sys.stderr)
