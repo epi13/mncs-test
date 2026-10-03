@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.project-intent/1",
+  "purpose": "Native testing, verification, and conformance framework for MNCS and the broader project family: language-owned test declarations executed through the compiler-owned mncs test entrypoint, with native mncs.test.* modules owning assertion, suite, runner-policy, property, and snapshot semantics.",
+  "entry": [
+    "python3 -m unittest discover -s tests -p test_*.py"
+  ],
+  "milestones": [
+    {
+      "id": "mncs-test:projection-conformance",
+      "title": "Declared ambient projection surfaces satisfy their contract",
+      "subject_slot": "declarations",
+      "evidence": "projection-conformance",
+      "dependencies": [],
+      "blockers": []
+    }
+  ]
+}
