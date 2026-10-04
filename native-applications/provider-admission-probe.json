@@ -5,7 +5,7 @@
   "module": "mncs.test.provider_admission_probe",
   "entry_function": "provider_admission_probe_app",
   "profile": "0.18",
-  "interface_identity": "d3470777b6975e2d7b9a09de1d22faaab49ad9c5125e8a64696da11f0cd110a1",
+  "interface_identity": "474183e8e02ff99af8aa77bb240ad230326a1592982407bd422ed54d3058c2db",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native",

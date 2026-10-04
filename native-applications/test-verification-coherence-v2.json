@@ -5,7 +5,7 @@
   "module": "mncs.test.verification_coherence_v2",
   "entry_function": "coherence_app_v2",
   "profile": "0.18",
-  "interface_identity": "f8d539eefad40386a003d7b00275e2ff03153ed4d99ae1e61bf6e116a61afb66",
+  "interface_identity": "e41f42fae7d15ed4d994981d5ae2307067360e4cd94a0071c531be9d1d24c267",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native",
