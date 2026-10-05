@@ -2,4 +2,11 @@
 # Explicit canonical VM transport. Native TestResult/suite policy stays in MNCS.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${MNCS_VM_ARTIFACT_CACHE:-}" ]]; then
+    if [[ -n "${MNCS_TEST_STATE_DIR:-}" ]]; then
+        export MNCS_VM_ARTIFACT_CACHE="$MNCS_TEST_STATE_DIR/vm-artifact-cache"
+    else
+        export MNCS_VM_ARTIFACT_CACHE="$SCRIPT_DIR/../.mncs/vm-artifact-cache"
+    fi
+fi
 exec python3 "$SCRIPT_DIR/../tools/mncs_test.py" run --execution canonical-vm "$@"

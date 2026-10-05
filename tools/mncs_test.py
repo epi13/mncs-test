@@ -716,7 +716,14 @@ class ArtifactStore:
 def command_environment(library_paths: list[Path], inherited: dict[str, str] | None = None) -> dict[str, str]:
     environment = dict(os.environ if inherited is None else inherited)
     if library_paths:
-        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(str(path) for path in library_paths)
+        # The manifest owns private roots (such as mncs-test/native); the
+        # selected Environment composition may append an exact standard
+        # library root through the provider contract. Preserve that declared
+        # closure after private roots and deduplicate without reordering.
+        roots = [str(path) for path in library_paths]
+        roots.extend(root for root in environment.get("MNCS_LIBRARY_PATH", "").split(os.pathsep)
+                     if root)
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(roots))
     return environment
 
 

@@ -48,6 +48,18 @@ class RunnerTests(unittest.TestCase):
             check=False,
         )
 
+    def test_command_env_preserves_selected_library_after_private_root(self):
+        private = REPO / "native"
+        selected = REPO.parent / "mncs-language" / "library"
+        declared = {"MNCS_LIBRARY_PATH": os.pathsep.join((str(selected), str(private)))}
+        environment = mncs_test.command_environment(
+            [private], declared
+        )
+        self.assertEqual(
+            environment["MNCS_LIBRARY_PATH"],
+            os.pathsep.join((str(private), str(selected))),
+        )
+
     def live_args(self) -> tuple[str, ...]:
         arguments = ("--mncs", str(MNCS), "--library", str(STDLIB_LIBRARY))
         if EMBED_LIBRARY.is_file():

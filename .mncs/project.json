@@ -128,7 +128,10 @@
           "verify"
         ],
         "fingerprint_sources": [
-          "bin/mncs-test"
+          "bin/mncs-test",
+          "bin/mncs-test-vm",
+          "tools/mncs_test.py",
+          "tools/vm_transport.py"
         ],
         "invocation": {
           "kind": "executable",
@@ -156,6 +159,14 @@
             "MNCS_REFERENCE_BIN": {
               "repository": "mncs-language",
               "path": "target/release/mncs"
+            },
+            "MNCS_LIBRARY_PATH": {
+              "repository": "mncs-language",
+              "path": "library"
+            },
+            "MNCS_TEST_STATE_DIR": {
+              "repository": "mncs-test",
+              "path": ".mncs"
             },
             "MNCS": {
               "repository": "mncs-language",
