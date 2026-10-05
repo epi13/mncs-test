@@ -11,6 +11,7 @@ python3 -m unittest discover -s tests -p test_*.py
 
 Declared capabilities (declarations do not establish execution health):
 
+- `canonical-vm-tests/1` — selected-compiler-runtime-consumer (experimental)
 - `test-provider/1` — native-test-provider (experimental)
 
 Semantic sources and ownership: `.mncs/projections.json`.

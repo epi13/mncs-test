@@ -18,6 +18,51 @@
       "kind": "native-test-provider",
       "stability": "experimental",
       "version": "1"
+    },
+    {
+      "contract": "canonical-vm-tests",
+      "effects": [
+        "verify"
+      ],
+      "fingerprint_sources": [
+        "bin/mncs-test"
+      ],
+      "invocation": {
+        "fixed_argv": [
+          "vm"
+        ],
+        "kind": "executable",
+        "path": "bin/mncs-test",
+        "toolchains": {
+          "MNCS": {
+            "path": "target/release/mncs",
+            "repository": "mncs-language"
+          },
+          "MNCS_COMPILER_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_COMPILER_PROBE": {
+            "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
+            "repository": "mncs-compiler"
+          },
+          "MNCS_REFERENCE_BIN": {
+            "path": "target/release/mncs",
+            "repository": "mncs-language"
+          },
+          "MNCS_VM_BIN": {
+            "path": "target/debug/mncs-vm",
+            "repository": "mncs-vm"
+          },
+          "MNCS_VM_CHECKOUT": {
+            "path": ".",
+            "repository": "mncs-vm"
+          }
+        }
+      },
+      "kind": "selected-compiler-runtime-consumer",
+      "stability": "experimental",
+      "version": "1"
     }
   ],
   "dependencies": [
@@ -56,6 +101,26 @@
       ],
       "required": true,
       "scope": "native runtime imports; legacy pre-extraction toolchains may bind equivalent language library sources"
+    },
+    {
+      "contract": "canonical-vm-artifact",
+      "envelope": {
+        "op": "any"
+      },
+      "evidence_refs": [
+        "bin/mncs-test"
+      ],
+      "required": false
+    },
+    {
+      "contract": "vm-runtime",
+      "envelope": {
+        "op": "any"
+      },
+      "evidence_refs": [
+        "bin/mncs-test"
+      ],
+      "required": false
     }
   ],
   "entry": [
@@ -64,6 +129,6 @@
   "purpose": "Native testing, verification, and conformance framework for MNCS and the broader project family: language-owned test declarations executed through the compiler-owned mncs test entrypoint, with native mncs.test.* modules owning assertion, suite, runner-policy, property, and snapshot semantics.",
   "repository": "mncs-test",
   "schema_version": "mncs.project-view/1",
-  "source_identity": "sha256:2287aa17045eeffe57c39d3face52943e052b34da469b84524b85ac3fab5cf92",
+  "source_identity": "sha256:59272ce0b28325e52ebe642e2347095072bb5917fd86efd564bec7bb9bca156e",
   "structure": {}
 }
