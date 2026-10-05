@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -59,6 +60,29 @@ class RunnerTests(unittest.TestCase):
             environment["MNCS_LIBRARY_PATH"],
             os.pathsep.join((str(private), str(selected))),
         )
+
+    def test_run_parser_uses_environment_selected_reference_executable(self):
+        selected = str(LANGUAGE / "target" / "release" / "mncs")
+        with mock.patch.dict(os.environ, {"MNCS": selected}):
+            arguments = mncs_test.parser().parse_args(
+                ["run", "--execution", "canonical-vm"])
+        self.assertEqual(arguments.mncs, selected)
+        self.assertEqual(
+            mncs_test.resolve_run_mncs(
+                arguments.mncs, arguments.execution, REPO),
+            str(Path(selected).resolve()),
+        )
+
+    def test_canonical_vm_refuses_ambient_compiler_discovery(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            arguments = mncs_test.parser().parse_args(
+                ["run", "--execution", "canonical-vm"])
+        self.assertIsNone(arguments.mncs)
+        with self.assertRaisesRegex(
+                mncs_test.ManifestError,
+                "requires the selected Stage-0 reference executable"):
+            mncs_test.resolve_run_mncs(
+                arguments.mncs, arguments.execution, REPO)
 
     def live_args(self) -> tuple[str, ...]:
         arguments = ("--mncs", str(MNCS), "--library", str(STDLIB_LIBRARY))

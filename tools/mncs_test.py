@@ -395,6 +395,18 @@ def resolve_mncs(binary: str, cwd: Path) -> str:
     return shutil.which(binary) or binary
 
 
+def resolve_run_mncs(binary: str | None, execution: str, cwd: Path) -> str:
+    """Resolve the selected Stage-0 reference without PATH fallback in VM mode."""
+    if not binary:
+        if execution == "canonical-vm":
+            raise ManifestError(
+                "canonical-vm requires the selected Stage-0 reference executable "
+                "through MNCS or --mncs"
+            )
+        binary = "mncs"
+    return resolve_mncs(binary, cwd)
+
+
 def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ManifestError("manifest must be a TOML table")
@@ -3994,7 +4006,8 @@ def run_manifest(args: argparse.Namespace) -> int:
     try:
         manifest = load_manifest(manifest_path)
         source_text = read_source(Path(manifest["source_path"]))
-        mncs = resolve_mncs(args.mncs, cwd)
+        mncs = resolve_run_mncs(
+            args.mncs, getattr(args, "execution", "stage0-reference"), cwd)
         verification_plan: dict[str, Any] | None = None
         verification_plan_ref: dict[str, Any] | None = None
         obligation_plan: dict[str, Any] | None = None
@@ -4682,7 +4695,10 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="run one MNCS test manifest and compiler-discovered tests")
     run.add_argument("--manifest", default="mncs-test.toml")
-    run.add_argument("--mncs", default="mncs")
+    # Environment binds MNCS to the selected Stage-0 reference executable.
+    # Canonical VM execution also records that reference identity, so it must
+    # not silently discover a compiler from ambient PATH.
+    run.add_argument("--mncs", default=os.environ.get("MNCS"))
     run.add_argument("--execution", choices=("stage0-reference", "canonical-vm"), default="stage0-reference")
     run.add_argument("--compiler-checkout", default=os.environ.get("MNCS_COMPILER_CHECKOUT"))
     run.add_argument("--compiler-executable", default=os.environ.get("MNCS_COMPILER_PROBE"))

@@ -14,8 +14,12 @@ bin/mncs-test vm --manifest mncs-test.toml --library /selected/stdlib/library \
 ```
 
 Environment supplies those exact executable/checkouts through provider-owned
-invocation descriptors. No unavailable or stale VM composition falls back to
-Language/research bytecode. This lane supports compiler-owned first-class test
+invocation descriptors. It binds `MNCS` to the selected Stage-0 executable for
+reference provenance, while `MNCS_COMPILER_PROBE` and `MNCS_VM_BIN` identify the
+artifact producer and executor independently. Canonical VM runs require that
+Stage-0 reference binding (or an explicit `--mncs` path); they never discover a
+replacement through ambient `PATH`. No unavailable or stale VM composition
+falls back to Language/research bytecode. This lane supports compiler-owned first-class test
 inventory and its existing selection/folding contracts; legacy explicit suites,
 host grants and unsupported compilation refuse. Use an explicit reference or
 target lane for those workloads.
