@@ -25,7 +25,10 @@
         "verify"
       ],
       "fingerprint_sources": [
-        "bin/mncs-test"
+        "bin/mncs-test",
+        "bin/mncs-test-vm",
+        "tools/mncs_test.py",
+        "tools/vm_transport.py"
       ],
       "invocation": {
         "fixed_argv": [
@@ -46,9 +49,17 @@
             "path": ".bootstrap/target/release/mncs-compiler-stage0-probe",
             "repository": "mncs-compiler"
           },
+          "MNCS_LIBRARY_PATH": {
+            "path": "library",
+            "repository": "mncs-language"
+          },
           "MNCS_REFERENCE_BIN": {
             "path": "target/release/mncs",
             "repository": "mncs-language"
+          },
+          "MNCS_TEST_STATE_DIR": {
+            "path": ".mncs",
+            "repository": "mncs-test"
           },
           "MNCS_VM_BIN": {
             "path": "target/debug/mncs-vm",
@@ -129,6 +140,6 @@
   "purpose": "Native testing, verification, and conformance framework for MNCS and the broader project family: language-owned test declarations executed through the compiler-owned mncs test entrypoint, with native mncs.test.* modules owning assertion, suite, runner-policy, property, and snapshot semantics.",
   "repository": "mncs-test",
   "schema_version": "mncs.project-view/1",
-  "source_identity": "sha256:59272ce0b28325e52ebe642e2347095072bb5917fd86efd564bec7bb9bca156e",
+  "source_identity": "sha256:8c5b71ccb30380c48326ae901ba2c343645339a2bd5209fd85f25b72fa08b5cb",
   "structure": {}
 }
