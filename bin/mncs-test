@@ -7,6 +7,12 @@
 # named `bin/mncs-test-compat` adapter when an independent oracle is desired.
 set -euo pipefail
 
+if [[ "${1:-}" == "vm" ]]; then
+    shift
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec "$SCRIPT_DIR/mncs-test-vm" "$@"
+fi
+
 if [[ "${1:-}" == "compat" || "${1:-}" == "oracle" ]]; then
     echo "error: the Python compatibility runner is explicit; invoke bin/mncs-test-compat directly" >&2
     exit 2

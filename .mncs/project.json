@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 10,
+  "revision": 11,
   "manifest_location": "in-repository",
   "authority": {
     "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport and differential adapters."
@@ -118,6 +118,51 @@
           },
           "toolchain_env": "MNCS"
         }
+      },
+      {
+        "contract": "canonical-vm-tests",
+        "version": "1",
+        "kind": "selected-compiler-runtime-consumer",
+        "stability": "experimental",
+        "effects": [
+          "verify"
+        ],
+        "fingerprint_sources": [
+          "bin/mncs-test"
+        ],
+        "invocation": {
+          "kind": "executable",
+          "path": "bin/mncs-test",
+          "fixed_argv": [
+            "vm"
+          ],
+          "toolchains": {
+            "MNCS_COMPILER_CHECKOUT": {
+              "repository": "mncs-compiler",
+              "path": "."
+            },
+            "MNCS_COMPILER_PROBE": {
+              "repository": "mncs-compiler",
+              "path": ".bootstrap/target/release/mncs-compiler-stage0-probe"
+            },
+            "MNCS_VM_CHECKOUT": {
+              "repository": "mncs-vm",
+              "path": "."
+            },
+            "MNCS_VM_BIN": {
+              "repository": "mncs-vm",
+              "path": "target/debug/mncs-vm"
+            },
+            "MNCS_REFERENCE_BIN": {
+              "repository": "mncs-language",
+              "path": "target/release/mncs"
+            },
+            "MNCS": {
+              "repository": "mncs-language",
+              "path": "target/release/mncs"
+            }
+          }
+        }
       }
     ],
     "consumes": [
@@ -156,6 +201,26 @@
           "native/mncs/test/verification_coherence.mncs"
         ],
         "scope": "native runtime imports; legacy pre-extraction toolchains may bind equivalent language library sources"
+      },
+      {
+        "contract": "canonical-vm-artifact",
+        "envelope": {
+          "op": "any"
+        },
+        "required": false,
+        "evidence_refs": [
+          "bin/mncs-test"
+        ]
+      },
+      {
+        "contract": "vm-runtime",
+        "envelope": {
+          "op": "any"
+        },
+        "required": false,
+        "evidence_refs": [
+          "bin/mncs-test"
+        ]
       }
     ],
     "tests": [

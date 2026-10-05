@@ -1147,6 +1147,8 @@ def execution_result_from_decoded(
             "failure_reason",
             "effects",
             "returned",
+            "vm_record",
+            "execution_provenance",
         )
         if key in decoded
     }
@@ -4099,18 +4101,35 @@ def run_manifest(args: argparse.Namespace) -> int:
         execution: dict[str, Any] | None = None
         inventory_failure: dict[str, Any] | None = None
         configured_tests = list(manifest["tests"])
+        if getattr(args, "execution", "stage0-reference") == "canonical-vm" and (configured_tests or manifest.get("suite")):
+            raise ManifestError("canonical-vm requires compiler-owned first-class test inventory; explicit legacy tests/suite require the stage0-reference lane")
 
         # A normal runtime manifest names a source/module and policy only.
         # The compiler is the sole authority for first-class test declarations.
         if not configured_tests and not manifest.get("suite"):
-            test_inventory, inventory_transport = compiler_inventory(
-                source_path=Path(manifest["source_path"]),
-                mncs=mncs,
-                cwd=cwd,
-                environment=environment,
-                timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
-                artifacts=artifacts,
-            )
+            vm_product = vm_evidence = None
+            if getattr(args, "execution", "stage0-reference") == "canonical-vm":
+                if not args.compiler_checkout or not args.vm_checkout or not args.vm_executable or not args.vm_cache:
+                    raise ManifestError("canonical-vm requires exact compiler/VM checkout, VM executable and artifact cache selections")
+                from vm_transport import prepare
+                try:
+                    vm_product, vm_evidence, test_inventory = prepare(
+                        checkout=args.compiler_checkout, executable=args.compiler_executable,
+                        source=manifest["source_path"], libraries=[p for p in environment.get("MNCS_LIBRARY_PATH", "").split(os.pathsep) if p],
+                        cache=args.vm_cache, timeout=args.timeout_seconds or manifest["timeout_seconds"])
+                except (OSError, ValueError, RuntimeError) as error:
+                    raise AdapterError("canonical compiler preparation refused: " + str(error)) from error
+                inventory_path = artifacts.write("compiler/direct-test-inventory.json", json_bytes(test_inventory), "compiler-test-inventory")
+                inventory_transport = {"process": {"stdout_artifact": inventory_path}, "document": test_inventory}
+            else:
+                test_inventory, inventory_transport = compiler_inventory(
+                    source_path=Path(manifest["source_path"]),
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                    artifacts=artifacts,
+                )
             if test_inventory is not None:
                 if repository_plan:
                     manifest["module"] = test_inventory.get("module")
@@ -4203,22 +4222,31 @@ def run_manifest(args: argparse.Namespace) -> int:
                 if obligation_selection is not None:
                     execution["obligation_selection"] = obligation_selection
             else:
-                session, execution_detail = compile_embed_artifact(
-                    source_path=Path(manifest["source_path"]),
-                    mncs=mncs,
-                    cwd=cwd,
-                    environment=environment,
-                    timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
-                    artifacts=artifacts,
-                    embed_library=args.embed_library,
-                )
+                if getattr(args, "execution", "stage0-reference") == "canonical-vm":
+                    from vm_transport import VmTestSession
+                    session = VmTestSession(vm_checkout=args.vm_checkout, vm_executable=args.vm_executable,
+                        product=vm_product, evidence=vm_evidence, timeout=args.timeout_seconds or manifest["timeout_seconds"], adapter_error=AdapterError)
+                    execution_detail = {"mode":"canonical-vm-session", "artifact_identity":vm_product["artifact"]["identity"],
+                        "artifact":vm_product["artifact"], "compiler_producer":vm_product["producer"],
+                        "build_receipt":vm_product["build_receipt"], "runtime":session.runtime.runtime,
+                        "cache_reused":vm_product["cache_reused"], "source_map_identity":(vm_evidence.get("source_map") or {}).get("identity")}
+                else:
+                    session, execution_detail = compile_embed_artifact(
+                        source_path=Path(manifest["source_path"]),
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                        timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                        artifacts=artifacts,
+                        embed_library=args.embed_library,
+                    )
                 execution = {**(execution or {}), **execution_detail}
                 execution["selected_test_count"] = len(configured_tests)
                 execution["batch_size"] = len(configured_tests) if session else 0
                 if session is not None:
                     try:
                         transport = {
-                            "mode": "retained-embed-batch",
+                            "mode": execution.get("mode", "retained-embed-batch"),
                             "library": execution.get("library"),
                             "artifact_identity": execution.get("artifact_identity"),
                             "artifact_sha256": (execution.get("session") or {}).get("artifact_sha256"),
@@ -4648,6 +4676,12 @@ def parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="run one MNCS test manifest and compiler-discovered tests")
     run.add_argument("--manifest", default="mncs-test.toml")
     run.add_argument("--mncs", default="mncs")
+    run.add_argument("--execution", choices=("stage0-reference", "canonical-vm"), default="stage0-reference")
+    run.add_argument("--compiler-checkout", default=os.environ.get("MNCS_COMPILER_CHECKOUT"))
+    run.add_argument("--compiler-executable", default=os.environ.get("MNCS_COMPILER_PROBE"))
+    run.add_argument("--vm-checkout", default=os.environ.get("MNCS_VM_CHECKOUT"))
+    run.add_argument("--vm-executable", default=os.environ.get("MNCS_VM_BIN"))
+    run.add_argument("--vm-cache", default=os.environ.get("MNCS_VM_ARTIFACT_CACHE"))
     run.add_argument("--library", action="append", default=[], help="additional MNCS library root; may be repeated")
     run.add_argument("--embed-library", help="explicit mncs-embed shared library; otherwise discover beside mncs")
     run.add_argument("--filter", action="append", default=[], help="select tests containing this identity/name fragment; may be repeated")

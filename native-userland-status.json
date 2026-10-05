@@ -73,7 +73,25 @@
     "obligation_selection_interface": "mncs.test.obligation_selection::selection_app",
     "provider_selection_bound": 8,
     "provider_batch_bound_reason": "execution-resource batch bound; a larger plan selection is split by the caller",
-    "provider_inventory_binding": "compiler-issued artifact callable metadata → bounded provider request projection → native receipt consistency; no MNCS identity source table",
+    "provider_inventory_binding": "compiler-issued artifact callable metadata \u2192 bounded provider request projection \u2192 native receipt consistency; no MNCS identity source table",
     "provider_revision_binding": "stable provider protocol identity + compiler artifact identity on each callable binding; per-request binding digest carried in TestResult and CheckResult"
+  },
+  "execution_lanes": {
+    "reference": {
+      "entrypoint": "mncs test",
+      "authority": "selected Stage-0 compiler/runtime",
+      "host_fallback": false
+    },
+    "canonical_vm": {
+      "entrypoint": "bin/mncs-test vm",
+      "producer": "mncs-compiler:canonical-vm-artifact/1",
+      "runtime": "mncs-vm:vm-runtime/1",
+      "transport": "tools/mncs_test.py + tools/vm_transport.py",
+      "policy": "native first-class TestResult and MNCS suite folding",
+      "fallback": false,
+      "host_processes_per_test": 0,
+      "bootstrap_python_transport_calls": 1,
+      "scope": "compiler-owned first-class inventory; no host grants or legacy explicit suites"
+    }
   }
 }
