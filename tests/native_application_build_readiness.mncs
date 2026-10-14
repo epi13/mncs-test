@@ -1,0 +1,18 @@
+mncs 0.18;
+module tests.native_application_build_readiness;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+
+fn first_build_case() -> (result: TestResult) {
+    return from_assertion(equals_bool(true, true, 9101));
+}
+
+fn second_build_case() -> (result: TestResult) {
+    return from_assertion(equals_i64(42, 19 +% 23, 9102));
+}
+
+fn application_entry() -> (result: SuiteSummary) {
+    let results: [TestResult; 2] = [first_build_case(), second_build_case()];
+    return summarize<2>(results);
+}

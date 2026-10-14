@@ -27,7 +27,9 @@
       "fingerprint_sources": [
         "bin/mncs-test",
         "bin/mncs-test-vm",
+        "tests/native_application_build_readiness.mncs",
         "tools/mncs_test.py",
+        "tools/test_application_build_vm.py",
         "tools/vm_transport.py"
       ],
       "invocation": {
@@ -68,6 +70,10 @@
           "MNCS_VM_CHECKOUT": {
             "path": ".",
             "repository": "mncs-vm"
+          },
+          "MNCS_STDLIB_ROOT": {
+            "path": ".",
+            "repository": "mncs-stdlib"
           }
         }
       },

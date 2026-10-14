@@ -1496,6 +1496,7 @@ def execute_batch(
     default_step_budget: int,
     artifacts: ArtifactStore,
     transport: dict[str, Any],
+    suite: bool = False,
 ) -> list[dict[str, Any]]:
     request_documents: list[dict[str, Any]] = []
     transport_requests: list[dict[str, Any]] = []
@@ -1598,6 +1599,7 @@ def execute_batch(
                 source_text=source_text,
                 decoded=decoded[index],
                 step_budget=int(test.get("step_budget", default_step_budget)),
+                suite=suite,
                 transport=transport,
             )
         result["request"] = request_documents[index]

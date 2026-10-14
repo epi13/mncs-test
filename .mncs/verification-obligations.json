@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.verification-obligation-inventory/v1",
   "repository": "mncs-test",
-  "revision": 4,
+  "revision": 6,
   "obligations": [
     {
       "identity": "mncs-test.identity-bound-provider-execution",
@@ -174,6 +174,62 @@
         ],
         "execution_fields": [
           "result_identity"
+        ]
+      }
+    },
+    {
+      "identity": "mncs-test.native-application-build-vm",
+      "title": "Compiler application-build/4 executes through the retained canonical Test VM session and native suite fold",
+      "guarantee_domain": "native_application_execution",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "repository_canonical",
+      "subjects": [
+        "mncs.compiler.application-build/4",
+        "mncs.vm.artifact/1",
+        "mncs.test-result/1",
+        "mncs.test.suite"
+      ],
+      "invalidation_dependencies": [
+        "tests/native_application_build_readiness.mncs",
+        "tools/test_application_build_vm.py",
+        "tools/mncs_test.py",
+        "tools/vm_transport.py",
+        "native/mncs/test/assertions.mncs",
+        "native/mncs/test/suite.mncs"
+      ],
+      "executor": {
+        "provider": "mncs-test",
+        "kind": "external_integration",
+        "entrypoint": "python3 tools/test_application_build_vm.py",
+        "argv": [
+          "python3",
+          "tools/test_application_build_vm.py"
+        ],
+        "working_directory": ".",
+        "timeout_seconds": 180,
+        "effects": [
+          "verify"
+        ],
+        "ephemeral_roots": [],
+        "shareable_artifacts": [
+          "native-application-build-vm/native-application-build.json",
+          "native-application-build-vm/native-application-build-vm-result.json"
+        ]
+      },
+      "evidence_identity": {
+        "subject_fields": [
+          "artifact_identity",
+          "entry_interface_identity"
+        ],
+        "definition_fields": [
+          "obligation_identity",
+          "definition_identity"
+        ],
+        "execution_fields": [
+          "executor_identity",
+          "verifier_identity",
+          "invalidation_identity"
         ]
       }
     }

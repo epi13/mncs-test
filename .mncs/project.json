@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-test",
-  "revision": 11,
+  "revision": 12,
   "manifest_location": "in-repository",
   "authority": {
     "note": "mncs-test owns testing semantics and native provider results; Python and shell remain narrow transport and differential adapters."
@@ -130,7 +130,9 @@
         "fingerprint_sources": [
           "bin/mncs-test",
           "bin/mncs-test-vm",
+          "tests/native_application_build_readiness.mncs",
           "tools/mncs_test.py",
+          "tools/test_application_build_vm.py",
           "tools/vm_transport.py"
         ],
         "invocation": {
@@ -171,6 +173,10 @@
             "MNCS": {
               "repository": "mncs-language",
               "path": "target/release/mncs"
+            },
+            "MNCS_STDLIB_ROOT": {
+              "repository": "mncs-stdlib",
+              "path": "."
             }
           }
         }

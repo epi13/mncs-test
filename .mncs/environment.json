@@ -3,16 +3,30 @@
   "working_checkout": "current",
   "workspace_scope": {
     "kind": "workspace",
-    "repositories": ["mncs-test"]
+    "repositories": [
+      "mncs-test",
+      "mncs-compiler",
+      "mncs-language",
+      "mncs-vm",
+      "mncs-stdlib"
+    ]
   },
   "intent": {
     "goal": "Develop and verify the MNCS Test native runner and provider integration.",
-    "repositories": ["mncs-test"],
-    "protected_repositories": ["mncs-compiler", "mncs-language"],
+    "repositories": [
+      "mncs-test"
+    ],
+    "protected_repositories": [
+      "mncs-compiler",
+      "mncs-language",
+      "mncs-vm",
+      "mncs-stdlib"
+    ],
     "constraints": [
       "Keep Test semantics, fixtures, and runner changes in mncs-test.",
       "Treat Compiler and Language checkouts as read-only toolchain inputs.",
-      "Use the repository's declared native test and provider verification commands."
+      "Use the repository's declared native test and provider verification commands.",
+      "Treat the Stdlib checkout as a read-only source dependency."
     ],
     "acceptance_criteria": [
       "Consume the Compiler application-build/4 receipt without duplicating Compiler policy.",
