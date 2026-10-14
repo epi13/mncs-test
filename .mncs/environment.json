@@ -1,0 +1,22 @@
+{
+  "name": "mncs-test-local-development",
+  "working_checkout": "current",
+  "workspace_scope": {
+    "kind": "workspace",
+    "repositories": ["mncs-test"]
+  },
+  "intent": {
+    "goal": "Develop and verify the MNCS Test native runner and provider integration.",
+    "repositories": ["mncs-test"],
+    "protected_repositories": ["mncs-compiler", "mncs-language"],
+    "constraints": [
+      "Keep Test semantics, fixtures, and runner changes in mncs-test.",
+      "Treat Compiler and Language checkouts as read-only toolchain inputs.",
+      "Use the repository's declared native test and provider verification commands."
+    ],
+    "acceptance_criteria": [
+      "Consume the Compiler application-build/4 receipt without duplicating Compiler policy.",
+      "Prove the canonical runner's retained-session and batch path with existing provider receipt checks."
+    ]
+  }
+}
