@@ -95,15 +95,16 @@ the original repository path depth.
 inventory. The adapter prepares the runner's existing searchable fields and
 projects native-selected indices back to their records. Candidate and filter
 batches are bounded at 16. Each MNCS request scans a complete search text up to
-8192 UTF-8 bytes and filters up to 1024 bytes; the host no longer splits long
-candidate text into overlapping windows. The MNCS kernel directly scans
-matches contained in each part and checks only starts that cross a part
-boundary, while rejecting endpoint mismatches before a full comparison. The
-adapter estimates scan and request-decoding work, splits expensive batches
-before execution, and caps each selection at 64 native calls.
-Search text over 8192 bytes, filters over 1024 bytes, a single pair that still
-exceeds the native step budget, and plans that exceed the call limit retain the
-prior host filter as an explicit, reported fallback.
+65536 UTF-8 bytes in at most 17 UTF-8-safe segments and filters up to 1024 bytes.
+The host no longer splits long candidate text into overlapping windows. The
+MNCS kernel directly scans matches contained in each part and checks only starts
+that cross a part boundary, while rejecting endpoint mismatches before a full
+comparison. The adapter estimates scan, first-byte hits, and request-decoding
+work, splits expensive batches before execution, and caps each selection at 64
+native calls.
+Search text over 65536 bytes, filters over 1024 bytes, a single pair that still
+exceeds the native 2097152-step budget, and plans that exceed the call limit
+retain the prior host filter as an explicit, reported fallback.
 
 `mncs.test.exact_identity_selection_v2` owns matching family-check compiler
 test identities against the current inventory. The adapter retains sorted

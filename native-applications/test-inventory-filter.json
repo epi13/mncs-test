@@ -5,7 +5,7 @@
   "module": "mncs.test.inventory_filter_v2",
   "entry_function": "inventory_filter_app_v2",
   "profile": "0.19",
-  "interface_identity": "b6b65187b97546c2f08002de4c2b6329ade76cb7571ca6570d82f936cb793d44",
+  "interface_identity": "653bcba64c53bbb6c986596f0f000c83b059606941d5276f3be8099b81ea205b",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

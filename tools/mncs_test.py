@@ -4274,7 +4274,7 @@ def select_tests(
             timeout_seconds=timeout_seconds,
         )
     except NativeInputBoundError as error:
-        # MNCS v2 bounds search text at 8192 bytes and filter terms at 1024.
+        # MNCS v2 bounds search text at 65536 bytes and filter terms at 1024.
         # Preserve the legacy behavior beyond either input bound and report
         # the host fallback instead of claiming native selection.
         selected_tests = []
@@ -4292,7 +4292,7 @@ def select_tests(
                 "host_fallback_input_bound"
                 if error.reason in {
                     "input_exceeds_native_1024_byte_bound",
-                    "input_exceeds_native_8192_byte_bound",
+                    "input_exceeds_native_65536_byte_bound",
                 }
                 else "host_fallback_call_limit"
                 if error.reason == "native_batch_call_limit_exceeded"

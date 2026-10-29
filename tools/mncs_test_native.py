@@ -296,9 +296,12 @@ INVENTORY_FILTER_REQUEST_SCHEMA = "mncs.test-inventory-filter-request/2"
 INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/2"
 INVENTORY_FILTER_BATCH_SIZE = 16
 INVENTORY_FILTER_FILTER_MAX_BYTES = 1024
-INVENTORY_FILTER_SEARCH_TEXT_MAX_BYTES = 8192
+INVENTORY_FILTER_SEARCH_TEXT_MAX_BYTES = 65_536
 INVENTORY_FILTER_SEARCH_TEXT_PART_MAX_BYTES = 4096
-INVENTORY_FILTER_ESTIMATED_WORK_MAX = 65_536
+INVENTORY_FILTER_STEP_BUDGET = 2_097_152
+# Keep the planner ceiling equal to this application's bounded VM budget.
+INVENTORY_FILTER_ESTIMATED_WORK_MAX = INVENTORY_FILTER_STEP_BUDGET
+INVENTORY_FILTER_FIRST_BYTE_HIT_WORK = 128
 INVENTORY_FILTER_MAX_NATIVE_CALLS = 64
 EXACT_IDENTITY_SELECTION_REQUEST_SCHEMA = "mncs.test-exact-identity-selection-request/2"
 EXACT_IDENTITY_SELECTION_RESULT_SCHEMA = "mncs.test-exact-identity-selection/2"
@@ -387,8 +390,8 @@ def run_test_inventory_filter(
     for _, size in candidate_sources:
         if size > INVENTORY_FILTER_SEARCH_TEXT_MAX_BYTES:
             raise NativeInputBoundError(
-                "Test inventory search text exceeds the native 8192-byte bound",
-                reason="input_exceeds_native_8192_byte_bound",
+                "Test inventory search text exceeds the native 65536-byte bound",
+                reason="input_exceeds_native_65536_byte_bound",
             )
     normalized_filters: list[str] = []
     encoded_filters: list[bytes] = []
@@ -448,11 +451,14 @@ def run_test_inventory_filter(
             work = 1
         else:
             starts = len(haystack) - len(needle) + 1
-            endpoint_hits = sum(
-                haystack[start] == needle[0]
-                and haystack[start + len(needle) - 1] == needle[-1]
-                for start in range(starts)
-            )
+            first_byte_hits = 0
+            endpoint_hits = 0
+            last_index = len(needle) - 1
+            for start in range(starts):
+                if haystack[start] == needle[0]:
+                    first_byte_hits += 1
+                    if haystack[start + last_index] == needle[last_index]:
+                        endpoint_hits += 1
             # Account for repeated scan work and request decoding. Each start
             # pays for branch and endpoint checks; only starts near a segment
             # seam traverse the part list. Candidate bytes and filter bytes
@@ -466,6 +472,7 @@ def run_test_inventory_filter(
                 + len(haystack)
                 + 2 * len(needle)
                 + 2 * boundary_starts * (part_count - 1)
+                + INVENTORY_FILTER_FIRST_BYTE_HIT_WORK * first_byte_hits
                 + endpoint_hits * len(needle) * part_count
             )
         estimated_pair_work[cache_key] = work
@@ -537,6 +544,7 @@ def run_test_inventory_filter(
             mncs=mncs,
             cwd=cwd,
             environment=environment,
+            step_budget=INVENTORY_FILTER_STEP_BUDGET,
             timeout_seconds=timeout_seconds,
         )
         indices = result.get("selected_indices")

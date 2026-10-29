@@ -88,7 +88,7 @@ def test_native_inventory_filter_searches_full_long_unicode_text(
     result = _select(tmp_path, search_texts, filters)
 
     assert result["selected_indices"] == _reference(search_texts, filters) == [0]
-    assert result["calls"] == 2
+    assert result["calls"] == 1
     assert result["case_count"] == 2
 
 
@@ -165,12 +165,12 @@ def test_native_filter_refuses_adversarial_scan_cost_before_execution(
     with pytest.raises(NativeTransportError, match="step-budget work estimate"):
         _select(
             tmp_path,
-            ["a" * 1024] * 16,
-            [("a" * 449) + "b" + ("a" * 450)] * 16,
+            ["a" * 4096],
+            ["a" * 1024],
         )
 
 
-def test_runner_uses_adaptive_native_batches_for_endpoint_mismatches(
+def test_runner_keeps_endpoint_mismatch_batch_within_native_budget(
     tmp_path: Path,
 ) -> None:
     tests = [{"id": "a" * 1000, "entry": ""} for _ in range(16)]
@@ -190,7 +190,7 @@ def test_runner_uses_adaptive_native_batches_for_endpoint_mismatches(
     assert selected == []
     assert summary["authority"] == "mncs.test.inventory_filter_v2"
     assert summary["status"] == "returned"
-    assert summary["calls"] == 16
+    assert summary["calls"] == 4
 
 
 def test_runner_routes_long_inventory_text_through_native_segments(
@@ -286,8 +286,8 @@ def test_runner_preserves_overbound_filter_behavior_with_explicit_host_fallback(
 
 
 def test_runner_reports_host_fallback_for_native_work_estimate(tmp_path: Path) -> None:
-    tests = [{"id": "a" * 800, "entry": ""}]
-    filters = [("a" * 350) + "b" + ("a" * 349)]
+    tests = [{"id": "a" * 4096, "entry": ""}]
+    filters = [("a" * 500) + "b" + ("a" * 523)]
     summary: dict[str, object] = {}
 
     selected = mncs_test.select_tests(
@@ -305,13 +305,13 @@ def test_runner_reports_host_fallback_for_native_work_estimate(tmp_path: Path) -
     assert summary["fallback_reason"] == "estimated_work_exceeds_native_step_budget"
 
 
-def test_native_inventory_filter_scans_text_at_8192_byte_bound(
+def test_native_inventory_filter_scans_utf8_text_at_65536_byte_bound(
     tmp_path: Path,
 ) -> None:
-    search_text = ("x" * 8186) + "needle"
-    assert len(search_text.encode("utf-8")) == 8192
+    search_text = ("€" * 21845) + "x"
+    assert len(search_text.encode("utf-8")) == 65536
 
-    result = _select(tmp_path, [search_text], ["needle"])
+    result = _select(tmp_path, [search_text], ["x"])
 
     assert result["selected_indices"] == [0]
     assert result["calls"] == 1
@@ -329,10 +329,29 @@ def test_native_inventory_filter_matches_across_utf8_part_boundary(
     assert result["calls"] == 1
 
 
-def test_runner_preserves_long_search_text_with_explicit_host_fallback(
+def test_runner_searches_exact_search_text_bound_natively(
+    tmp_path: Path,
+) -> None:
+    test = {"id": "x" * 65526, "entry": "needle"}
+    summary: dict[str, object] = {}
+
+    selected = mncs_test.select_tests(
+        [test], ["needle"], mncs=str(MNCS), cwd=tmp_path,
+        environment=_environment(), timeout_seconds=120,
+        selection_summary=summary,
+    )
+
+    assert selected == [test]
+    assert summary["authority"] == "mncs.test.inventory_filter_v2"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 1
+    assert "fallback_reason" not in summary
+
+
+def test_runner_preserves_overbound_search_text_with_explicit_host_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    test = {"id": "x" * 8193, "entry": "needle"}
+    test = {"id": "x" * 65527, "entry": "needle"}
     summary: dict[str, object] = {}
     monkeypatch.setattr(
         mncs_test_native,
@@ -350,4 +369,4 @@ def test_runner_preserves_long_search_text_with_explicit_host_fallback(
     assert summary["authority"] == "mncs-test.python_filter_fallback"
     assert summary["requested_native_authority"] == "mncs.test.inventory_filter_v2"
     assert summary["status"] == "host_fallback_input_bound"
-    assert summary["fallback_reason"] == "input_exceeds_native_8192_byte_bound"
+    assert summary["fallback_reason"] == "input_exceeds_native_65536_byte_bound"
