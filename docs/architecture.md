@@ -19,14 +19,14 @@ ordinary MNCS enums, records, functions, sequences, bounded iteration, and
 arithmetic. There is no hidden registration table in Python and no host-side
 assertion callback.
 
-The native command owns compiler/toolchain transport and four platform
-boundaries that are not test semantics:
+The host command owns compiler/toolchain transport and the platform
+responsibilities that remain outside test semantics:
 
 1. source loading and explicit library resolution;
 2. compiler admission, backend artifact verification, and the retained
    `mncs-embed` session;
-3. JSON serialization of typed Test and CheckResult values plus artifact paths;
-   `mncs.check-result/1` policy projection is owned by an MNCS application; and
+3. projection of runtime values into bounded application records plus artifact
+   paths; and
 4. bounded artifact publication.
 
 The adapter receives a native result, validates its shape, and carries it
@@ -103,9 +103,20 @@ policy: fallback claim/scope text, first failing identity selection, compact
 summary text, unresolved evidence, and digest-bound references. The adapter
 supplies bounded fields and preserves the opaque `selection` object. Failure
 messages cross the 1,024-byte native field bound as UTF-8-safe chunks; the
-adapter rejoins those chunks when it writes the public JSON document.
-The compact count text reuses `mncs.std.json_emit.v1::put_u64`; the application
-returns a typed record and leaves full JSON serialization to the host boundary.
+adapter rejoins those chunks when it writes the public JSON document. The
+compact count text reuses `mncs.std.json_emit.v1::put_u64`.
+`mncs.test.public_result_json_v1` sorts object keys and emits the public JSON
+format, indentation, escaping, and final newline in MNCS. The original
+single-call application handles output through 16,300 bytes. Larger documents
+use up to 32 continuation pages of at most 8,192 bytes, carrying a bounded
+traversal stack and SHA-256 state between calls. The same window application
+updates `mncs.std.sha256.v1` as it emits each page and returns the final digest
+with the completed document. An independent host SHA-256 check validates the
+result. The native path accepts at most 512 values, depth 63,
+64 children per object, 256-byte keys, 1,024-byte scalar text, and 32,684 output
+bytes. Python still projects arbitrary runtime values into that request,
+reassembles output pages, writes files, and keeps the compatibility serializer
+for values outside the native bounds.
 
 `mncs.test.result_identity_v1` hashes canonical run-identity JSON bytes and
 bounded artifact content through `mncs.std.sha256.v1`. Python still constructs

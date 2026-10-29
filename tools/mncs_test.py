@@ -51,16 +51,20 @@ CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-requ
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-request/1"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json/1"
+PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-window-request/2"
+PUBLIC_RESULT_JSON_WINDOW_RESULT_SCHEMA = "mncs.test.public-json-window/2"
 PUBLIC_RESULT_JSON_MAX_NODES = 512
 PUBLIC_RESULT_JSON_MAX_DEPTH = 63
-PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 16300
+PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
+PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 16300
+PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 32684
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.10"
+RUNNER_VERSION = "0.2.11"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -150,7 +154,7 @@ def json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def _native_public_result_request(value: Any) -> dict[str, Any] | None:
+def _native_public_result_request(value: Any) -> tuple[dict[str, Any], int] | None:
     """Project one JSON-compatible value into the bounded MNCS serializer tree."""
     nodes: list[dict[str, Any]] = []
     edges: list[int] = []
@@ -258,55 +262,30 @@ def _native_public_result_request(value: Any) -> dict[str, Any] | None:
     output_upper_bound = escaped_text_bytes + 24 * len(nodes) + 4 * depth_sum + 32
     if output_upper_bound > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
         return None
-    return {
-        "schema_version": PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
-        "nodes": nodes,
-        "edge_count": len(edges),
-        "edges": edges + [0] * (PUBLIC_RESULT_JSON_MAX_NODES - 1 - len(edges)),
-    }
+    return (
+        {
+            "schema_version": PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
+            "nodes": nodes,
+            "edge_count": len(edges),
+            "edges": edges + [0] * (PUBLIC_RESULT_JSON_MAX_NODES - 1 - len(edges)),
+        },
+        output_upper_bound,
+    )
 
 
-def _native_public_result_payload(
-    value: Any,
-    *,
-    mncs: str,
-    cwd: Path,
-    environment: dict[str, str],
-) -> tuple[bytes, str] | None:
-    """Execute MNCS serialization for values inside its typed transport bounds."""
-    request = _native_public_result_request(value)
-    if request is None:
-        return None
-    try:
-        result = run_native_app(
-            "test-public-result-json.json",
-            request,
-            request_schema=PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
-            result_schema=PUBLIC_RESULT_JSON_RESULT_SCHEMA,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
-            step_budget=8_000_000,
-        )
-    except NativeTransportError as error:
-        raise AdapterError(f"native Test public result JSON failed: {error}") from error
-
+def _decode_public_result_chunks(
+    result: dict[str, Any], *, byte_length: int, maximum_chunks: int
+) -> bytes:
     raw_chunks = result.get("chunks")
     chunk_count = result.get("chunk_count")
-    byte_length = result.get("byte_length")
-    digest = result.get("sha256")
     if (
         not isinstance(raw_chunks, list)
         or not isinstance(chunk_count, int)
         or isinstance(chunk_count, bool)
         or chunk_count != len(raw_chunks)
-        or not isinstance(byte_length, int)
-        or isinstance(byte_length, bool)
-        or not 0 <= byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
-        or not isinstance(digest, str)
-        or not SHA256_HEX.fullmatch(digest)
+        or not 0 <= chunk_count <= maximum_chunks
     ):
-        raise AdapterError("MNCS public-result JSON app returned malformed metadata")
+        raise AdapterError("MNCS public-result JSON app returned malformed chunk metadata")
 
     document = bytearray()
     for chunk in raw_chunks:
@@ -314,7 +293,11 @@ def _native_public_result_payload(
             raise AdapterError("MNCS public-result JSON app returned a malformed chunk")
         raw_bytes = chunk.get("bytes")
         length = chunk.get("length")
-        if not isinstance(length, int) or isinstance(length, bool) or not 0 <= length <= 1024:
+        if (
+            not isinstance(length, int)
+            or isinstance(length, bool)
+            or not 0 <= length <= 1024
+        ):
             raise AdapterError("MNCS public-result JSON app returned an invalid chunk length")
         if isinstance(raw_bytes, str):
             try:
@@ -332,9 +315,206 @@ def _native_public_result_payload(
             raise AdapterError("MNCS public-result JSON app returned a short byte chunk")
         document.extend(encoded[:length])
 
+    if len(document) != byte_length:
+        raise AdapterError("MNCS public-result JSON app returned a short document window")
+    return bytes(document)
+
+
+def _native_public_result_payload(
+    value: Any,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Execute MNCS serialization for values inside its typed transport bounds."""
+    prepared = _native_public_result_request(value)
+    if prepared is None:
+        return None
+    request, output_upper_bound = prepared
+    if output_upper_bound <= PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES:
+        try:
+            result = run_native_app(
+                "test-public-result-json.json",
+                request,
+                request_schema=PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
+                result_schema=PUBLIC_RESULT_JSON_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=8_000_000,
+            )
+        except NativeTransportError as error:
+            raise AdapterError(f"native Test public result JSON failed: {error}") from error
+
+        byte_length = result.get("byte_length")
+        digest = result.get("sha256")
+        if (
+            not isinstance(byte_length, int)
+            or isinstance(byte_length, bool)
+            or not 0 <= byte_length <= PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES
+            or not isinstance(digest, str)
+            or not SHA256_HEX.fullmatch(digest)
+        ):
+            raise AdapterError("MNCS public-result JSON app returned malformed metadata")
+        payload = _decode_public_result_chunks(result, byte_length=byte_length, maximum_chunks=16)
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise AdapterError("MNCS public-result JSON app returned an inconsistent document digest")
+        return payload, digest
+
+    document_length: int | None = None
+    document = bytearray()
+    window_start = 0
+    continuation: list[dict[str, int]] = []
+    visited = 0
+    hash_state: dict[str, Any] | None = None
+    digest: str | None = None
+    for _ in range(32):
+        window_request = {
+            "schema_version": PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
+            "window_start": window_start,
+            "visited": visited,
+            "has_hash_state": hash_state is not None,
+            "hash_state": hash_state or {
+                "h": [0] * 8,
+                "total": 0,
+                "buf": [0] * 64,
+                "buffered": 0,
+            },
+            "stack": continuation,
+            "nodes": request["nodes"],
+            "edge_count": request["edge_count"],
+            "edges": request["edges"],
+        }
+        try:
+            result = run_native_app(
+                "test-public-result-json-window.json",
+                window_request,
+                request_schema=PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
+                result_schema=PUBLIC_RESULT_JSON_WINDOW_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=8_000_000,
+            )
+        except NativeTransportError as error:
+            raise AdapterError(f"native Test public result JSON window failed: {error}") from error
+
+        total = result.get("document_length")
+        returned_start = result.get("window_start")
+        byte_length = result.get("byte_length")
+        next_offset = result.get("next_offset")
+        done = result.get("done")
+        next_visited = result.get("visited")
+        next_stack = result.get("stack")
+        if (
+            result.get("schema_version") != PUBLIC_RESULT_JSON_WINDOW_RESULT_SCHEMA
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or not 0 <= total <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+            or not isinstance(returned_start, int)
+            or isinstance(returned_start, bool)
+            or returned_start != window_start
+            or not isinstance(byte_length, int)
+            or isinstance(byte_length, bool)
+            or not 0 <= byte_length <= PUBLIC_RESULT_JSON_WINDOW_BYTES
+            or not isinstance(next_offset, int)
+            or isinstance(next_offset, bool)
+            or next_offset != window_start + byte_length
+            or next_offset > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+            or type(done) is not bool
+            or not isinstance(next_visited, int)
+            or isinstance(next_visited, bool)
+            or not 0 <= next_visited <= PUBLIC_RESULT_JSON_MAX_NODES
+            or not isinstance(next_stack, list)
+            or len(next_stack) > 64
+        ):
+            raise AdapterError("MNCS public-result JSON window app returned malformed metadata")
+        if (done and (total != next_offset or next_stack or next_visited != len(request["nodes"]))) or (
+            not done and (total != 0 or byte_length == 0 or not next_stack)
+        ):
+            raise AdapterError("MNCS public-result JSON window returned inconsistent continuation state")
+        window_payload = _decode_public_result_chunks(
+            result, byte_length=byte_length, maximum_chunks=16
+        )
+        document.extend(window_payload)
+        returned_state = result.get("hash_state")
+        returned_h = returned_state.get("h") if isinstance(returned_state, dict) else None
+        returned_buf = returned_state.get("buf") if isinstance(returned_state, dict) else None
+        returned_total = returned_state.get("total") if isinstance(returned_state, dict) else None
+        returned_buffered = returned_state.get("buffered") if isinstance(returned_state, dict) else None
+        if isinstance(returned_buf, str):
+            returned_buf = list(returned_buf.encode("utf-8"))
+        if (
+            not isinstance(returned_h, list)
+            or len(returned_h) != 8
+            or any(
+                not isinstance(word, int)
+                or isinstance(word, bool)
+                or not 0 <= word <= 0xFFFFFFFF
+                for word in returned_h
+            )
+            or not isinstance(returned_buf, list)
+            or len(returned_buf) != 64
+            or any(
+                not isinstance(byte, int)
+                or isinstance(byte, bool)
+                or not 0 <= byte <= 255
+                for byte in returned_buf
+            )
+            or not isinstance(returned_total, int)
+            or isinstance(returned_total, bool)
+            or returned_total != next_offset
+            or not isinstance(returned_buffered, int)
+            or isinstance(returned_buffered, bool)
+            or not 0 <= returned_buffered < 64
+            or returned_buffered != returned_total % 64
+            or (done and (
+                not isinstance(result.get("sha256"), str)
+                or not SHA256_HEX.fullmatch(result["sha256"])
+            ))
+        ):
+            raise AdapterError("MNCS public-result JSON window returned malformed hash state")
+        if done:
+            native_digest = result.get("sha256")
+            if not isinstance(native_digest, str) or not SHA256_HEX.fullmatch(native_digest):
+                raise AdapterError("MNCS public-result JSON window returned a malformed digest")
+            digest = native_digest
+        else:
+            hash_state = {
+                "h": returned_h,
+                "total": returned_total,
+                "buf": returned_buf,
+                "buffered": returned_buffered,
+            }
+        if done:
+            document_length = total
+            break
+        if any(
+            not isinstance(frame, dict)
+            or not isinstance(frame.get("node"), int)
+            or isinstance(frame.get("node"), bool)
+            or not 0 <= frame["node"] < PUBLIC_RESULT_JSON_MAX_NODES
+            or not isinstance(frame.get("next_child"), int)
+            or isinstance(frame.get("next_child"), bool)
+            or not 0 <= frame["next_child"] < PUBLIC_RESULT_JSON_MAX_NODES
+            or not isinstance(frame.get("depth"), int)
+            or isinstance(frame.get("depth"), bool)
+            or not 0 <= frame["depth"] < 64
+            for frame in next_stack
+        ):
+            raise AdapterError("MNCS public-result JSON window returned malformed continuation frames")
+        continuation = next_stack
+        visited = next_visited
+        window_start = next_offset
+    else:
+        raise AdapterError("MNCS public-result JSON exceeded its native continuation count")
+
     payload = bytes(document)
-    if len(payload) != byte_length or hashlib.sha256(payload).hexdigest() != digest:
-        raise AdapterError("MNCS public-result JSON app returned an inconsistent document digest")
+    if document_length is None or len(payload) != document_length or digest is None:
+        raise AdapterError("MNCS public-result JSON windows did not cover the document")
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise AdapterError("MNCS Test native digest disagrees with the independent SHA-256 check")
     return payload, digest
 
 
