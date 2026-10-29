@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -48,6 +49,11 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
+PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-request/1"
+PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json/1"
+PUBLIC_RESULT_JSON_MAX_NODES = 512
+PUBLIC_RESULT_JSON_MAX_DEPTH = 63
+PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 16300
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
@@ -142,6 +148,194 @@ def json_bytes(value: Any) -> bytes:
         json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
         + "\n"
     ).encode("utf-8")
+
+
+def _native_public_result_request(value: Any) -> dict[str, Any] | None:
+    """Project one JSON-compatible value into the bounded MNCS serializer tree."""
+    nodes: list[dict[str, Any]] = []
+    edges: list[int] = []
+    active: set[int] = set()
+    escaped_text_bytes = 0
+    depth_sum = 0
+
+    def encode_text(text: str, maximum: int) -> tuple[list[int], int]:
+        nonlocal escaped_text_bytes
+        encoded = text.encode("utf-8")
+        if len(encoded) > maximum:
+            raise ValueError("native public JSON text bound exceeded")
+        escaped_text_bytes += sum(
+            6 if byte < 0x20 else 2 if byte in (0x22, 0x5C) else 1
+            for byte in encoded
+        )
+        return list(encoded), len(encoded)
+
+    def append_node(item: Any, parent: int, key: str, depth: int) -> int:
+        nonlocal depth_sum, escaped_text_bytes
+        if len(nodes) >= PUBLIC_RESULT_JSON_MAX_NODES or depth > PUBLIC_RESULT_JSON_MAX_DEPTH:
+            raise ValueError("native public JSON structure bound exceeded")
+        key_bytes, _ = encode_text(key, 256)
+        depth_sum += depth
+        index = len(nodes)
+        kind = 0
+        text_bytes: list[int] = []
+        integer_value = 0
+        children: list[tuple[str, Any]] | None = None
+        container_identity: int | None = None
+
+        if type(item) is dict:
+            if len(item) > 64:
+                raise ValueError("native public JSON object width exceeded")
+            children = []
+            for child_key, child_value in item.items():
+                if type(child_key) is not str:
+                    raise ValueError("native public JSON requires string object keys")
+                children.append((child_key, child_value))
+            kind = 1
+            container_identity = id(item)
+        elif type(item) in (list, tuple):
+            if len(item) + len(nodes) > PUBLIC_RESULT_JSON_MAX_NODES:
+                raise ValueError("native public JSON array width exceeded")
+            children = [("", child) for child in item]
+            kind = 2
+            container_identity = id(item)
+        elif item is None:
+            kind = 8
+        elif type(item) is bool:
+            kind = 6 if item else 7
+            escaped_text_bytes += 4 if item else 5
+        elif type(item) is int:
+            if not -(1 << 63) <= item < (1 << 63):
+                raise ValueError("native public JSON integer is outside signed 64-bit range")
+            kind = 4
+            escaped_text_bytes += len(str(item))
+            integer_value = item
+        elif type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("native public JSON does not accept non-finite numbers")
+            kind = 5
+            text_bytes, _ = encode_text(repr(item), 1024)
+        elif type(item) is str:
+            kind = 3
+            text_bytes, _ = encode_text(item, 1024)
+        else:
+            raise ValueError("native public JSON value is outside the JSON data model")
+
+        if children is not None:
+            if container_identity in active:
+                raise ValueError("native public JSON input contains a cycle")
+            if len(edges) + len(children) > PUBLIC_RESULT_JSON_MAX_NODES - 1:
+                raise ValueError("native public JSON edge bound exceeded")
+
+        first_edge = len(edges)
+        node = {
+            "kind": kind,
+            "parent": parent,
+            "key": key_bytes,
+            "text": text_bytes,
+            "first_edge": first_edge,
+            "child_count": len(children) if children is not None else 0,
+            "integer_value": integer_value,
+        }
+        nodes.append(node)
+        if children is not None:
+            if container_identity is not None:
+                active.add(container_identity)
+            try:
+                edges.extend([0] * len(children))
+                for offset, (child_key, child_value) in enumerate(children):
+                    child_index = append_node(child_value, index, child_key, depth + 1)
+                    edges[first_edge + offset] = child_index
+            finally:
+                if container_identity is not None:
+                    active.remove(container_identity)
+        return index
+
+    try:
+        append_node(value, 0, "", 0)
+    except (RecursionError, TypeError, ValueError, UnicodeEncodeError, RuntimeError):
+        return None
+
+    output_upper_bound = escaped_text_bytes + 24 * len(nodes) + 4 * depth_sum + 32
+    if output_upper_bound > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+        return None
+    return {
+        "schema_version": PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
+        "nodes": nodes,
+        "edge_count": len(edges),
+        "edges": edges + [0] * (PUBLIC_RESULT_JSON_MAX_NODES - 1 - len(edges)),
+    }
+
+
+def _native_public_result_payload(
+    value: Any,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Execute MNCS serialization for values inside its typed transport bounds."""
+    request = _native_public_result_request(value)
+    if request is None:
+        return None
+    try:
+        result = run_native_app(
+            "test-public-result-json.json",
+            request,
+            request_schema=PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
+            result_schema=PUBLIC_RESULT_JSON_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test public result JSON failed: {error}") from error
+
+    raw_chunks = result.get("chunks")
+    chunk_count = result.get("chunk_count")
+    byte_length = result.get("byte_length")
+    digest = result.get("sha256")
+    if (
+        not isinstance(raw_chunks, list)
+        or not isinstance(chunk_count, int)
+        or isinstance(chunk_count, bool)
+        or chunk_count != len(raw_chunks)
+        or not isinstance(byte_length, int)
+        or isinstance(byte_length, bool)
+        or not 0 <= byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+        or not isinstance(digest, str)
+        or not SHA256_HEX.fullmatch(digest)
+    ):
+        raise AdapterError("MNCS public-result JSON app returned malformed metadata")
+
+    document = bytearray()
+    for chunk in raw_chunks:
+        if not isinstance(chunk, dict):
+            raise AdapterError("MNCS public-result JSON app returned a malformed chunk")
+        raw_bytes = chunk.get("bytes")
+        length = chunk.get("length")
+        if not isinstance(length, int) or isinstance(length, bool) or not 0 <= length <= 1024:
+            raise AdapterError("MNCS public-result JSON app returned an invalid chunk length")
+        if isinstance(raw_bytes, str):
+            try:
+                encoded = raw_bytes.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise AdapterError("MNCS public-result JSON app returned invalid UTF-8") from error
+        elif isinstance(raw_bytes, list) and all(
+            isinstance(byte, int) and not isinstance(byte, bool) and 0 <= byte <= 255
+            for byte in raw_bytes
+        ):
+            encoded = bytes(raw_bytes)
+        else:
+            raise AdapterError("MNCS public-result JSON app returned a malformed byte chunk")
+        if length > len(encoded):
+            raise AdapterError("MNCS public-result JSON app returned a short byte chunk")
+        document.extend(encoded[:length])
+
+    payload = bytes(document)
+    if len(payload) != byte_length or hashlib.sha256(payload).hexdigest() != digest:
+        raise AdapterError("MNCS public-result JSON app returned an inconsistent document digest")
+    return payload, digest
 
 
 def compact_json(value: Any) -> str:
@@ -5052,14 +5246,48 @@ def run_family_check(args: argparse.Namespace) -> int:
         return EXIT_INFRASTRUCTURE_FAILURE
 
 
-def write_output(path: Path | None, value: Any) -> str | None:
+def _public_result_json_payload(
+    value: Any,
+    *,
+    mncs: str | None = None,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """Prefer the native public-result serializer and preserve legacy fallback."""
+    if mncs is not None and cwd is not None and environment is not None:
+        native = _native_public_result_payload(
+            value,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+        if native is not None:
+            return native
+    payload = json_bytes(value)
+    return payload, sha256_bytes(payload)
+
+
+def write_output(
+    path: Path | None,
+    value: Any,
+    *,
+    mncs: str | None = None,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> str | None:
+    """Write a result artifact after native-first, byte-compatible serialization."""
     if path is None:
         return None
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json_bytes(value)
+    payload, digest = _public_result_json_payload(
+        value,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
     path.write_bytes(payload)
-    return sha256_bytes(payload)
+    return digest
 
 
 def result_paths(args: argparse.Namespace, cwd: Path) -> tuple[Path | None, Path | None, Path]:
@@ -5890,9 +6118,20 @@ def run_manifest(args: argparse.Namespace) -> int:
         "unattributed": "total minus recorded phase observations",
     }
     if result_path:
-        result_digest = write_output(result_path, result)
+        result_digest = write_output(
+            result_path,
+            result,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
     else:
-        result_digest = sha256_bytes(json_bytes(result))
+        _, result_digest = _public_result_json_payload(
+            result,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
     if check_path:
         write_output(
             check_path,
@@ -5903,6 +6142,9 @@ def run_manifest(args: argparse.Namespace) -> int:
                 cwd=cwd,
                 environment=environment,
             ),
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
         )
     print_result(result, args.format)
     return int(result["exit_code"])
