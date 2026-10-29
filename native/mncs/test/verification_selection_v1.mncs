@@ -1,0 +1,426 @@
+mncs 0.18;
+
+// Test receipt selection coverage is a semantic reuse decision. The host
+// supplies bounded obligation patterns, compiler inventory, and recorded
+// selections in canonical UTF-8 byte order; MNCS resolves exact identities
+// and decides coverage.
+module mncs.test.verification_selection_v1;
+
+use mncs.std.application.v1;
+
+record SelectionPatternV1 {
+    is_text: bool,
+    identity: [byte; up_to 1024]
+}
+
+record RecordedSelectionV1 {
+    present: bool,
+    valid: bool,
+    count: u64,
+    identities: [[byte; up_to 1024]; up_to 64]
+}
+
+record SelectionScanV1 {
+    patterns_bounded: bool,
+    pattern_count: u64,
+    patterns: [SelectionPatternV1; up_to 64],
+    inventory_complete: bool,
+    inventory_count: u64,
+    inventory: [[byte; up_to 1024]; up_to 64],
+    inventory_sorted: [[byte; up_to 1024]; up_to 64],
+    head: RecordedSelectionV1,
+    candidate_count: u64,
+    candidates: [RecordedSelectionV1; up_to 64]
+}
+
+record SelectionRequestV1 {
+    schema_version: [byte; up_to 64],
+    scan_count: u64,
+    scans: [SelectionScanV1; up_to 32]
+}
+
+record SelectionResolutionV1 {
+    provable: bool,
+    wildcard: bool,
+    required_count: u64,
+    required: [[byte; up_to 1024]; 64]
+}
+
+record SelectionDecisionV1 {
+    provable: bool,
+    required_count: u64,
+    required: [[byte; up_to 1024]; 64],
+    head_matches: bool,
+    candidate_count: u64,
+    candidate_matches: [bool; 64]
+}
+
+record SelectionResultV1 {
+    schema_version: [byte; up_to 64],
+    scan_count: u64,
+    scans: [SelectionDecisionV1; 32]
+}
+
+record SelectionAccumulatorV1 {
+    scans: [SelectionDecisionV1; 32],
+    count: u64
+}
+
+record ResolutionAccumulatorV1 {
+    provable: bool,
+    active: bool,
+    wildcard: bool,
+    required_count: u64,
+    required: [[byte; up_to 1024]; 64]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 47, 49];
+}
+
+fn same_identity(left: [byte; up_to 1024], right: [byte; up_to 1024]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn star_identity() -> (result: [byte; up_to 1024]) {
+    return [42];
+}
+
+fn empty_resolution() -> (result: SelectionResolutionV1) {
+    return SelectionResolutionV1 {
+        provable: false,
+        wildcard: false,
+        required_count: 0,
+        required: [[0; 0]; 64]
+    };
+}
+
+fn empty_decision(candidate_count: u64) -> (result: SelectionDecisionV1) {
+    return SelectionDecisionV1 {
+        provable: false,
+        required_count: 0,
+        required: [[0; 0]; 64],
+        head_matches: false,
+        candidate_count: candidate_count,
+        candidate_matches: [false; 64]
+    };
+}
+
+fn inventory_contains(scan: SelectionScanV1, identity: [byte; up_to 1024]) -> (result: bool) {
+    iterate i over scan.inventory carrying found: bool = false {
+        next found = found || (i < scan.inventory_count && same_identity(scan.inventory[i], identity));
+    }
+    return found;
+}
+
+fn required_contains(
+    values: [[byte; up_to 1024]; 64],
+    count: u64,
+    identity: [byte; up_to 1024]
+) -> (result: bool) {
+    iterate i over values carrying found: bool = false {
+        next found = found || (i < count && same_identity(values[i], identity));
+    }
+    return found;
+}
+
+fn identity_order(left: [byte; up_to 1024], right: [byte; up_to 1024]) -> (result: i64) {
+    if left.len <= right.len {
+        iterate i over left carrying order: i64 = 0 {
+            let next_order: i64 = select(
+                order == 0,
+                select(left[i] < right[i], -1, select(left[i] > right[i], 1, 0)),
+                order
+            );
+            next order = next_order;
+        }
+        if order != 0 {
+            return order;
+        }
+        return select(left.len < right.len, -1, select(left.len > right.len, 1, 0));
+    }
+    iterate i over right carrying order: i64 = 0 {
+        let next_order: i64 = select(
+            order == 0,
+            select(left[i] < right[i], -1, select(left[i] > right[i], 1, 0)),
+            order
+        );
+        next order = next_order;
+    }
+    if order != 0 {
+        return order;
+    }
+    return 1;
+}
+
+fn sort_pair(
+    values: [[byte; up_to 1024]; 64],
+    index: u64,
+    candidate: u64,
+    count: u64
+) -> (result: [[byte; up_to 1024]; 64]) {
+    if index >= count || candidate <= index || candidate >= count {
+        return values;
+    }
+    let current: [byte; up_to 1024] = values[index];
+    let other: [byte; up_to 1024] = values[candidate];
+    if identity_order(other, current) < 0 {
+        return replace(replace(values, index, other), candidate, current);
+    }
+    return values;
+}
+
+fn sort_required(
+    values: [[byte; up_to 1024]; 64],
+    count: u64
+) -> (result: [[byte; up_to 1024]; 64]) {
+    iterate i over values carrying sorted: [[byte; up_to 1024]; 64] = values {
+        iterate j over sorted carrying row: [[byte; up_to 1024]; 64] = sorted {
+            next row = sort_pair(row, i, j, count);
+        }
+        next sorted = row;
+    }
+    return sorted;
+}
+
+fn recorded_ordered(
+    values: [[byte; up_to 1024]; up_to 64],
+    count: u64,
+    index: u64
+) -> (result: bool) {
+    if index == 0 || index >= count {
+        return true;
+    }
+    return identity_order(values[index -% 1], values[index]) <= 0;
+}
+
+fn recorded_is_ordered(
+    values: [[byte; up_to 1024]; up_to 64],
+    count: u64
+) -> (result: bool) {
+    iterate i over values carrying ordered: bool = true {
+        next ordered = ordered && recorded_ordered(values, count, i);
+    }
+    return ordered;
+}
+
+fn selection_pair_matches(
+    required: [[byte; up_to 1024]; 64],
+    recorded: [[byte; up_to 1024]; up_to 64],
+    count: u64,
+    index: u64
+) -> (result: bool) {
+    if index >= count {
+        return true;
+    }
+    return same_identity(required[index], recorded[index]);
+}
+
+fn copy_inventory(scan: SelectionScanV1) -> (result: SelectionResolutionV1) {
+    let seed: SelectionResolutionV1 = SelectionResolutionV1 {
+        provable: true,
+        wildcard: true,
+        required_count: 0,
+        required: [[0; 0]; 64]
+    };
+    iterate i over scan.inventory carrying resolved: SelectionResolutionV1 = seed {
+        next resolved = SelectionResolutionV1 {
+            provable: true,
+            wildcard: true,
+            required_count: resolved.required_count +% 1,
+            required: replace(resolved.required, i, scan.inventory[i])
+        };
+    }
+    return resolved;
+}
+
+fn resolve_pattern(
+    scan: SelectionScanV1,
+    acc: ResolutionAccumulatorV1,
+    pattern: SelectionPatternV1,
+    index: u64
+) -> (result: ResolutionAccumulatorV1) {
+    if !acc.active || index >= scan.pattern_count {
+        return acc;
+    }
+    if !pattern.is_text {
+        return ResolutionAccumulatorV1 { ..acc, provable: false, active: false };
+    }
+    if same_identity(pattern.identity, star_identity()) {
+        let all: SelectionResolutionV1 = copy_inventory(scan);
+        return ResolutionAccumulatorV1 {
+            provable: all.provable,
+            active: false,
+            wildcard: true,
+            required_count: all.required_count,
+            required: all.required
+        };
+    }
+    if !inventory_contains(scan, pattern.identity) {
+        return ResolutionAccumulatorV1 { ..acc, provable: false, active: false };
+    }
+    if required_contains(acc.required, acc.required_count, pattern.identity) {
+        return acc;
+    }
+    if acc.required_count >= 64 {
+        return ResolutionAccumulatorV1 { ..acc, provable: false, active: false };
+    }
+    return ResolutionAccumulatorV1 {
+        provable: true,
+        active: true,
+        wildcard: false,
+        required_count: acc.required_count +% 1,
+        required: replace(acc.required, acc.required_count, pattern.identity)
+    };
+}
+
+fn resolve_selection(scan: SelectionScanV1) -> (result: SelectionResolutionV1) {
+    if !scan.patterns_bounded
+        || !scan.inventory_complete
+        || scan.pattern_count != scan.patterns.len
+        || scan.inventory_count != scan.inventory.len
+        || scan.inventory_count != scan.inventory_sorted.len
+        || scan.pattern_count > 64
+        || scan.inventory_count > 64
+        || !recorded_is_ordered(scan.inventory_sorted, scan.inventory_count) {
+        return empty_resolution();
+    }
+    if scan.pattern_count == 0 {
+        return copy_inventory(scan);
+    }
+
+    let seed: ResolutionAccumulatorV1 = ResolutionAccumulatorV1 {
+        provable: true,
+        active: true,
+        wildcard: false,
+        required_count: 0,
+        required: [[0; 0]; 64]
+    };
+    iterate i over scan.patterns carrying acc: ResolutionAccumulatorV1 = seed {
+        let pattern: SelectionPatternV1 = scan.patterns[i];
+        next acc = resolve_pattern(scan, acc, pattern, i);
+    }
+    return SelectionResolutionV1 {
+        provable: acc.provable,
+        wildcard: acc.wildcard,
+        required_count: acc.required_count,
+        required: acc.required
+    };
+}
+
+fn selection_matches(
+    resolved: SelectionResolutionV1,
+    sorted_required: [[byte; up_to 1024]; 64],
+    recorded: RecordedSelectionV1
+) -> (result: bool) {
+    if !resolved.provable
+        || !recorded.present
+        || !recorded.valid
+        || recorded.count > 64
+        || recorded.count != recorded.identities.len
+        || recorded.count != resolved.required_count {
+        return false;
+    }
+    iterate i over resolved.required carrying same: bool = true {
+        next same = same && selection_pair_matches(
+            sorted_required,
+            recorded.identities,
+            resolved.required_count,
+            i
+        );
+    }
+    return same;
+}
+
+fn copy_sorted_inventory(scan: SelectionScanV1) -> (result: [[byte; up_to 1024]; 64]) {
+    iterate i over scan.inventory_sorted carrying values: [[byte; up_to 1024]; 64] = [[0; 0]; 64] {
+        next values = replace(values, i, scan.inventory_sorted[i]);
+    }
+    return values;
+}
+
+fn comparison_required(
+    scan: SelectionScanV1,
+    resolved: SelectionResolutionV1
+) -> (result: [[byte; up_to 1024]; 64]) {
+    if resolved.wildcard {
+        return copy_sorted_inventory(scan);
+    }
+    return sort_required(resolved.required, resolved.required_count);
+}
+
+fn evaluate_scan(scan: SelectionScanV1) -> (result: SelectionDecisionV1) {
+    if scan.candidate_count > 64 || scan.candidate_count != scan.candidates.len {
+        return empty_decision(0);
+    }
+    let resolved: SelectionResolutionV1 = resolve_selection(scan);
+    let sorted_required: [[byte; up_to 1024]; 64] = comparison_required(scan, resolved);
+    let seed: SelectionDecisionV1 = SelectionDecisionV1 {
+        provable: resolved.provable,
+        required_count: resolved.required_count,
+        required: resolved.required,
+        head_matches: selection_matches(resolved, sorted_required, scan.head),
+        candidate_count: scan.candidate_count,
+        candidate_matches: [false; 64]
+    };
+    iterate i over scan.candidates carrying acc: SelectionDecisionV1 = seed {
+        let matched: bool = i < scan.candidate_count && selection_matches(
+            resolved,
+            sorted_required,
+            scan.candidates[i]
+        );
+        next acc = SelectionDecisionV1 {
+            ..acc,
+            candidate_matches: replace(acc.candidate_matches, i, matched)
+        };
+    }
+    return acc;
+}
+
+fn build_result(request: SelectionRequestV1) -> (result: SelectionResultV1) {
+    let seed: SelectionAccumulatorV1 = SelectionAccumulatorV1 {
+        scans: [empty_decision(0); 32],
+        count: 0
+    };
+    iterate i over request.scans carrying acc: SelectionAccumulatorV1 = seed {
+        next acc = SelectionAccumulatorV1 {
+            scans: replace(acc.scans, i, evaluate_scan(request.scans[i])),
+            count: acc.count +% 1
+        };
+    }
+    return SelectionResultV1 {
+        schema_version: result_schema(),
+        scan_count: acc.count,
+        scans: acc.scans
+    };
+}
+
+fn selection_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: SelectionRequestV1 = structured_read(context.argv[0], request_schema());
+    if request.scan_count != request.scans.len || request.scan_count > 32 {
+        return failure([115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 115, 99, 97, 110, 32, 99, 111, 117, 110, 116, 32, 109, 105, 115, 109, 97, 116, 99, 104], 3);
+    }
+    let result: SelectionResultV1 = build_result(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 4);
+    }
+    return success([]);
+}

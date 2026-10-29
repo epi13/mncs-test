@@ -72,12 +72,19 @@ COHERENCE_REQUEST_SCHEMA_V2 = "mncs.test-verification-coherence-request/2"
 RECALL_DESCRIPTOR = "test-verification-recall.json"
 RECALL_REQUEST_SCHEMA = "mncs.test-verification-recall-request/1"
 RECALL_RESULT_SCHEMA = "mncs.test-verification-recall/1"
+SELECTION_DESCRIPTOR = "test-verification-selection.json"
+SELECTION_REQUEST_SCHEMA = "mncs.test-verification-selection-request/1"
+SELECTION_RESULT_SCHEMA = "mncs.test-verification-selection/1"
 RECEIPT_SCHEMA = "mncs.test-receipt/1"
 REPORT_SCHEMA = "mncs.test-verify-report/1"
 STORE_RECEIPT_SCHEMA = b"mncs.test-receipt/1"
 EVIDENCE_ENVELOPE_SCHEMA = "mncs.test-evidence/1"
 MAX_HISTORY_SCAN = 64
 MAX_RECALL_BATCH_CANDIDATES = 256
+MAX_SELECTION_BATCH_COMPARISONS = 256
+MAX_SELECTION_BATCH_SCANS = 32
+MAX_SELECTION_REQUEST_BYTES = 1024 * 1024
+MAX_SELECTION_BATCH_IDENTITY_WORK = 128 * 1024
 
 MAX_OBLIGATIONS = 32
 MAX_IDENTITIES = 64
@@ -253,10 +260,12 @@ def verifier_key() -> str:
         "native/mncs/test/verification_coherence.mncs",
         "native/mncs/test/verification_coherence_v2.mncs",
         "native/mncs/test/verification_recall_v1.mncs",
+        "native/mncs/test/verification_selection_v1.mncs",
         "native-applications/test-digest.json",
         "native-applications/test-verification-coherence.json",
         "native-applications/test-verification-coherence-v2.json",
         "native-applications/test-verification-recall.json",
+        "native-applications/test-verification-selection.json",
     ]
     digest = hashlib.sha256(VERIFY_VERSION.encode())
     for member in members:
@@ -1453,6 +1462,379 @@ def evaluate_semantic_recall(
     return decisions
 
 
+def _selection_identity_is_bounded(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= MAX_IDENTITY_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _recorded_selection(receipt: object, *, present: bool) -> dict:
+    if not present:
+        return {"present": False, "valid": False, "count": 0, "identities": []}
+    raw = receipt.get("selected_test_identities") if isinstance(receipt, dict) else None
+    if (
+        not isinstance(raw, list)
+        or len(raw) > MAX_IDENTITIES
+        or any(not _selection_identity_is_bounded(item) for item in raw)
+    ):
+        return {"present": True, "valid": False, "count": 0, "identities": []}
+    # Canonical byte order is transport normalization only. MNCS still
+    # resolves the required identities and performs the exact comparison.
+    ordered = sorted(raw, key=lambda item: item.encode("utf-8"))
+    return {"present": True, "valid": True, "count": len(ordered), "identities": ordered}
+
+
+def _selection_scan(
+    world: dict,
+    *,
+    include_head: bool,
+) -> dict:
+    obligation = world.get("obligation", {})
+    executor = obligation.get("executor", {}) if isinstance(obligation, dict) else {}
+    if not isinstance(executor, dict):
+        executor = {}
+    raw_patterns = executor.get("declaration_identities", ["*"])
+    if not isinstance(raw_patterns, list) or not raw_patterns:
+        raw_patterns = []
+    patterns_bounded = len(raw_patterns) <= MAX_IDENTITIES
+    patterns = []
+    for pattern in raw_patterns[:MAX_IDENTITIES]:
+        if not isinstance(pattern, str):
+            patterns.append({"is_text": False, "identity": ""})
+            continue
+        if not _selection_identity_is_bounded(pattern):
+            patterns_bounded = False
+            patterns.append({"is_text": False, "identity": ""})
+            continue
+        patterns.append({"is_text": True, "identity": pattern})
+
+    raw_inventory = world.get("inventory_identities")
+    inventory_complete = (
+        isinstance(raw_inventory, list)
+        and world.get("inventory_truncated") is False
+        and len(raw_inventory) <= MAX_IDENTITIES
+    )
+    inventory = []
+    if isinstance(raw_inventory, list):
+        for identity in raw_inventory[:MAX_IDENTITIES]:
+            if not _selection_identity_is_bounded(identity):
+                inventory_complete = False
+                continue
+            inventory.append(identity)
+
+    head_receipt = world.get("presented")
+    if head_receipt is None:
+        head_receipt = world.get("receipt")
+    head = _recorded_selection(head_receipt, present=include_head and head_receipt is not None)
+    return {
+        "patterns_bounded": patterns_bounded,
+        "pattern_count": len(patterns),
+        "patterns": patterns,
+        "inventory_complete": inventory_complete,
+        "inventory_count": len(inventory),
+        "inventory": inventory,
+        "inventory_sorted": sorted(inventory, key=lambda item: item.encode("utf-8")),
+        "head": head,
+        "candidate_count": 0,
+        "candidates": [],
+    }
+
+
+def _selection_request_size(scans: list[dict]) -> int:
+    request = {
+        "schema_version": SELECTION_REQUEST_SCHEMA,
+        "scan_count": len(scans),
+        "scans": scans,
+    }
+    return len(json.dumps(request).encode("utf-8"))
+
+
+def _identity_bytes(values: list[str]) -> int:
+    return sum(len(value.encode("utf-8")) for value in values)
+
+
+def _selection_base_identity_work(scan: dict) -> int:
+    inventory = scan["inventory"]
+    count = len(inventory)
+    maximum_length = max((len(item.encode("utf-8")) for item in inventory), default=0)
+    prefix_count = 0
+    wildcard = not scan["patterns"]
+    for pattern in scan["patterns"]:
+        if not pattern["is_text"]:
+            break
+        if pattern["identity"] == "*":
+            wildcard = True
+            break
+        prefix_count += 1
+    resolution_work = (
+        prefix_count * count * maximum_length
+        + prefix_count * prefix_count * maximum_length
+    )
+    sort_count = 0 if wildcard else min(prefix_count, MAX_PATTERNS, count)
+    sort_work = (sort_count * max(sort_count - 1, 0) // 2) * maximum_length
+    inventory_order_work = max(count - 1, 0) * maximum_length
+    return resolution_work + sort_work + inventory_order_work
+
+
+def _selection_record_work(required_bytes: int, record: dict) -> int:
+    if not record["present"] or not record["valid"]:
+        return 0
+    values = record["identities"]
+    record_bytes = _identity_bytes(values)
+    return min(required_bytes, record_bytes)
+
+
+def _selection_scan_specs(
+    world_index: int,
+    base_scan: dict,
+    candidates: list[dict],
+    *,
+    include_head: bool,
+) -> tuple[list[dict], bool]:
+    """Bound one world's request bytes and identity-comparison work."""
+    empty_head = {"present": False, "valid": False, "count": 0, "identities": []}
+    scan = dict(base_scan)
+    scan["head"] = base_scan["head"] if include_head else empty_head
+    scan["candidate_count"] = 0
+    scan["candidates"] = []
+    if _selection_request_size([scan]) > MAX_SELECTION_REQUEST_BYTES:
+        return [], False
+
+    required_bytes = _identity_bytes(base_scan["inventory"])
+    base_work = _selection_base_identity_work(base_scan)
+    if base_work > MAX_SELECTION_BATCH_IDENTITY_WORK:
+        return [], False
+    head_work = (
+        _selection_record_work(required_bytes, base_scan["head"])
+        if include_head else 0
+    )
+    if base_work + head_work > MAX_SELECTION_BATCH_IDENTITY_WORK:
+        return [], False
+
+    specs: list[dict] = []
+    selected_records: list[dict] = []
+    selected_indexes: list[int] = []
+    head_pending = include_head
+    selected_work = base_work + head_work
+
+    def flush() -> None:
+        nonlocal selected_records, selected_indexes, head_pending, selected_work
+        if not selected_records and not head_pending:
+            return
+        current = dict(base_scan)
+        current["head"] = base_scan["head"] if head_pending else empty_head
+        current["candidate_count"] = len(selected_records)
+        current["candidates"] = list(selected_records)
+        specs.append({
+            "world_index": world_index,
+            "head_included": head_pending,
+            "candidate_indexes": list(selected_indexes),
+            "estimated_identity_work": selected_work,
+            "scan": current,
+        })
+        selected_records = []
+        selected_indexes = []
+        head_pending = False
+        selected_work = base_work
+
+    for candidate_index, candidate in enumerate(candidates):
+        candidate_work = _selection_record_work(required_bytes, candidate)
+        trial_records = [*selected_records, candidate]
+        trial = dict(base_scan)
+        trial["head"] = base_scan["head"] if head_pending else empty_head
+        trial["candidate_count"] = len(trial_records)
+        trial["candidates"] = trial_records
+        if (
+            selected_work + candidate_work <= MAX_SELECTION_BATCH_IDENTITY_WORK
+            and len(trial_records) <= MAX_HISTORY_SCAN
+            and _selection_request_size([trial]) <= MAX_SELECTION_REQUEST_BYTES
+        ):
+            selected_records.append(candidate)
+            selected_indexes.append(candidate_index)
+            selected_work += candidate_work
+            continue
+
+        flush()
+        single = dict(base_scan)
+        single["head"] = empty_head
+        single["candidate_count"] = 1
+        single["candidates"] = [candidate]
+        if (
+            base_work + candidate_work <= MAX_SELECTION_BATCH_IDENTITY_WORK
+            and _selection_request_size([single]) <= MAX_SELECTION_REQUEST_BYTES
+        ):
+            selected_records = [candidate]
+            selected_indexes = [candidate_index]
+            selected_work = base_work + candidate_work
+
+    flush()
+    return specs, True
+
+
+def evaluate_selection_admissions(
+    worlds: list[dict],
+    *,
+    include_heads: list[bool],
+    include_candidates: list[bool],
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    stats: dict | None = None,
+) -> list[dict]:
+    """Resolve and compare receipt selections through the bounded MNCS app."""
+    if (
+        len(worlds) > MAX_OBLIGATIONS
+        or len(include_heads) != len(worlds)
+        or len(include_candidates) != len(worlds)
+        or any(type(value) is not bool for value in (*include_heads, *include_candidates))
+    ):
+        raise VerifyError("native selection scan batch is outside its bound")
+
+    admissions = []
+    specs: list[dict] = []
+    for index, world in enumerate(worlds):
+        candidates = recall_candidates(world) if include_candidates[index] else []
+        if len(candidates) > MAX_HISTORY_SCAN:
+            raise VerifyError("native selection history exceeds its bound")
+        admissions.append({
+            "provable": False,
+            "required_test_identities": None,
+            "head_matches": False,
+            "candidate_matches": [False] * len(candidates),
+            "candidate_records": candidates,
+            "_native_seen": False,
+        })
+        if not include_heads[index] and not candidates:
+            continue
+        base_scan = _selection_scan(
+            world,
+            include_head=include_heads[index],
+        )
+        candidate_records = [
+            _recorded_selection(candidate, present=True) for candidate in candidates
+        ]
+        world_specs, bounded = _selection_scan_specs(
+            index, base_scan, candidate_records, include_head=include_heads[index]
+        )
+        if bounded:
+            specs.extend(world_specs)
+
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    comparisons = 0
+    identity_work = 0
+    for spec in specs:
+        scan = spec["scan"]
+        scan_comparisons = int(spec["head_included"]) + scan["candidate_count"]
+        scan_identity_work = spec["estimated_identity_work"]
+        trial = [*batch, spec]
+        too_many = (
+            len(trial) > MAX_SELECTION_BATCH_SCANS
+            or comparisons + scan_comparisons > MAX_SELECTION_BATCH_COMPARISONS
+        )
+        too_much_work = identity_work + scan_identity_work > MAX_SELECTION_BATCH_IDENTITY_WORK
+        too_large = _selection_request_size([item["scan"] for item in trial]) > MAX_SELECTION_REQUEST_BYTES
+        if batch and (too_many or too_much_work or too_large):
+            batches.append(batch)
+            batch = []
+            comparisons = 0
+            identity_work = 0
+            trial = [spec]
+        if (
+            len(trial) > MAX_SELECTION_BATCH_SCANS
+            or scan_comparisons > MAX_SELECTION_BATCH_COMPARISONS
+            or scan_identity_work > MAX_SELECTION_BATCH_IDENTITY_WORK
+            or _selection_request_size([item["scan"] for item in trial]) > MAX_SELECTION_REQUEST_BYTES
+        ):
+            raise VerifyError("native selection scan cannot fit its process bounds")
+        batch.append(spec)
+        comparisons += scan_comparisons
+        identity_work += scan_identity_work
+    if batch:
+        batches.append(batch)
+
+    for batch in batches:
+        scans = [item["scan"] for item in batch]
+        request = {
+            "schema_version": SELECTION_REQUEST_SCHEMA,
+            "scan_count": len(scans),
+            "scans": scans,
+        }
+        if stats is not None:
+            stats["subprocesses"] += 1
+            stats["selection_runs"] += 1
+        try:
+            result = run_native_app(
+                SELECTION_DESCRIPTOR,
+                request,
+                request_schema=SELECTION_REQUEST_SCHEMA,
+                result_schema=SELECTION_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+        except NativeTransportError as error:
+            raise VerifyError(f"native selection admission failed: {error}") from error
+        responses = result.get("scans")
+        scan_count = result.get("scan_count")
+        if (
+            type(scan_count) is not int
+            or scan_count != len(batch)
+            or not isinstance(responses, list)
+            or len(responses) != MAX_SELECTION_BATCH_SCANS
+        ):
+            raise VerifyError("native selection admission returned a malformed scan list")
+
+        for spec, response in zip(batch, responses[:scan_count], strict=True):
+            candidate_count = spec["scan"]["candidate_count"]
+            provable = response.get("provable") if isinstance(response, dict) else None
+            required_count = response.get("required_count") if isinstance(response, dict) else None
+            required = response.get("required") if isinstance(response, dict) else None
+            head_matches = response.get("head_matches") if isinstance(response, dict) else None
+            returned_candidate_count = response.get("candidate_count") if isinstance(response, dict) else None
+            candidate_matches = response.get("candidate_matches") if isinstance(response, dict) else None
+            if (
+                type(provable) is not bool
+                or type(required_count) is not int
+                or not 0 <= required_count <= MAX_IDENTITIES
+                or not isinstance(required, list)
+                or len(required) != MAX_IDENTITIES
+                or any(not isinstance(item, str) for item in required)
+                or any(not _selection_identity_is_bounded(item) for item in required[:required_count])
+                or type(head_matches) is not bool
+                or type(returned_candidate_count) is not int
+                or returned_candidate_count != candidate_count
+                or not isinstance(candidate_matches, list)
+                or len(candidate_matches) != MAX_IDENTITIES
+                or any(type(item) is not bool for item in candidate_matches)
+            ):
+                raise VerifyError("native selection admission returned malformed decisions")
+            world_index = spec["world_index"]
+            admission = admissions[world_index]
+            resolved = required[:required_count] if provable else None
+            if admission["_native_seen"] and (
+                admission["provable"] != provable
+                or admission["required_test_identities"] != resolved
+            ):
+                raise VerifyError("native selection resolution changed across bounded chunks")
+            admission["_native_seen"] = True
+            admission["provable"] = provable
+            admission["required_test_identities"] = resolved
+            if spec["head_included"]:
+                admission["head_matches"] = head_matches
+            for candidate_position, matched in zip(
+                spec["candidate_indexes"], candidate_matches[:candidate_count], strict=True
+            ):
+                admission["candidate_matches"][candidate_position] = matched
+
+    for admission in admissions:
+        admission.pop("_native_seen", None)
+    return admissions
+
+
 def find_recall_candidates(
     worlds: list[dict],
     *,
@@ -1461,18 +1843,26 @@ def find_recall_candidates(
     environment: dict[str, str],
     stats: dict | None = None,
 ) -> list[dict | None]:
-    """Select the newest native-admitted candidate for each bounded world."""
+    """Select newest candidates admitted by native selection and closure policy."""
     if len(worlds) > MAX_OBLIGATIONS:
         raise VerifyError("semantic recall world batch is outside its bound")
     result: list[dict | None] = [None] * len(worlds)
-    candidates_by_index = {
-        index: recall_candidates(world)
-        for index, world in enumerate(worlds)
-    }
-    active = [
-        index for index, candidates in candidates_by_index.items()
-        if candidates
-    ]
+    candidates_by_index: dict[int, list[dict]] = {}
+    for index, world in enumerate(worlds):
+        admission = world.get("selection_admission", {})
+        candidates = admission.get("candidate_records") if isinstance(admission, dict) else None
+        matches = admission.get("candidate_matches") if isinstance(admission, dict) else None
+        if (
+            not isinstance(candidates, list)
+            or not isinstance(matches, list)
+            or len(candidates) != len(matches)
+            or any(type(item) is not bool for item in matches)
+        ):
+            continue
+        candidates_by_index[index] = [
+            candidate for candidate, matched in zip(candidates, matches, strict=True) if matched
+        ]
+    active = [index for index, candidates in candidates_by_index.items() if candidates]
     if not active:
         return result
     searches = [
@@ -1654,6 +2044,7 @@ def _verify_repository_inner(
         "suite_runs": 0,
         "coherence_runs": 0,
         "recall_runs": 0,
+        "selection_runs": 0,
         "digest_runs": 0,
         "closure_files": 0,
         "closure_bytes": 0,
@@ -1795,6 +2186,24 @@ def _verify_repository_inner(
     }
     run_queue = set(coherence.get("run_queue", []))
 
+    selection_identities = [
+        identity for identity in row_order
+        if verdicts.get(identity, {}).get("status") in ("current", "stale")
+    ]
+    selection_worlds = [measured[identity] for identity in selection_identities]
+    selection_statuses = [verdicts[identity]["status"] for identity in selection_identities]
+    selection_admissions = evaluate_selection_admissions(
+        selection_worlds,
+        include_heads=[status == "current" for status in selection_statuses],
+        include_candidates=[status == "stale" for status in selection_statuses],
+        mncs=mncs,
+        cwd=repo,
+        environment=base_environment,
+        stats=stats,
+    )
+    for identity, admission in zip(selection_identities, selection_admissions, strict=True):
+        measured[identity]["selection_admission"] = admission
+
     # Historical recall: for obligations whose head evidence is stale,
     # present the newest vaulted evidence for this exact semantic world
     # (if any) and let native policy verify admission on it. The head
@@ -1854,6 +2263,11 @@ def _verify_repository_inner(
             world = measured[identity]
             world["recall"] = candidate
             world["presented"] = candidate
+            admission = world.get("selection_admission")
+            if isinstance(admission, dict):
+                # This candidate passed the native selection filter before
+                # native semantic recall promoted it to the presented receipt.
+                admission["head_matches"] = True
             verdicts[identity] = item
             run_queue.discard(identity)
 
@@ -2065,44 +2479,11 @@ def resolve_world_evidence(
     }
 
 
-def required_selection(world: dict) -> list[str] | None:
-    """Prove the currently required selection, or None when unprovable.
-
-    Only exact reasoning is allowed: wildcard requires the full current
-    inventory, and any other pattern must exactly equal one current
-    inventory identity. No globbing, no substring matching.
-    """
-    executor = world["obligation"].get("executor", {})
-    patterns = executor.get("declaration_identities", ["*"])
-    if not isinstance(patterns, list) or not patterns:
-        patterns = ["*"]
-    inventory = world["inventory_identities"]
-    if patterns == ["*"]:
-        return list(inventory)
-    required: list[str] = []
-    for pattern in patterns:
-        if pattern == "*":
-            return list(inventory)
-        if pattern in inventory:
-            if pattern not in required:
-                required.append(pattern)
-        else:
-            return None
-    return required
-
-
 def recall_candidates(world: dict) -> list[dict]:
-    """Return bounded lineage candidates that pass host-owned provenance filters.
-
-    Semantic equivalence is intentionally not decided here; the native
-    verification-coherence predicate owns that decision.
-    """
+    """Return bounded, head-anchored records with eligible host provenance."""
     head = world.get("receipt")
     history = world.get("history", [])
-    if head is None or not history:
-        return []
-    required = required_selection(world)
-    if required is None:
+    if head is None or not isinstance(history, list) or not history:
         return []
     by_id = {item["evidence_id"]: item for item in history}
     seen = {head["evidence_id"]}
@@ -2118,13 +2499,10 @@ def recall_candidates(world: dict) -> list[dict]:
             # former host walker reached this gap. Preserve that prefix so
             # native admission can still select an earlier match.
             return candidates
-        recorded = candidate.get("selected_test_identities")
-        if (
-            candidate.get("producer") == VERIFY_VERSION
-            and isinstance(recorded, list)
-            and sorted(recorded) == sorted(required)
-        ):
+        if candidate.get("producer") == VERIFY_VERSION:
             candidates.append(candidate)
+            if len(candidates) >= MAX_HISTORY_SCAN:
+                return candidates
         current = candidate.get("previous_evidence_id")
     return candidates
 
@@ -2280,9 +2658,14 @@ def act_on_verdict(
             entry["notes"].append(
                 "receipt producer differs from this verifier; re-executing"
             )
-            required = required_selection(world)
+            admission = world.get("selection_admission", {})
+            required = (
+                admission.get("required_test_identities")
+                if isinstance(admission, dict) and admission.get("provable") is True
+                else None
+            )
             if required is None:
-                entry["notes"].append("required selection is unprovable; leaving unresolved")
+                entry["notes"].append("MNCS could not prove the required selection; leaving unresolved")
                 return entry
             if dry_run:
                 entry["action"] = "would_execute"
@@ -2294,21 +2677,26 @@ def act_on_verdict(
                 stores=stores, environment=base_environment,
             )
         # A `current` verdict carries no resolved selection (nothing to
-        # execute), so the host proves selection equivalence itself: the
-        # recorded selection must cover exactly the currently required
-        # selection. Required selection is provable only for wildcard and
-        # exact-identity patterns; anything else refuses reuse.
-        required = required_selection(world)
+        # execute), so the native selection application supplies both the
+        # current requirement and exact receipt coverage decision.
+        admission = world.get("selection_admission", {})
+        required = (
+            admission.get("required_test_identities")
+            if isinstance(admission, dict) and admission.get("provable") is True
+            else None
+        )
         if required is None:
             entry["notes"].append(
-                "declared selection uses patterns the host cannot prove; "
+                "MNCS could not prove the required selection; "
                 "refusing reuse without re-execution"
             )
             return entry
-        recorded = receipt.get("selected_test_identities")
-        if not isinstance(recorded, list) or sorted(recorded) != sorted(required):
+        if not isinstance(admission, dict) or type(admission.get("head_matches")) is not bool:
+            entry["notes"].append("native selection admission is unavailable; leaving unresolved")
+            return entry
+        if not admission["head_matches"]:
             entry["notes"].append(
-                "recorded selection differs from the required selection; re-executing"
+                "MNCS found that the receipt does not cover the required selection; re-executing"
             )
             if dry_run:
                 entry["action"] = "would_execute"
@@ -2725,7 +3113,8 @@ def render_report_text(report: dict) -> str:
     lines.append(
         f"  cost: {stats.get('subprocesses', 0)} subprocesses "
         f"({stats.get('inventory_runs', 0)} inventory, {stats.get('suite_runs', 0)} suite, "
-        f"{stats.get('coherence_runs', 0)} coherence, {stats.get('recall_runs', 0)} recall, "
+        f"{stats.get('coherence_runs', 0)} coherence, {stats.get('selection_runs', 0)} selection, "
+        f"{stats.get('recall_runs', 0)} recall, "
         f"{stats.get('digest_runs', 0)} digest; {store_opens} store opens)"
     )
     return "\n".join(lines) + "\n"

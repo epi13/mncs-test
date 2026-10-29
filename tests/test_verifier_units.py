@@ -559,7 +559,8 @@ def test_recall_candidates_reject_gaps_and_ineligible_provenance() -> None:
     linked_head = _history_evidence("linked-head", _bound(closure_identity="x"), "orphan")
     world = _recall_world(linked_head, [linked_head, orphan], world_bound)
     assert [item["evidence_id"] for item in recall_candidates(world)] == ["orphan"]
-    # Producer and selection checks remain host-owned provenance filters.
+    # Producer remains a host-owned provenance filter; selection admission
+    # is applied by the native selection application after lineage traversal.
     stale = _history_evidence("stale", _bound(), None)
     stale["producer"] = "mncs-test-verify/0.0.0"
     head2 = _history_evidence("head2", _bound(closure_identity="x"), "stale")
@@ -569,7 +570,88 @@ def test_recall_candidates_reject_gaps_and_ineligible_provenance() -> None:
     wrong_selection["selected_test_identities"] = ["other"]
     head3 = _history_evidence("head3", _bound(closure_identity="x"), "wrong")
     world = _recall_world(head3, [head3, wrong_selection], world_bound)
-    assert recall_candidates(world) == []
+    assert [item["evidence_id"] for item in recall_candidates(world)] == ["wrong"]
+
+
+def test_native_selection_batches_by_head_and_candidate_comparisons(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mncs_test_verify as verify_module
+
+    batch_sizes: list[int] = []
+
+    def fake_native_app(_descriptor, request, **_kwargs):
+        scans = request["scans"]
+        batch_sizes.append(sum(
+            int(scan["head"]["present"]) + len(scan["candidates"])
+            for scan in scans
+        ))
+        responses = []
+        for scan in scans:
+            required = ["t1"] + [""] * (verify_module.MAX_IDENTITIES - 1)
+            candidate_count = len(scan["candidates"])
+            responses.append({
+                "provable": True,
+                "required_count": 1,
+                "required": required,
+                "head_matches": scan["head"]["present"],
+                "candidate_count": candidate_count,
+                "candidate_matches": [True] * candidate_count
+                + [False] * (verify_module.MAX_IDENTITIES - candidate_count),
+            })
+        responses.extend(
+            {
+                "provable": False,
+                "required_count": 0,
+                "required": [""] * verify_module.MAX_IDENTITIES,
+                "head_matches": False,
+                "candidate_count": 0,
+                "candidate_matches": [False] * verify_module.MAX_IDENTITIES,
+            }
+            for _ in range(verify_module.MAX_SELECTION_BATCH_SCANS - len(responses))
+        )
+        return {
+            "schema_version": verify_module.SELECTION_RESULT_SCHEMA,
+            "scan_count": len(scans),
+            "scans": responses,
+        }
+
+    monkeypatch.setattr(verify_module, "run_native_app", fake_native_app)
+    worlds = []
+    for world_index in range(5):
+        history = []
+        previous = None
+        for candidate_index in reversed(range(64)):
+            evidence = _history_evidence(
+                f"candidate-{world_index}-{candidate_index}", _bound(), previous
+            )
+            history.insert(0, evidence)
+            previous = evidence["evidence_id"]
+        head = _history_evidence(f"head-{world_index}", _bound(closure_identity="stale"), previous)
+        worlds.append({
+            "obligation": {"executor": {"declaration_identities": ["*"]}},
+            "bound": _bound(),
+            "inventory_identities": ["t1"],
+            "inventory_truncated": False,
+            "receipt": head,
+            "presented": head,
+            "history": [head, *history],
+        })
+
+    stats = {"subprocesses": 0, "selection_runs": 0}
+    decisions = verify_module.evaluate_selection_admissions(
+        worlds,
+        include_heads=[True] * 5,
+        include_candidates=[True] * 5,
+        mncs="unused",
+        cwd=tmp_path,
+        environment={},
+        stats=stats,
+    )
+
+    assert [len(item["candidate_matches"]) for item in decisions] == [64] * 5
+    assert batch_sizes == [195, 130]
+    assert stats == {"subprocesses": 2, "selection_runs": 2}
 
 
 def test_semantic_recall_chunks_candidate_comparisons(

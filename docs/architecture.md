@@ -154,8 +154,10 @@ Soundness rules, never violated to look fast:
   status/reason and left unexecuted;
 - a recorded FAIL stays a FAIL (current knowledge);
 - a changed test selection always re-executes, even when the bound world
-  matches (a `current` verdict carries no resolved selection, so the host
-  proves selection equivalence from wildcard/exact patterns only);
+  matches: `mncs.test.verification_selection_v1` resolves exact and
+  wildcard declarations against the compiler inventory and decides
+  receipt coverage; the host canonicalizes inventory/receipt identity
+  order for transport and validates the native result;
 - verifier upgrades invalidate (the verifier implementation is digested
   into the repository fingerprint);
 - corrupt or missing receipt files heal from vault authority (the
@@ -200,12 +202,13 @@ are projections repaired Store→file when divergent; unreadable
 authority fails closed (fresh execution, never silent reuse); only
 `--no-store` accepts file authority, explicitly degraded. When the
 head is stale, the host walks the head-anchored chain and filters by
-producer and selected-test coverage. A native recall application
-batches semantic comparisons through the v2 `closure_admits`
-predicate, including its trusted, non-empty closure checks. Native
-coherence policy then verifies each selected receipt on a second pass;
-recalled reuse is reported distinctly (`recalled-closure`, recall
-note, head context).
+producer provenance. The native selection application resolves the
+current requirement and admits only historical receipts with exact
+coverage. A separate native recall application batches semantic
+comparisons through the v2 `closure_admits` predicate, including its
+trusted, non-empty closure checks. Native coherence policy then verifies
+each selected receipt on a second pass; recalled reuse is reported
+distinctly (`recalled-closure`, recall note, head context).
 
 Policy generations, steady state: v1 (`/1`) serves the environment's
 ambient verification flow and the frozen oracle's compatibility
@@ -242,6 +245,11 @@ Run cost model (measured 2026-10-03 on this repo, 4 obligations):
   at most 256 candidate comparisons per process and splits larger
   workloads into bounded calls; one malformed obligation cannot
   contaminate the other coherence rows.
+- selection admission is a native bounded pass for current heads and
+  stale histories. It batches at most 32 scans and 256 head-plus-candidate
+  comparisons per process, with a 128 KiB identity-work budget and a 1 MiB
+  request ceiling; large history
+  records are split or fail closed from recall.
 - the remaining warm floor is owned elsewhere: Store session init
   (pressure MNCS-TEST-P-017) and `mncs` process startup per
   inventory, coherence, and recall call. No test-owned resident daemon exists:

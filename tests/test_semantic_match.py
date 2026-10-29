@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from mncs_test_verify import (  # noqa: E402
     VERIFY_VERSION,
+    evaluate_selection_admissions,
     evaluate_semantic_recall,
     find_recall_candidates,
 )
@@ -149,11 +150,22 @@ def test_recall_path_selects_newest_native_match() -> None:
         },
         "bound": current,
         "inventory_identities": ["test-1"],
+        "inventory_truncated": False,
         "receipt": head,
         "history": [head, newest, older, oldest],
     }
 
     no_match_world = dict(world, bound=_bound(toolchain_identity="third-toolchain"))
+    admissions = evaluate_selection_admissions(
+        [world, no_match_world],
+        include_heads=[False, False],
+        include_candidates=[True, True],
+        mncs=MNCS,
+        cwd=ROOT,
+        environment=_environment(),
+    )
+    world["selection_admission"] = admissions[0]
+    no_match_world["selection_admission"] = admissions[1]
     candidates = find_recall_candidates(
         [world, no_match_world], mncs=MNCS, cwd=ROOT, environment=_environment()
     )

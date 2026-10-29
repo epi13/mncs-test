@@ -552,25 +552,39 @@ def test_cli_adapter_reports_compactly(tmp_path: Path) -> None:
     )
     assert warm.returncode == 3
     assert "[reused] fixture.suite: PASS (reused)" in warm.stdout
+    assert "selection" in warm.stdout
 
 
-def test_required_selection_proves_only_exact_matches(tmp_path: Path) -> None:
-    from mncs_test_verify import required_selection
+def test_changed_selection_reexecutes_then_native_reuses_matching_receipt(
+    tmp_path: Path,
+) -> None:
+    repo = make_fixture_repo(tmp_path / "repo")
+    cold = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    assert entry_by_id(cold, "fixture.suite")["action"] == "executed"
+    original = read_receipt(repo / ".mncs" / "test-receipts", "fixture.suite")
+    assert original is not None
+    assert len(original["selected_test_identities"]) == 2
 
-    def world(patterns, inventory):
-        return {
-            "obligation": {"executor": {"declaration_identities": patterns}},
-            "inventory_identities": inventory,
-        }
+    selected_identity = original["selected_test_identities"][0]
+    inventory_path = repo / ".mncs" / "verification-obligations.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["obligations"][0]["executor"]["declaration_identities"] = [selected_identity]
+    inventory_path.write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
 
-    assert required_selection(world(["*"], ["a", "b"])) == ["a", "b"]
-    assert required_selection(world(["a"], ["a", "b"])) == ["a"]
-    assert required_selection(world(["b", "a"], ["a", "b"])) == ["b", "a"]
-    # Unprovable patterns refuse: substrings, globs, and unknown identities.
-    assert required_selection(world(["a*"], ["a", "b"])) is None
-    assert required_selection(world([""], ["a", "b"])) is None
-    assert required_selection(world(["c"], ["a", "b"])) is None
-    assert required_selection(world(["*", "c"], ["a", "b"])) == ["a", "b"]
+    narrowed = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    narrowed_entry = entry_by_id(narrowed, "fixture.suite")
+    assert narrowed_entry["action"] == "executed"
+    assert narrowed_entry["verdict"] == "PASS"
+    assert narrowed["stats"]["suite_runs"] == 1
+    assert narrowed["summary"]["reused_recalled"] == 0
+    narrowed_receipt = read_receipt(repo / ".mncs" / "test-receipts", "fixture.suite")
+    assert narrowed_receipt is not None
+    assert narrowed_receipt["selected_test_identities"] == [selected_identity]
+
+    warm = verify_repository(repo, mncs=str(MNCS), suite_timeout=300.0)
+    assert entry_by_id(warm, "fixture.suite")["action"] == "reused"
+    assert warm["stats"]["suite_runs"] == 0
+    assert warm["stats"]["selection_runs"] >= 1
 
 
 def test_evidence_identity_is_stable_over_run_anchored_fields(tmp_path: Path) -> None:
