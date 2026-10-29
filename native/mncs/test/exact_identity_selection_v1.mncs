@@ -1,0 +1,173 @@
+mncs 0.18;
+
+// Exact compiler Test identity selection for the Test runner. The adapter
+// supplies bounded inventory/request batches and projects returned inventory
+// indices back onto their original records.
+module mncs.test.exact_identity_selection_v1;
+
+use mncs.std.application.v1;
+
+record IdentityCandidateV1 {
+    test_index: u64,
+    identity: [byte; up_to 512]
+}
+
+record RequestedIdentityV1 {
+    request_index: u64,
+    identity: [byte; up_to 512]
+}
+
+record ExactIdentitySelectionRequestV1 {
+    schema_version: [byte; up_to 64],
+    candidate_count: u64,
+    candidates: [IdentityCandidateV1; up_to 64],
+    requested_count: u64,
+    requested: [RequestedIdentityV1; up_to 64]
+}
+
+record CandidateMatchV1 {
+    found: bool,
+    test_index: u64
+}
+
+record RequestedMatchV1 {
+    request_index: u64,
+    found: bool,
+    test_index: u64
+}
+
+record RequestedMatchBuilderV1 {
+    values: [RequestedMatchV1; 64],
+    length: u64
+}
+
+record ExactIdentitySelectionResultV1 {
+    schema_version: [byte; up_to 64],
+    match_count: u64,
+    matches: [RequestedMatchV1; up_to 64]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 101, 120, 97, 99, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 101, 120, 97, 99, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn empty_requested_match_builder() -> (result: RequestedMatchBuilderV1) {
+    return RequestedMatchBuilderV1 {
+        values: [RequestedMatchV1 { request_index: 0, found: false, test_index: 0 }; 64],
+        length: 0
+    };
+}
+
+fn merge_candidate_match(
+    current: CandidateMatchV1,
+    candidate: IdentityCandidateV1,
+    identity: [byte; up_to 512],
+    include: bool
+) -> (result: CandidateMatchV1) {
+    if include && same_bytes(candidate.identity, identity) {
+        return CandidateMatchV1 {
+            found: true,
+            test_index: candidate.test_index
+        };
+    }
+    return current;
+}
+
+fn last_candidate_match(
+    request: ExactIdentitySelectionRequestV1,
+    identity: [byte; up_to 512]
+) -> (result: CandidateMatchV1) {
+    let seed: CandidateMatchV1 = CandidateMatchV1 { found: false, test_index: 0 };
+    iterate i over request.candidates carrying selected: CandidateMatchV1 = seed {
+        next selected = merge_candidate_match(
+            selected,
+            request.candidates[i],
+            identity,
+            i < request.candidate_count
+        );
+    }
+    return selected;
+}
+
+fn push_requested_match(
+    builder: RequestedMatchBuilderV1,
+    request_index: u64,
+    candidate: CandidateMatchV1,
+    include: bool
+) -> (result: RequestedMatchBuilderV1) {
+    if !include || builder.length >= 64 {
+        return builder;
+    }
+    return RequestedMatchBuilderV1 {
+        values: replace(
+            builder.values,
+            builder.length,
+            RequestedMatchV1 {
+                request_index: request_index,
+                found: candidate.found,
+                test_index: candidate.test_index
+            }
+        ),
+        length: builder.length +% 1
+    };
+}
+
+fn valid_request(request: ExactIdentitySelectionRequestV1) -> (result: bool) {
+    return same_bytes(request.schema_version, request_schema())
+        && request.candidate_count == request.candidates.len
+        && request.requested_count == request.requested.len
+        && request.candidate_count <= 64
+        && request.requested_count <= 64;
+}
+
+fn select_matches(request: ExactIdentitySelectionRequestV1) -> (result: [RequestedMatchV1; up_to 64]) {
+    let seed: RequestedMatchBuilderV1 = empty_requested_match_builder();
+    iterate i over request.requested carrying selected: RequestedMatchBuilderV1 = seed {
+        next selected = push_requested_match(
+            selected,
+            request.requested[i].request_index,
+            last_candidate_match(request, request.requested[i].identity),
+            i < request.requested_count
+        );
+    }
+    return selected.values[0..selected.length];
+}
+
+fn exact_identity_selection_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 101, 120, 97, 99, 116, 32, 84, 101, 115, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ExactIdentitySelectionRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 101, 120, 97, 99, 116, 32, 84, 101, 115, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let matches: [RequestedMatchV1; up_to 64] = select_matches(request);
+    let response: ExactIdentitySelectionResultV1 = ExactIdentitySelectionResultV1 {
+        schema_version: result_schema(),
+        match_count: matches.len,
+        matches: matches
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), response);
+    if published == 0 {
+        return failure([101, 120, 97, 99, 116, 32, 84, 101, 115, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

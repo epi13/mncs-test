@@ -100,6 +100,12 @@ substring work exceeds the native step-budget estimate retain the prior host
 filter as an explicit, reported fallback until MNCS has a wider, more efficient
 text-search primitive.
 
+`mncs.test.exact_identity_selection_v1` owns matching family-check compiler
+test identities against the current inventory. The adapter retains sorted
+request order, batches native comparisons, and projects selected inventory
+indices back to their records. Requests beyond the native record or step-work
+bounds use the previous host selection explicitly and report that authority.
+
 When a result has no native suite fold, the MNCS application
 `mncs.test.result_summary_v1` owns its aggregate counters. The adapter sends
 bounded verdict, status, native assertion-count, and failure-class fields;

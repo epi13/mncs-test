@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.exact-identity-selection",
+  "source": "../native/mncs/test/exact_identity_selection_v1.mncs",
+  "module": "mncs.test.exact_identity_selection_v1",
+  "entry_function": "exact_identity_selection_app_v1",
+  "profile": "0.18",
+  "interface_identity": "42500257996f12b6e90ef4ed2608f1c18775344f81da9e1deb59f351e8b30dc0",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": [
+    "test_artifact"
+  ]
+}

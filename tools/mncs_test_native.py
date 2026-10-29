@@ -297,6 +297,11 @@ INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/1"
 INVENTORY_FILTER_BATCH_SIZE = 16
 INVENTORY_FILTER_TEXT_MAX_BYTES = 1024
 INVENTORY_FILTER_ESTIMATED_WORK_MAX = 65_536
+EXACT_IDENTITY_SELECTION_REQUEST_SCHEMA = "mncs.test-exact-identity-selection-request/1"
+EXACT_IDENTITY_SELECTION_RESULT_SCHEMA = "mncs.test-exact-identity-selection/1"
+EXACT_IDENTITY_SELECTION_BATCH_SIZE = 16
+EXACT_IDENTITY_SELECTION_ID_MAX_BYTES = 512
+EXACT_IDENTITY_SELECTION_ESTIMATED_WORK_MAX = 65_536
 
 
 def _bounded_adjudication_text(value: object, field: str) -> str:
@@ -413,6 +418,155 @@ def run_test_inventory_filter(
         "case_count": len(normalized_texts),
         "filter_count": len(normalized_filters),
         "selected_count": len(selected_indices),
+    }
+
+
+def run_exact_test_identity_selection(
+    candidate_identities: list[str],
+    requested_identities: list[str],
+    *,
+    candidate_indices: list[int] | None = None,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> dict[str, object]:
+    """Resolve exact Test identities through the native selection kernel.
+
+    The adapter batches inventory and request rows while keeping compiler
+    inventory indices stable. Repeated candidate identities resolve to the
+    last inventory row, matching the runner's former ID-to-record map.
+    """
+    if (not isinstance(candidate_identities, list)
+            or not isinstance(requested_identities, list)):
+        raise NativeTransportError("Test identities and requests must be lists")
+    if candidate_indices is None:
+        normalized_indices = list(range(len(candidate_identities)))
+    elif (not isinstance(candidate_indices, list)
+          or len(candidate_indices) != len(candidate_identities)
+          or any(type(index) is not int or index < 0 for index in candidate_indices)
+          or len(set(candidate_indices)) != len(candidate_indices)):
+        raise NativeTransportError("Test identity candidate indices are malformed")
+    else:
+        normalized_indices = list(candidate_indices)
+
+    def bounded_identity(value: object, field: str) -> tuple[str, bytes]:
+        if not isinstance(value, str):
+            raise NativeTransportError(f"Test identity {field} must be text")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise NativeTransportError(f"Test identity {field} must be valid UTF-8") from error
+        if len(encoded) > EXACT_IDENTITY_SELECTION_ID_MAX_BYTES:
+            raise NativeInputBoundError(
+                "Test identity exceeds the native 512-byte record bound",
+                reason="input_exceeds_native_512_byte_bound",
+            )
+        return value, encoded
+
+    normalized_candidates = [
+        bounded_identity(value, "candidate") for value in candidate_identities
+    ]
+    normalized_requests = [
+        bounded_identity(value, "request") for value in requested_identities
+    ]
+    selected_indices: list[int | None] = [None] * len(normalized_requests)
+    calls = 0
+    for candidate_offset in range(0, len(normalized_candidates), EXACT_IDENTITY_SELECTION_BATCH_SIZE):
+        candidate_batch = normalized_candidates[
+            candidate_offset:candidate_offset + EXACT_IDENTITY_SELECTION_BATCH_SIZE
+        ]
+        index_batch = normalized_indices[
+            candidate_offset:candidate_offset + EXACT_IDENTITY_SELECTION_BATCH_SIZE
+        ]
+        valid_candidate_indices = set(index_batch)
+        for request_offset in range(0, len(normalized_requests), EXACT_IDENTITY_SELECTION_BATCH_SIZE):
+            request_batch = normalized_requests[
+                request_offset:request_offset + EXACT_IDENTITY_SELECTION_BATCH_SIZE
+            ]
+            estimated_work = sum(
+                len(candidate_bytes)
+                for _, candidate_bytes in candidate_batch
+                for _, requested_bytes in request_batch
+                if len(candidate_bytes) == len(requested_bytes)
+            )
+            if estimated_work > EXACT_IDENTITY_SELECTION_ESTIMATED_WORK_MAX:
+                raise NativeInputBoundError(
+                    "Test identity selection exceeds the native step-budget work estimate",
+                    reason="estimated_work_exceeds_native_step_budget",
+                )
+            request = {
+                "schema_version": EXACT_IDENTITY_SELECTION_REQUEST_SCHEMA,
+                "candidate_count": len(candidate_batch),
+                "candidates": [
+                    {"test_index": test_index, "identity": identity}
+                    for test_index, (identity, _) in zip(
+                        index_batch, candidate_batch, strict=True
+                    )
+                ],
+                "requested_count": len(request_batch),
+                "requested": [
+                    {"request_index": request_offset + index, "identity": identity}
+                    for index, (identity, _) in enumerate(request_batch)
+                ],
+            }
+            result = run_native_app(
+                "test-exact-identity-selection.json",
+                request,
+                request_schema=EXACT_IDENTITY_SELECTION_REQUEST_SCHEMA,
+                result_schema=EXACT_IDENTITY_SELECTION_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                timeout_seconds=timeout_seconds,
+            )
+            matches = result.get("matches")
+            count = result.get("match_count")
+            if (not isinstance(matches, list) or type(count) is not int
+                    or count != len(matches) or count != len(request_batch)):
+                raise NativeTransportError(
+                    "native Test identity selection returned a mismatched result count"
+                )
+            expected_request_indices = set(
+                range(request_offset, request_offset + len(request_batch))
+            )
+            seen_request_indices: set[int] = set()
+            for match in matches:
+                if not isinstance(match, dict):
+                    raise NativeTransportError(
+                        "native Test identity selection returned a malformed match row"
+                    )
+                request_index = match.get("request_index")
+                found = match.get("found")
+                test_index = match.get("test_index")
+                if (type(request_index) is not int
+                        or request_index not in expected_request_indices
+                        or request_index in seen_request_indices
+                        or not isinstance(found, bool)):
+                    raise NativeTransportError(
+                        "native Test identity selection returned an invalid request match"
+                    )
+                seen_request_indices.add(request_index)
+                if found:
+                    if type(test_index) is not int or test_index not in valid_candidate_indices:
+                        raise NativeTransportError(
+                            "native Test identity selection returned an out-of-range test index"
+                        )
+                    # Candidate batches follow inventory order. Keeping the
+                    # newest hit preserves the former dict's last-row policy.
+                    selected_indices[request_index] = test_index
+            if seen_request_indices != expected_request_indices:
+                raise NativeTransportError(
+                    "native Test identity selection omitted request match rows"
+                )
+            calls += 1
+    return {
+        "selected_indices": selected_indices,
+        "calls": calls,
+        "case_count": len(normalized_candidates),
+        "identity_count": len(normalized_requests),
+        "selected_count": sum(index is not None for index in selected_indices),
+        "missing_count": sum(index is None for index in selected_indices),
     }
 
 

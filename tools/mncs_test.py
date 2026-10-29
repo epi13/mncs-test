@@ -36,6 +36,7 @@ from mncs_test_native import (
     EXECUTION_ADJUDICATION_MAX_CASES,
     NativeInputBoundError,
     NativeTransportError,
+    run_exact_test_identity_selection,
     run_execution_adjudication,
     run_native_app,
     run_runner_policy,
@@ -50,7 +51,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.6"
+RUNNER_VERSION = "0.2.7"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -4348,21 +4349,90 @@ def select_tests(
 
 
 def select_exact_test_identities(
-    tests: list[dict[str, Any]], requested: list[str]
+    tests: list[dict[str, Any]],
+    requested: list[str],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float,
+    selection_summary: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Select only compiler identities named by a family check."""
+    """Select exact compiler identities through the MNCS Test kernel."""
 
     expected = sorted(set(requested))
     if not expected or len(expected) != len(requested):
         raise ManifestError("family check test identities must be a non-empty unique list")
-    by_id = {str(test.get("id")): test for test in tests if test.get("id")}
-    missing = sorted(set(expected) - set(by_id))
+
+    candidate_pairs = [
+        (index, str(test.get("id")))
+        for index, test in enumerate(tests)
+        if test.get("id")
+    ]
+    try:
+        selection = run_exact_test_identity_selection(
+            [identity for _, identity in candidate_pairs],
+            expected,
+            candidate_indices=[index for index, _ in candidate_pairs],
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+    except NativeInputBoundError as error:
+        # Keep the previous behavior for inputs beyond the native record or
+        # step budget, and report that the host owns this exceptional result.
+        by_id = {str(test.get("id")): test for test in tests if test.get("id")}
+        missing = sorted(set(expected) - set(by_id))
+        if missing:
+            raise ManifestError(
+                "family check names tests absent from the current compiler inventory: "
+                + ", ".join(missing)
+            )
+        selected = [by_id[test_id] for test_id in expected]
+        selection_summary.update({
+            "authority": "mncs-test.python_identity_fallback",
+            "requested_native_authority": "mncs.test.exact_identity_selection_v1",
+            "mode": "exact_test_identity",
+            "status": (
+                "host_fallback_input_bound"
+                if error.reason == "input_exceeds_native_512_byte_bound"
+                else "host_fallback_work_estimate"
+            ),
+            "fallback_reason": error.reason,
+            "calls": 0,
+            "case_count": len(candidate_pairs),
+            "identity_count": len(expected),
+            "selected_count": len(selected),
+        })
+        return selected
+    except NativeTransportError as error:
+        raise ManifestError(f"native Test identity selection failed: {error}") from error
+
+    indices = selection.get("selected_indices")
+    if not isinstance(indices, list) or len(indices) != len(expected):
+        raise ManifestError("native Test identity selection returned malformed indices")
+    missing = [identity for identity, index in zip(expected, indices, strict=True) if index is None]
     if missing:
         raise ManifestError(
             "family check names tests absent from the current compiler inventory: "
             + ", ".join(missing)
         )
-    return [by_id[test_id] for test_id in expected]
+    selected = []
+    for index in indices:
+        if type(index) is not int or index < 0 or index >= len(tests):
+            raise ManifestError("native Test identity selection returned an out-of-range test index")
+        selected.append(tests[index])
+    selection_summary.update({
+        "authority": "mncs.test.exact_identity_selection_v1",
+        "mode": "exact_test_identity",
+        "status": "returned" if selection["calls"] else "not_run",
+        "calls": selection["calls"],
+        "case_count": selection["case_count"],
+        "identity_count": selection["identity_count"],
+        "selected_count": selection["selected_count"],
+    })
+    return selected
 
 
 def run_manifest(args: argparse.Namespace) -> int:
@@ -4486,7 +4556,7 @@ def run_manifest(args: argparse.Namespace) -> int:
         test_results: list[dict[str, Any]] = []
         test_inventory: dict[str, Any] | None = None
         execution: dict[str, Any] | None = None
-        native_filter_summary: dict[str, Any] | None = None
+        native_selection_summary: dict[str, Any] | None = None
         inventory_failure: dict[str, Any] | None = None
         configured_tests = list(manifest["tests"])
         if getattr(args, "execution", "stage0-reference") == "canonical-vm" and (configured_tests or manifest.get("suite")):
@@ -4544,9 +4614,18 @@ def run_manifest(args: argparse.Namespace) -> int:
                         timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
                     )
                 elif args.test_identity:
-                    configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
+                    native_selection_summary = {}
+                    configured_tests = select_exact_test_identities(
+                        configured_tests,
+                        args.test_identity,
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                        timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                        selection_summary=native_selection_summary,
+                    )
                 else:
-                    native_filter_summary = {}
+                    native_selection_summary = {}
                     configured_tests = select_tests(
                         configured_tests,
                         args.filter or [],
@@ -4554,7 +4633,7 @@ def run_manifest(args: argparse.Namespace) -> int:
                         cwd=cwd,
                         environment=environment,
                         timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
-                        selection_summary=native_filter_summary,
+                        selection_summary=native_selection_summary,
                     )
                 execution = {
                     "mode": "compiler-inventory-awaiting-execution",
@@ -4600,9 +4679,18 @@ def run_manifest(args: argparse.Namespace) -> int:
                     timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
                 )
             elif args.test_identity:
-                configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
+                native_selection_summary = {}
+                configured_tests = select_exact_test_identities(
+                    configured_tests,
+                    args.test_identity,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                    selection_summary=native_selection_summary,
+                )
             else:
-                native_filter_summary = {}
+                native_selection_summary = {}
                 configured_tests = select_tests(
                     configured_tests,
                     args.filter or [],
@@ -4610,7 +4698,7 @@ def run_manifest(args: argparse.Namespace) -> int:
                     cwd=cwd,
                     environment=environment,
                     timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
-                    selection_summary=native_filter_summary,
+                    selection_summary=native_selection_summary,
                 )
 
         _apply_host_grants(configured_tests, manifest, obligation_plan)
@@ -4922,10 +5010,10 @@ def run_manifest(args: argparse.Namespace) -> int:
                     "missing_obligation_identities": obligation_plan.get("repository", {}).get("missing_obligation_identities", []),
                     "required_obligation_identities": obligation_plan.get("repository", {}).get("required_obligation_identities", []),
                 }
-        if native_filter_summary is not None:
+        if native_selection_summary is not None:
             execution = {
                 **(execution or {}),
-                "native_selection": native_filter_summary,
+                "native_selection": native_selection_summary,
             }
         result = make_result(
             manifest=manifest_for_run,

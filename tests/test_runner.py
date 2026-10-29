@@ -323,6 +323,18 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(response["verdict"], "PASS")
         self.assertEqual(response["runner"], "mncs-test")
         self.assertEqual(response["test_result"]["schema_version"], "mncs.test-result/1")
+        self.assertEqual(
+            response["test_result"]["execution"]["native_selection"],
+            {
+                "authority": "mncs.test.exact_identity_selection_v1",
+                "mode": "exact_test_identity",
+                "status": "returned",
+                "calls": 1,
+                "case_count": 7,
+                "identity_count": 2,
+                "selected_count": 2,
+            },
+        )
         self.assertEqual(response["check_result"]["schema_version"], "mncs.check-result/1")
         self.assertEqual(response["check_result"]["id"], request["check_identity"])
         self.assertEqual(
@@ -387,6 +399,10 @@ class RunnerTests(unittest.TestCase):
                 "mncs:0.2:test-case:tests.self_suite::task_lifecycle::"
                 "b1ac42033bff08ddd2bdcbf98e5ff268458922c58a1f69a036906afe56734f75"
             ],
+        )
+        self.assertEqual(
+            response["test_result"]["execution"]["native_selection"]["authority"],
+            "mncs.test.exact_identity_selection_v1",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
