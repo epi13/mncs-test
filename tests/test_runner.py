@@ -635,18 +635,38 @@ class RunnerTests(unittest.TestCase):
     def test_compile_failure_is_reported_for_compile_pass_expectation(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-compile-failure-") as directory:
             result = Path(directory) / "result.json"
-            completed = self.invoke(
-                "run",
-                "--manifest",
-                "tests/fixtures/compile-unexpected-failure.toml",
-                *self.live_args(),
-                "--result",
-                str(result),
-                "--check-result",
-                str(Path(directory) / "check.json"),
-                "--artifacts",
-                str(Path(directory) / "artifacts"),
-            )
+            with tempfile.TemporaryDirectory(
+                prefix=".compile-unexpected-failure-",
+                dir=REPO / "tests" / "fixtures",
+            ) as manifest_dir:
+                manifest = Path(manifest_dir) / "manifest.toml"
+                manifest.write_text(
+                    'schema_version = "mncs.test-manifest/1"\n'
+                    'name = "compile-unexpected-failure-fixture"\n'
+                    'source = "../compile_fail.mncs"\n'
+                    'module = "tests.fixtures.compile_fail"\n'
+                    'profile = "0.16"\n'
+                    'timeout_seconds = 30\n'
+                    'libraries = ["../../../native"]\n\n'
+                    '[[tests]]\n'
+                    'id = "unexpected-failure"\n'
+                    'entry = "invalid_return"\n'
+                    'kind = "compile-pass"\n'
+                    'tags = ["positive", "compiler"]\n',
+                    encoding="utf-8",
+                )
+                completed = self.invoke(
+                    "run",
+                    "--manifest",
+                    str(manifest.relative_to(REPO)),
+                    *self.live_args(),
+                    "--result",
+                    str(result),
+                    "--check-result",
+                    str(Path(directory) / "check.json"),
+                    "--artifacts",
+                    str(Path(directory) / "artifacts"),
+                )
             self.assertEqual(completed.returncode, 4, completed.stdout)
             document = json.loads(result.read_text(encoding="utf-8"))
             item = document["tests"][0]
