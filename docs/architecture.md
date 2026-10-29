@@ -91,6 +91,15 @@ CLI, share `tools/mncs_test_native.py` for bounded request transport and
 selected-workspace library resolution, so linked worktrees do not depend on
 the original repository path depth.
 
+`mncs.test.inventory_filter_v1` owns substring filtering over the Test
+inventory. The adapter prepares the runner's existing searchable fields and
+projects native-selected indices back to their records. Candidate and filter
+batches are bounded at 16, and each search string or filter is limited to 1024
+UTF-8 bytes in the native record. Oversize inputs and batches whose worst-case
+substring work exceeds the native step-budget estimate retain the prior host
+filter as an explicit, reported fallback until MNCS has a wider, more efficient
+text-search primitive.
+
 When a result has no native suite fold, the MNCS application
 `mncs.test.result_summary_v1` owns its aggregate counters. The adapter sends
 bounded verdict, status, native assertion-count, and failure-class fields;

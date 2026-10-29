@@ -1,0 +1,161 @@
+mncs 0.18;
+
+// Native selection of Test inventory records from bounded substring filters.
+// The Python boundary prepares the same searchable text used by the legacy
+// runner and projects returned indices back onto the original records.
+module mncs.test.inventory_filter_v1;
+
+use mncs.std.application.v1;
+
+record SearchCandidateV1 {
+    test_index: u64,
+    search_text: [byte; up_to 1024]
+}
+
+record InventoryFilterRequestV1 {
+    schema_version: [byte; up_to 64],
+    candidate_count: u64,
+    candidates: [SearchCandidateV1; up_to 64],
+    filter_count: u64,
+    filters: [[byte; up_to 1024]; up_to 64]
+}
+
+record SelectedIndexBuilderV1 {
+    values: [u64; 64],
+    length: u64
+}
+
+record InventoryFilterResultV1 {
+    schema_version: [byte; up_to 64],
+    selected_count: u64,
+    selected_indices: [u64; up_to 64]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 105, 110, 118, 101, 110, 116, 111, 114, 121, 45, 102, 105, 108, 116, 101, 114, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 105, 110, 118, 101, 110, 116, 111, 114, 121, 45, 102, 105, 108, 116, 101, 114, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 1024], right: [byte; up_to 1024]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn substring_at(
+    haystack: [byte; up_to 1024],
+    needle: [byte; up_to 1024],
+    start: u64
+) -> (result: bool) {
+    if start > haystack.len {
+        return false;
+    }
+    if needle.len > haystack.len - start {
+        return false;
+    }
+    iterate i over needle carrying same: bool = true {
+        next same = same && haystack[start + i] == needle[i];
+    }
+    return same;
+}
+
+fn contains_substring(
+    haystack: [byte; up_to 1024],
+    needle: [byte; up_to 1024]
+) -> (result: bool) {
+    if needle.len == 0 {
+        return true;
+    }
+    if needle.len > haystack.len {
+        return false;
+    }
+    iterate i over haystack carrying found: bool = false {
+        next found = found || substring_at(haystack, needle, i);
+    }
+    return found;
+}
+
+fn candidate_matches(request: InventoryFilterRequestV1, candidate: SearchCandidateV1) -> (result: bool) {
+    if request.filter_count == 0 {
+        return true;
+    }
+    iterate i over request.filters carrying found: bool = false {
+        next found = found || (i < request.filter_count
+            && contains_substring(candidate.search_text, request.filters[i]));
+    }
+    return found;
+}
+
+fn empty_index_builder() -> (result: SelectedIndexBuilderV1) {
+    return SelectedIndexBuilderV1 {
+        values: [0; 64],
+        length: 0
+    };
+}
+
+fn push_index(
+    builder: SelectedIndexBuilderV1,
+    index: u64,
+    include: bool
+) -> (result: SelectedIndexBuilderV1) {
+    if !include || builder.length >= 64 {
+        return builder;
+    }
+    return SelectedIndexBuilderV1 {
+        values: replace(builder.values, builder.length, index),
+        length: builder.length +% 1
+    };
+}
+
+fn valid_request(request: InventoryFilterRequestV1) -> (result: bool) {
+    return same_bytes(request.schema_version, request_schema())
+        && request.candidate_count == request.candidates.len
+        && request.filter_count == request.filters.len
+        && request.candidate_count <= 64
+        && request.filter_count <= 64;
+}
+
+fn select_indices(request: InventoryFilterRequestV1) -> (result: [u64; up_to 64]) {
+    let seed: SelectedIndexBuilderV1 = empty_index_builder();
+    iterate i over request.candidates carrying selected: SelectedIndexBuilderV1 = seed {
+        next selected = push_index(
+            selected,
+            request.candidates[i].test_index,
+            i < request.candidate_count
+                && candidate_matches(request, request.candidates[i])
+        );
+    }
+    return selected.values[0..selected.length];
+}
+
+fn inventory_filter_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 116, 101, 115, 116, 32, 105, 110, 118, 101, 110, 116, 111, 114, 121, 32, 102, 105, 108, 116, 101, 114, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: InventoryFilterRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 105, 110, 118, 101, 110, 116, 111, 114, 121, 32, 102, 105, 108, 116, 101, 114, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let selected: [u64; up_to 64] = select_indices(request);
+    let response: InventoryFilterResultV1 = InventoryFilterResultV1 {
+        schema_version: result_schema(),
+        selected_count: selected.len,
+        selected_indices: selected
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), response);
+    if published == 0 {
+        return failure([116, 101, 115, 116, 32, 105, 110, 118, 101, 110, 116, 111, 114, 121, 32, 102, 105, 108, 116, 101, 114, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

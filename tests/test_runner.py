@@ -412,6 +412,18 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["test_inventory"]["test_count"], 7)
             self.assertEqual(document["execution"]["selected_test_count"], 1)
             self.assertEqual(document["execution"]["batch_size"], 1)
+            self.assertEqual(
+                document["execution"]["native_selection"],
+                {
+                    "authority": "mncs.test.inventory_filter_v1",
+                    "mode": "substring_any",
+                    "status": "returned",
+                    "calls": 1,
+                    "case_count": 7,
+                    "filter_count": 1,
+                    "selected_count": 1,
+                },
+            )
             self.assertEqual(document["summary"]["authority"], "native_suite")
             self.assertEqual([item["entry"] for item in document["tests"]], ["arithmetic"])
             self.assertEqual(len(document["experiment"]["observations"]), 1)

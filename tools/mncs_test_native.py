@@ -28,6 +28,14 @@ class NativeTransportError(ValueError):
     """Raised for unusable native transports (fail closed)."""
 
 
+class NativeInputBoundError(NativeTransportError):
+    """Raised when a valid producer value exceeds a declared native record bound."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -284,6 +292,12 @@ EXECUTION_STATUS_VALUES = frozenset({
     "returned", "runtime_failure", "unsupported", "budget_exhausted", "invalid_request",
 })
 
+INVENTORY_FILTER_REQUEST_SCHEMA = "mncs.test-inventory-filter-request/1"
+INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/1"
+INVENTORY_FILTER_BATCH_SIZE = 16
+INVENTORY_FILTER_TEXT_MAX_BYTES = 1024
+INVENTORY_FILTER_ESTIMATED_WORK_MAX = 65_536
+
 
 def _bounded_adjudication_text(value: object, field: str) -> str:
     if not isinstance(value, str):
@@ -299,6 +313,107 @@ def _bounded_adjudication_text(value: object, field: str) -> str:
             f"execution adjudication {field} exceeds the 64-byte native bound"
         )
     return value
+
+
+def run_test_inventory_filter(
+    search_texts: list[str],
+    filters: list[str],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> dict[str, object]:
+    """Select Test inventory indices through the native substring kernel.
+
+    Inputs are split into bounded native batches. The returned indices remain
+    tied to the original candidate list; host code only projects them back to
+    the associated Test records.
+    """
+    if not isinstance(search_texts, list) or not isinstance(filters, list):
+        raise NativeTransportError("Test inventory filters and search text must be lists")
+
+    def bounded_text(value: object, field: str) -> str:
+        if not isinstance(value, str):
+            raise NativeTransportError(f"Test inventory {field} must be text")
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise NativeTransportError(
+                f"Test inventory {field} must be valid UTF-8"
+            ) from error
+        if size > INVENTORY_FILTER_TEXT_MAX_BYTES:
+            raise NativeInputBoundError(
+                f"Test inventory {field} exceeds the native 1024-byte bound",
+                reason="input_exceeds_native_1024_byte_bound",
+            )
+        return value
+
+    normalized_texts = [bounded_text(value, "search text") for value in search_texts]
+    normalized_filters = [bounded_text(value, "filter") for value in filters]
+    selected_indices: set[int] = set()
+    calls = 0
+    for candidate_offset in range(0, len(normalized_texts), INVENTORY_FILTER_BATCH_SIZE):
+        candidate_batch = normalized_texts[
+            candidate_offset:candidate_offset + INVENTORY_FILTER_BATCH_SIZE
+        ]
+        filter_batches = [
+            normalized_filters[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
+            for offset in range(0, len(normalized_filters), INVENTORY_FILTER_BATCH_SIZE)
+        ] or [[]]
+        for filter_batch in filter_batches:
+            estimated_work = sum(
+                len(value.encode("utf-8")) * len(pattern.encode("utf-8"))
+                for value in candidate_batch
+                for pattern in filter_batch
+            )
+            if estimated_work > INVENTORY_FILTER_ESTIMATED_WORK_MAX:
+                raise NativeInputBoundError(
+                    "Test inventory substring request exceeds the native step-budget work estimate",
+                    reason="estimated_work_exceeds_native_step_budget",
+                )
+            request = {
+                "schema_version": INVENTORY_FILTER_REQUEST_SCHEMA,
+                "candidate_count": len(candidate_batch),
+                "candidates": [
+                    {"test_index": candidate_offset + index, "search_text": value}
+                    for index, value in enumerate(candidate_batch)
+                ],
+                "filter_count": len(filter_batch),
+                "filters": filter_batch,
+            }
+            result = run_native_app(
+                "test-inventory-filter.json",
+                request,
+                request_schema=INVENTORY_FILTER_REQUEST_SCHEMA,
+                result_schema=INVENTORY_FILTER_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                timeout_seconds=timeout_seconds,
+            )
+            indices = result.get("selected_indices")
+            count = result.get("selected_count")
+            if (not isinstance(indices, list) or type(count) is not int
+                    or count != len(indices)):
+                raise NativeTransportError(
+                    "native Test inventory filter returned a mismatched result count"
+                )
+            for index in indices:
+                if (type(index) is not int or index < candidate_offset
+                        or index >= candidate_offset + len(candidate_batch)):
+                    raise NativeTransportError(
+                        "native Test inventory filter returned an out-of-range index"
+                    )
+                selected_indices.add(index)
+            calls += 1
+    return {
+        "selected_indices": sorted(selected_indices),
+        "calls": calls,
+        "case_count": len(normalized_texts),
+        "filter_count": len(normalized_filters),
+        "selected_count": len(selected_indices),
+    }
 
 
 def run_execution_adjudication(

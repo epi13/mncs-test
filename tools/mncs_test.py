@@ -34,10 +34,12 @@ from family_contract import (
 )
 from mncs_test_native import (
     EXECUTION_ADJUDICATION_MAX_CASES,
+    NativeInputBoundError,
     NativeTransportError,
     run_execution_adjudication,
     run_native_app,
     run_runner_policy,
+    run_test_inventory_filter,
 )
 
 RESULT_SCHEMA = "mncs.test-result/1"
@@ -48,7 +50,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.5"
+RUNNER_VERSION = "0.2.6"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -4263,18 +4265,86 @@ def print_result(result: dict[str, Any], output_format: str) -> None:
     print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
 
 
-def select_tests(tests: list[dict[str, Any]], filters: list[str]) -> list[dict[str, Any]]:
+def select_tests(
+    tests: list[dict[str, Any]],
+    filters: list[str],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float,
+    selection_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Select inventory records through the MNCS substring-filter kernel."""
     if not filters:
+        selection_summary.update({
+            "authority": "manifest_default",
+            "mode": "all",
+            "status": "not_required",
+            "calls": 0,
+            "case_count": len(tests),
+            "filter_count": 0,
+            "selected_count": len(tests),
+        })
         return tests
-    selected = []
-    for test in tests:
-        haystack = " ".join(
-            str(test.get(field, ""))
-            for field in ("id", "entry", "qualified_name", "declaration_identity", "test_case_identity")
+    search_fields = (
+        "id", "entry", "qualified_name", "declaration_identity", "test_case_identity",
+    )
+    search_texts = [
+        " ".join(str(test.get(field, "")) for field in search_fields)
+        for test in tests
+    ]
+    try:
+        selected = run_test_inventory_filter(
+            search_texts,
+            filters,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
         )
-        if any(pattern in haystack for pattern in filters):
-            selected.append(test)
-    return selected
+    except NativeInputBoundError as error:
+        # MNCS bounded byte views currently admit 1024 bytes. Preserve the
+        # legacy behavior for exceptional larger selectors and report this
+        # exact host boundary instead of silently claiming native selection.
+        selected_tests = []
+        if not filters:
+            selected_tests = tests
+        else:
+            for test, haystack in zip(tests, search_texts, strict=True):
+                if any(pattern in haystack for pattern in filters):
+                    selected_tests.append(test)
+        selection_summary.update({
+            "authority": "mncs-test.python_filter_fallback",
+            "requested_native_authority": "mncs.test.inventory_filter_v1",
+            "mode": "substring_any",
+            "status": (
+                "host_fallback_input_bound"
+                if error.reason == "input_exceeds_native_1024_byte_bound"
+                else "host_fallback_work_estimate"
+            ),
+            "fallback_reason": error.reason,
+            "calls": 0,
+            "case_count": len(tests),
+            "filter_count": len(filters),
+            "selected_count": len(selected_tests),
+        })
+        return selected_tests
+    except NativeTransportError as error:
+        raise ManifestError(f"native Test inventory filter failed: {error}") from error
+    indices = selected["selected_indices"]
+    if not isinstance(indices, list):
+        raise ManifestError("native Test inventory filter returned malformed selection indices")
+    selection_summary.update({
+        "authority": "mncs.test.inventory_filter_v1",
+        "mode": "substring_any",
+        "status": "returned" if selected["calls"] else "not_run",
+        "calls": selected["calls"],
+        "case_count": selected["case_count"],
+        "filter_count": selected["filter_count"],
+        "selected_count": selected["selected_count"],
+    })
+    return [tests[index] for index in indices]
 
 
 def select_exact_test_identities(
@@ -4416,6 +4486,7 @@ def run_manifest(args: argparse.Namespace) -> int:
         test_results: list[dict[str, Any]] = []
         test_inventory: dict[str, Any] | None = None
         execution: dict[str, Any] | None = None
+        native_filter_summary: dict[str, Any] | None = None
         inventory_failure: dict[str, Any] | None = None
         configured_tests = list(manifest["tests"])
         if getattr(args, "execution", "stage0-reference") == "canonical-vm" and (configured_tests or manifest.get("suite")):
@@ -4475,7 +4546,16 @@ def run_manifest(args: argparse.Namespace) -> int:
                 elif args.test_identity:
                     configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
                 else:
-                    configured_tests = select_tests(configured_tests, args.filter or [])
+                    native_filter_summary = {}
+                    configured_tests = select_tests(
+                        configured_tests,
+                        args.filter or [],
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                        timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                        selection_summary=native_filter_summary,
+                    )
                 execution = {
                     "mode": "compiler-inventory-awaiting-execution",
                     "inventory_artifact": inventory_transport["process"]["stdout_artifact"],
@@ -4522,7 +4602,16 @@ def run_manifest(args: argparse.Namespace) -> int:
             elif args.test_identity:
                 configured_tests = select_exact_test_identities(configured_tests, args.test_identity)
             else:
-                configured_tests = select_tests(configured_tests, args.filter or [])
+                native_filter_summary = {}
+                configured_tests = select_tests(
+                    configured_tests,
+                    args.filter or [],
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    timeout_seconds=args.timeout_seconds or manifest["timeout_seconds"],
+                    selection_summary=native_filter_summary,
+                )
 
         _apply_host_grants(configured_tests, manifest, obligation_plan)
 
@@ -4833,6 +4922,11 @@ def run_manifest(args: argparse.Namespace) -> int:
                     "missing_obligation_identities": obligation_plan.get("repository", {}).get("missing_obligation_identities", []),
                     "required_obligation_identities": obligation_plan.get("repository", {}).get("required_obligation_identities", []),
                 }
+        if native_filter_summary is not None:
+            execution = {
+                **(execution or {}),
+                "native_selection": native_filter_summary,
+            }
         result = make_result(
             manifest=manifest_for_run,
             source_text=source_text,
