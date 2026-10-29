@@ -54,7 +54,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.8"
+RUNNER_VERSION = "0.2.9"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -75,6 +75,7 @@ TEST_RESULT_IDENTITY_REQUEST_SCHEMA = "mncs.test-result-identity-request/1"
 TEST_RESULT_IDENTITY_RESULT_SCHEMA = "mncs.test-result-identity/1"
 TEST_RESULT_IDENTITY_MAX_BYTES = 65536
 TEST_RESULT_IDENTITY_MAX_PAYLOADS = 16
+TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
 TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 COMPILE_VERDICT_EXPECTED_BATCH = 16
 COMPILE_VERDICT_ACTUAL_BATCH = 32
@@ -676,22 +677,8 @@ def result_identity_sha256(
     cwd: Path,
     environment: dict[str, str],
 ) -> str:
-    """Hash a bounded result identity payload through the MNCS SHA-256 app.
-
-    The canonical JSON projection remains a Python transport boundary. The
-    common path's digest computation is owned by ``mncs.std.sha256.v1``.
-    Extremely large identity payloads retain the compatibility hash path so
-    this bounded application does not narrow the existing result contract.
-    """
-    if not isinstance(payload, bytes):
-        raise AdapterError("Test result identity payload must be bytes")
-    if (
-        len(payload) > TEST_RESULT_IDENTITY_MAX_BYTES
-        or result_identity_step_budget([payload]) > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
-    ):
-        return sha256_bytes(payload)
-
-    return result_identity_sha256_batch(
+    """Hash one identity payload through the bounded MNCS SHA-256 app."""
+    return result_identity_sha256_many(
         [payload], mncs=mncs, cwd=cwd, environment=environment
     )[0]
 
@@ -728,7 +715,7 @@ def result_identity_sha256_batch(
             "first_chunk": first_chunk,
             "chunk_count": len(chunks) - first_chunk,
         })
-    if len(chunks) > 64:
+    if len(chunks) > TEST_RESULT_IDENTITY_MAX_CHUNKS:
         raise NativeInputBoundError(
             "result identity batch exceeds its 64-chunk native bound",
             reason="result_identity_chunk_count",
@@ -777,6 +764,63 @@ def result_identity_sha256_batch(
             raise AdapterError("MNCS result-identity app returned a malformed digest")
         output.append(digest)
     return output
+
+
+def result_identity_sha256_many(
+    payloads: list[bytes],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> list[str]:
+    """Hash an ordered payload list in bounded MNCS batches.
+
+    The shared Test application accepts at most 16 payloads, 64 chunks, 65,536
+    bytes, and 8,000,000 estimated steps per call. This adapter batches larger
+    lists without changing their order. A single payload that exceeds those
+    bounds retains the compatibility hash path.
+    """
+    if not isinstance(payloads, list):
+        raise AdapterError("Test result identity payloads must be a list")
+    if any(not isinstance(payload, bytes) for payload in payloads):
+        raise AdapterError("Test result identity payloads must be bytes")
+
+    digests: list[str] = []
+    batch: list[bytes] = []
+    for payload in payloads:
+        payload_chunks = (len(payload) + 1023) // 1024
+        if (
+            len(payload) > TEST_RESULT_IDENTITY_MAX_BYTES
+            or payload_chunks > TEST_RESULT_IDENTITY_MAX_CHUNKS
+            or result_identity_step_budget([payload]) > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+        ):
+            if batch:
+                digests.extend(result_identity_sha256_batch(
+                    batch, mncs=mncs, cwd=cwd, environment=environment
+                ))
+                batch = []
+            digests.append(sha256_bytes(payload))
+            continue
+
+        candidate = [*batch, payload]
+        if batch and (
+            len(candidate) > TEST_RESULT_IDENTITY_MAX_PAYLOADS
+            or sum(len(item) for item in candidate) > TEST_RESULT_IDENTITY_MAX_BYTES
+            or sum((len(item) + 1023) // 1024 for item in candidate)
+            > TEST_RESULT_IDENTITY_MAX_CHUNKS
+            or result_identity_step_budget(candidate) > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+        ):
+            digests.extend(result_identity_sha256_batch(
+                batch, mncs=mncs, cwd=cwd, environment=environment
+            ))
+            candidate = [payload]
+        batch = candidate
+
+    if batch:
+        digests.extend(result_identity_sha256_batch(
+            batch, mncs=mncs, cwd=cwd, environment=environment
+        ))
+    return digests
 
 
 def result_identity_step_budget(payloads: list[bytes]) -> int:
@@ -3817,28 +3861,45 @@ def make_result(
     )
     experiment_identity = f"mncs:language:experiment:test:{run_id}"
     experiment_run_identity = f"mncs:language:experiment-run:{run_id}"
+    lineage_rows: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    execution_payloads: list[bytes] = []
     for index, item in enumerate(test_results):
         semantic = item.get("semantic")
         if not isinstance(semantic, dict) or not semantic.get("test_case_identity"):
             continue
-        execution_digest = sha256_bytes(
-            compact_json(
-                {
-                    "run": experiment_run_identity,
-                    "index": index,
-                    "test_case": semantic["test_case_identity"],
-                }
-            ).encode()
+        execution_payloads.append(
+            compact_json({
+                "run": experiment_run_identity,
+                "index": index,
+                "test_case": semantic["test_case_identity"],
+            }).encode("utf-8")
         )
-        observation_digest = sha256_bytes(
-            compact_json(
-                {
-                    "execution": execution_digest,
-                    "status": item.get("execution_status", item.get("status")),
-                    "verdict": item.get("verdict"),
-                }
-            ).encode()
-        )
+        lineage_rows.append((index, item, semantic))
+
+    execution_digests = result_identity_sha256_many(
+        execution_payloads,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    observation_payloads = [
+        compact_json({
+            "execution": execution_digest,
+            "status": item.get("execution_status", item.get("status")),
+            "verdict": item.get("verdict"),
+        }).encode("utf-8")
+        for (_, item, _), execution_digest in zip(lineage_rows, execution_digests)
+    ]
+    observation_digests = result_identity_sha256_many(
+        observation_payloads,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+
+    for (index, item, semantic), execution_digest, observation_digest in zip(
+        lineage_rows, execution_digests, observation_digests
+    ):
         item["execution_identity"] = f"{experiment_run_identity}:execution:{execution_digest}"
         item["observation_identity"] = f"{experiment_run_identity}:observation:{observation_digest}"
         item["oracle_evaluation"] = {

@@ -270,6 +270,63 @@ class RunnerTests(unittest.TestCase):
                 ).encode("utf-8")
             ).hexdigest()
             self.assertEqual(document["run_id"], reference_run_id)
+            experiment_run_identity = f"mncs:language:experiment-run:{reference_run_id}"
+            self.assertEqual(document["experiment"]["run_identity"], experiment_run_identity)
+            observations_by_test = {
+                item["test_case_identity"]: item
+                for item in document["experiment"]["observations"]
+            }
+            oracle_identities = {
+                item["identity"]
+                for item in document["experiment"]["oracle_evaluations"]
+            }
+
+            def reference_digest(value):
+                encoded = json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                return hashlib.sha256(encoded).hexdigest()
+
+            lineage_count = 0
+            for index, item in enumerate(document["tests"]):
+                semantic = item.get("semantic")
+                if not isinstance(semantic, dict) or not semantic.get("test_case_identity"):
+                    continue
+                lineage_count += 1
+                execution_digest = reference_digest({
+                    "run": experiment_run_identity,
+                    "index": index,
+                    "test_case": semantic["test_case_identity"],
+                })
+                observation_digest = reference_digest({
+                    "execution": execution_digest,
+                    "status": item.get("execution_status", item.get("status")),
+                    "verdict": item.get("verdict"),
+                })
+                execution_identity = f"{experiment_run_identity}:execution:{execution_digest}"
+                observation_identity = f"{experiment_run_identity}:observation:{observation_digest}"
+                oracle_identity = f"{experiment_run_identity}:oracle:{observation_digest}"
+                self.assertEqual(item["execution_identity"], execution_identity)
+                self.assertEqual(item["observation_identity"], observation_identity)
+                self.assertEqual(item["oracle_evaluation"]["identity"], oracle_identity)
+                self.assertEqual(item["execution_lineage"]["execution_identity"], execution_identity)
+                self.assertEqual(item["execution_lineage"]["observation_identity"], observation_identity)
+                self.assertIn(oracle_identity, oracle_identities)
+                self.assertEqual(
+                    observations_by_test[semantic["test_case_identity"]],
+                    {
+                        "identity": observation_identity,
+                        "execution_identity": execution_identity,
+                        "test_case_identity": semantic["test_case_identity"],
+                        "status": item.get("execution_status", item.get("status")),
+                        "verdict": item.get("verdict"),
+                        "observation_kind": "test_execution",
+                    },
+                )
+            self.assertEqual(lineage_count, 7)
             self.assertEqual(document["summary"]["total"], 7)
             self.assertEqual(document["summary"]["passed"], 6)
             self.assertEqual(document["summary"]["skipped"], 1)

@@ -22,6 +22,18 @@ sys.path.insert(0, str(ROOT / "tools"))
 import mncs_test  # noqa: E402
 
 
+def _native_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    explicit = environment.get("MNCS_STDLIB_ROOT")
+    stdlib = Path(explicit) / "library" if explicit else WORKSPACE_ROOT / "mncs-stdlib/library"
+    if not stdlib.is_dir():
+        stdlib = LANGUAGE_ROOT / "library"
+    environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
+        (str(stdlib), str(ROOT / "native"))
+    )
+    return environment
+
+
 def test_native_result_identity_hash_matches_independent_sha256(tmp_path: Path) -> None:
     payloads = [
         b"",
@@ -45,23 +57,51 @@ def test_native_result_identity_hash_matches_independent_sha256(tmp_path: Path) 
         ).encode("utf-8"),
         bytes((index * 37 + 11) % 256 for index in range(4097)),
     ]
-    environment = dict(os.environ)
-    explicit = environment.get("MNCS_STDLIB_ROOT")
-    stdlib = Path(explicit) / "library" if explicit else WORKSPACE_ROOT / "mncs-stdlib/library"
-    if not stdlib.is_dir():
-        stdlib = LANGUAGE_ROOT / "library"
-    environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
-        (str(stdlib), str(ROOT / "native"))
-    )
-
     actual = mncs_test.result_identity_sha256_batch(
         payloads,
         mncs=str(MNCS),
         cwd=tmp_path,
-        environment=environment,
+        environment=_native_environment(),
     )
 
     assert actual == [hashlib.sha256(payload).hexdigest() for payload in payloads]
+
+
+def test_many_native_result_identity_hashes_split_by_payload_and_step_bounds(
+    tmp_path: Path,
+) -> None:
+    payloads = [f"lineage-{index}".encode() for index in range(17)]
+    payloads.extend(bytes((index + 1,)) * 1600 for index in range(9))
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual = mncs_test.result_identity_sha256_many(
+            payloads,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == [hashlib.sha256(payload).hexdigest() for payload in payloads]
+    assert [call.args[1]["payload_count"] for call in native_app.call_args_list] == [16, 9, 1]
+
+
+def test_many_result_identity_hashes_keep_oversized_payload_host_fallback(
+    tmp_path: Path,
+) -> None:
+    payloads = [b"before", b"x" * (mncs_test.TEST_RESULT_IDENTITY_MAX_BYTES + 1), b"after"]
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual = mncs_test.result_identity_sha256_many(
+            payloads,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == [hashlib.sha256(payload).hexdigest() for payload in payloads]
+    assert [call.args[1]["payload_count"] for call in native_app.call_args_list] == [1, 1]
 
 
 @pytest.mark.parametrize(
