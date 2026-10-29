@@ -39,6 +39,7 @@ from mncs_test_native import (
     run_exact_test_identity_selection,
     run_execution_adjudication,
     run_native_app,
+    run_process_transport_adjudication,
     run_runner_policy,
     run_test_inventory_filter,
 )
@@ -1700,37 +1701,65 @@ def execute_entry(
     test_result["stdout_artifact"] = process["stdout_artifact"]
     test_result["stderr_artifact"] = process["stderr_artifact"]
     test_result["command_artifact"] = process["command_artifact"]
-    if process.get("transport_error"):
+    decoded = parse_json_output(process["stdout"])
+    diagnostics = diagnostic_list(decoded)
+    case, native = execution_adjudication_case(
+        test=test,
+        decoded=decoded if isinstance(decoded, dict) else {},
+        suite=suite,
+    )
+    try:
+        process_decision = run_process_transport_adjudication(
+            {
+                "process_start_failed": "transport_error" in process,
+                "timed_out": process.get("timed_out") is True,
+                "structured_result_present": isinstance(decoded, dict),
+                "nonzero_exit": (
+                    type(process.get("returncode")) is int
+                    and process["returncode"] != 0
+                ),
+                "diagnostics_present": bool(diagnostics),
+            },
+            case,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native process transport adjudication failed: {error}") from error
+
+    decision = process_decision["decision"]
+    if decision == "start_failure":
         return result_failure(
             test_result,
-            failure_class="infrastructure_failure",
+            failure_class=str(process_decision["failure_class"]),
             message="MNCS process could not be started",
             error=process["transport_error"],
         )
-    if process["timed_out"]:
+    if decision == "timeout":
         return result_failure(
             test_result,
-            failure_class="timeout",
+            failure_class=str(process_decision["failure_class"]),
             message=f"MNCS execution exceeded {timeout_seconds}s",
             timeout_seconds=timeout_seconds,
         )
-    decoded = parse_json_output(process["stdout"])
     test_result["process_exit_code"] = process["returncode"]
-    if not isinstance(decoded, dict):
-        diagnostics = diagnostic_list(decoded)
-        if process["returncode"] not in (0, None) and diagnostics:
-            return result_failure(
-                test_result,
-                failure_class="compile_failure",
-                message="MNCS rejected the source before execution",
-                diagnostics=diagnostics,
-            )
+    if decision == "compile_failure":
         return result_failure(
             test_result,
-            failure_class="infrastructure_failure",
+            failure_class=str(process_decision["failure_class"]),
+            message="MNCS rejected the source before execution",
+            diagnostics=diagnostics,
+        )
+    if decision == "malformed_result":
+        return result_failure(
+            test_result,
+            failure_class=str(process_decision["failure_class"]),
             message="MNCS did not emit a structured execution result",
             diagnostics=diagnostics,
         )
+    if decision != "continue" or not isinstance(decoded, dict):
+        raise AdapterError("native process transport adjudication returned an inconsistent continuation")
     status = decoded.get("status")
     test_result["execution_status"] = status
     test_result["execution"] = {
@@ -1747,17 +1776,9 @@ def execute_entry(
         )
         if key in decoded
     }
-    case, native = execution_adjudication_case(
-        test=test,
-        decoded=decoded,
-        suite=suite,
-    )
-    outcome = run_execution_adjudication(
-        [case],
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )[0]
+    outcome = process_decision["execution"]
+    if not isinstance(outcome, dict):
+        raise AdapterError("native process transport adjudication omitted execution adjudication")
     return apply_execution_adjudication(
         test_result=test_result,
         decoded=decoded,

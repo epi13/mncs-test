@@ -291,6 +291,19 @@ EXECUTION_ADJUDICATION_VERDICTS = frozenset({"PASS", "FAIL", "UNKNOWN"})
 EXECUTION_STATUS_VALUES = frozenset({
     "returned", "runtime_failure", "unsupported", "budget_exhausted", "invalid_request",
 })
+PROCESS_TRANSPORT_ADJUDICATION_REQUEST_SCHEMA = (
+    "mncs.test-process-transport-adjudication-request/2"
+)
+PROCESS_TRANSPORT_ADJUDICATION_RESULT_SCHEMA = (
+    "mncs.test-process-transport-adjudication/2"
+)
+PROCESS_TRANSPORT_DECISIONS = {
+    "start_failure": ("infrastructure_failure", True),
+    "timeout": ("timeout", True),
+    "continue": ("", False),
+    "compile_failure": ("compile_failure", True),
+    "malformed_result": ("infrastructure_failure", True),
+}
 
 INVENTORY_FILTER_REQUEST_SCHEMA = "mncs.test-inventory-filter-request/2"
 INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/2"
@@ -327,6 +340,119 @@ def _bounded_adjudication_text(value: object, field: str) -> str:
     if size > 64:
         raise NativeTransportError(
             f"execution adjudication {field} exceeds the 64-byte native bound"
+        )
+    return value
+
+
+def _normalize_execution_case(
+    case: object,
+    index: int,
+    context: str,
+) -> dict[str, object]:
+    fields = {
+        "execution_status", "expected_status", "suite",
+        "native_result_present", "native_verdict", "native_failure_class",
+    }
+    if not isinstance(case, dict) or set(case) != fields:
+        raise NativeTransportError(
+            f"{context} case {index} has an invalid field set"
+        )
+    normalized: dict[str, object] = {
+        field: _bounded_adjudication_text(case[field], field)
+        for field in (
+            "execution_status", "expected_status",
+            "native_verdict", "native_failure_class",
+        )
+    }
+    suite = case["suite"]
+    native_result_present = case["native_result_present"]
+    if type(suite) is not bool or type(native_result_present) is not bool:
+        raise NativeTransportError(
+            f"{context} case {index} has invalid boolean fields"
+        )
+    normalized["suite"] = suite
+    normalized["native_result_present"] = native_result_present
+    expected_status = normalized["expected_status"]
+    if expected_status and expected_status not in EXECUTION_STATUS_VALUES:
+        raise NativeTransportError(
+            f"{context} case {index} has an unknown expected status"
+        )
+    native_verdict = normalized["native_verdict"]
+    native_failure_class = normalized["native_failure_class"]
+    execution_status = normalized["execution_status"]
+    if native_result_present:
+        allowed_verdicts = {"PASS", "FAIL", "UNSUPPORTED"}
+        if not suite:
+            allowed_verdicts.add("SKIP")
+        if (execution_status != "returned"
+                or native_verdict not in allowed_verdicts
+                or (suite and native_failure_class)
+                or (not suite and not native_failure_class)):
+            raise NativeTransportError(
+                f"{context} case {index} has an invalid native result"
+            )
+    elif native_verdict or native_failure_class:
+        raise NativeTransportError(
+            f"{context} case {index} supplied fields without a native result"
+        )
+    return normalized
+
+
+def _validate_execution_outcome(value: object, index: int) -> dict[str, object]:
+    context = f"native execution adjudication outcome {index}"
+    expected_fields = {
+        "decision", "status", "verdict", "failure_class", "expected_failure",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise NativeTransportError(f"{context} is malformed")
+    decision = value["decision"]
+    status = value["status"]
+    verdict = value["verdict"]
+    failure_class = value["failure_class"]
+    expected_failure = value["expected_failure"]
+    if (not isinstance(decision, str)
+            or decision not in EXECUTION_ADJUDICATION_DECISIONS
+            or not isinstance(status, str)
+            or status not in EXECUTION_ADJUDICATION_STATUSES
+            or not isinstance(verdict, str)
+            or verdict not in EXECUTION_ADJUDICATION_VERDICTS
+            or not isinstance(failure_class, str)
+            or type(expected_failure) is not bool):
+        raise NativeTransportError(f"{context} has invalid values")
+    try:
+        failure_size = len(failure_class.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise NativeTransportError(f"{context} has invalid UTF-8 failure text") from error
+    if failure_size > 64:
+        raise NativeTransportError(f"{context} exceeds the failure-class bound")
+
+    if decision == "assertion_failure":
+        valid_failure = bool(failure_class) and not expected_failure
+    elif decision == "suite_result":
+        valid_failure = not failure_class and not expected_failure
+    elif decision == "expected_failure":
+        valid_failure = (
+            failure_class in EXECUTION_STATUS_VALUES and expected_failure
+        )
+    else:
+        expected_class = {
+            "unknown_status": "infrastructure_failure",
+            "malformed_result": "malformed_test_result",
+            "success": "",
+            "skip": "",
+            "unsupported_returned": "unsupported",
+            "expectation_mismatch": "expectation_mismatch",
+            "unsupported_execution": "unsupported",
+            "timeout": "timeout",
+            "runtime_failure": "runtime_failure",
+            "invalid_request": "malformed_test_declaration",
+        }.get(decision)
+        valid_failure = (
+            failure_class == expected_class and not expected_failure
+        )
+    if not valid_failure:
+        raise NativeTransportError(
+            f"{context} violates its decision contract"
         )
     return value
 
@@ -799,60 +925,9 @@ def run_execution_adjudication(
         )
     normalized: list[dict[str, object]] = []
     for index, case in enumerate(cases):
-        if not isinstance(case, dict):
-            raise NativeTransportError("execution adjudication cases must be objects")
-        if set(case) != {
-            "execution_status", "expected_status", "suite",
-            "native_result_present", "native_verdict", "native_failure_class",
-        }:
-            raise NativeTransportError(
-                f"execution adjudication case {index} has an invalid field set"
-            )
-        execution_status = _bounded_adjudication_text(
-            case["execution_status"], "execution_status",
+        normalized.append(
+            _normalize_execution_case(case, index, "execution adjudication")
         )
-        expected_status = _bounded_adjudication_text(
-            case["expected_status"], "expected_status",
-        )
-        native_verdict = _bounded_adjudication_text(
-            case["native_verdict"], "native_verdict",
-        )
-        native_failure_class = _bounded_adjudication_text(
-            case["native_failure_class"], "native_failure_class",
-        )
-        suite = case["suite"]
-        native_result_present = case["native_result_present"]
-        if type(suite) is not bool or type(native_result_present) is not bool:
-            raise NativeTransportError(
-                f"execution adjudication case {index} has invalid boolean fields"
-            )
-        if expected_status and expected_status not in EXECUTION_STATUS_VALUES:
-            raise NativeTransportError(
-                f"execution adjudication case {index} has an unknown expected status"
-            )
-        if native_result_present:
-            allowed_verdicts = {"PASS", "FAIL", "UNSUPPORTED"}
-            if not suite:
-                allowed_verdicts.add("SKIP")
-            if (execution_status != "returned"
-                    or native_verdict not in allowed_verdicts
-                    or (suite and native_failure_class)
-                    or (not suite and not native_failure_class)):
-                raise NativeTransportError(
-                    f"execution adjudication case {index} has an invalid native result"
-                )
-        elif native_verdict or native_failure_class:
-            raise NativeTransportError(
-                f"execution adjudication case {index} supplied fields without a native result"
-            )
-        normalized.append({
-            "execution_status": execution_status,
-            "expected_status": expected_status,
-            "suite": suite,
-            "native_result_present": native_result_present,
-            "native_verdict": native_verdict,
-            "native_failure_class": native_failure_class,
-        })
     request = {
         "schema_version": EXECUTION_ADJUDICATION_REQUEST_SCHEMA,
         "case_count": len(normalized),
@@ -876,64 +951,85 @@ def run_execution_adjudication(
         raise NativeTransportError(
             "native execution adjudication returned a mismatched result count"
         )
-    for index, value in enumerate(outcomes):
-        if not isinstance(value, dict) or set(value) != {
-            "decision", "status", "verdict", "failure_class", "expected_failure",
+    outcomes = [
+        _validate_execution_outcome(value, index)
+        for index, value in enumerate(outcomes)
+    ]
+    return outcomes
+
+
+def run_process_transport_adjudication(
+    case: dict,
+    execution_case: dict,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> dict[str, object]:
+    """Classify a Test process observation and decoded result in one native call."""
+    fields = {
+        "process_start_failed", "timed_out", "structured_result_present",
+        "nonzero_exit", "diagnostics_present",
+    }
+    if not isinstance(case, dict) or set(case) != fields:
+        raise NativeTransportError("process transport case has an invalid field set")
+    if any(type(case[name]) is not bool for name in fields):
+        raise NativeTransportError("process transport case fields must be booleans")
+    normalized_execution_case = _normalize_execution_case(
+        execution_case, 0, "process transport execution",
+    )
+    native_case = dict(case)
+    native_case["execution_case"] = normalized_execution_case
+    request = {
+        "schema_version": PROCESS_TRANSPORT_ADJUDICATION_REQUEST_SCHEMA,
+        "case": native_case,
+    }
+    result = run_native_app(
+        "test-process-transport-adjudication.json",
+        request,
+        request_schema=PROCESS_TRANSPORT_ADJUDICATION_REQUEST_SCHEMA,
+        result_schema=PROCESS_TRANSPORT_ADJUDICATION_RESULT_SCHEMA,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+    )
+    if set(result) != {
+        "schema_version", "decision", "failure_class", "terminal",
+        "execution_outcome_present", "execution_outcome",
+    } or result.get("schema_version") != PROCESS_TRANSPORT_ADJUDICATION_RESULT_SCHEMA:
+        raise NativeTransportError("native process transport adjudication returned malformed output")
+    decision = result.get("decision")
+    if not isinstance(decision, str) or decision not in PROCESS_TRANSPORT_DECISIONS:
+        raise NativeTransportError("native process transport adjudication returned an unknown decision")
+    failure_class, terminal = PROCESS_TRANSPORT_DECISIONS[decision]
+    if (result.get("failure_class") != failure_class
+            or result.get("terminal") is not terminal):
+        raise NativeTransportError("native process transport adjudication returned inconsistent output")
+    present = result.get("execution_outcome_present")
+    outcome = result.get("execution_outcome")
+    if terminal:
+        if present is not False or outcome != {
+            "decision": "", "status": "", "verdict": "",
+            "failure_class": "", "expected_failure": False,
         }:
             raise NativeTransportError(
-                f"native execution adjudication outcome {index} is malformed"
+                "native process transport adjudication returned an inconsistent terminal result"
             )
-        decision = value["decision"]
-        status = value["status"]
-        verdict = value["verdict"]
-        failure_class = value["failure_class"]
-        expected_failure = value["expected_failure"]
-        if (not isinstance(decision, str)
-                or decision not in EXECUTION_ADJUDICATION_DECISIONS
-                or not isinstance(status, str)
-                or status not in EXECUTION_ADJUDICATION_STATUSES
-                or not isinstance(verdict, str)
-                or verdict not in EXECUTION_ADJUDICATION_VERDICTS
-                or not isinstance(failure_class, str)
-                or type(expected_failure) is not bool):
+        execution_outcome = None
+    else:
+        if present is not True:
             raise NativeTransportError(
-                f"native execution adjudication outcome {index} has invalid values"
+                "native process transport adjudication omitted its execution result"
             )
-        try:
-            failure_size = len(failure_class.encode("utf-8"))
-        except UnicodeEncodeError as error:
-            raise NativeTransportError(
-                f"native execution adjudication outcome {index} has invalid UTF-8 text"
-            ) from error
-        if failure_size > 64:
-            raise NativeTransportError(
-                f"native execution adjudication outcome {index} exceeds the failure-class bound"
-            )
-        if decision == "assertion_failure":
-            valid_failure = bool(failure_class)
-        elif decision == "suite_result":
-            valid_failure = not failure_class and not expected_failure
-        elif decision == "expected_failure":
-            valid_failure = failure_class in EXECUTION_STATUS_VALUES and expected_failure
-        else:
-            expected_class = {
-                "unknown_status": "infrastructure_failure",
-                "malformed_result": "malformed_test_result",
-                "success": "",
-                "skip": "",
-                "unsupported_returned": "unsupported",
-                "expectation_mismatch": "expectation_mismatch",
-                "unsupported_execution": "unsupported",
-                "timeout": "timeout",
-                "runtime_failure": "runtime_failure",
-                "invalid_request": "malformed_test_declaration",
-            }.get(decision)
-            valid_failure = failure_class == expected_class and not expected_failure
-        if not valid_failure:
-            raise NativeTransportError(
-                f"native execution adjudication outcome {index} violates its decision contract"
-            )
-    return outcomes
+        execution_outcome = _validate_execution_outcome(outcome, 0)
+    return {
+        "decision": decision,
+        "failure_class": failure_class,
+        "terminal": terminal,
+        "execution": execution_outcome,
+    }
 
 
 def run_runner_policy(

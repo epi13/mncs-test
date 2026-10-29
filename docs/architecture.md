@@ -82,11 +82,16 @@ native verdict into the established result envelope.
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite
 result policy. Retained-session batches are projected into bounded cases and
-adjudicated in MNCS batches of at most 256. The Python adapter still owns
-process transport, typed-value projection, detailed diagnostics, and the
-public result envelope; it applies the native decision without reclassifying
-the outcome. The subprocess fallback invokes the same application for each
-decoded result. Native application calls, including the obligation-selection
+adjudicated in MNCS batches of at most 256. The subprocess fallback projects
+bounded observations (start failure, timeout, structured-result presence,
+exit status, and diagnostic presence) to
+`mncs.test.process_transport_adjudication_v1`. That application classifies
+the process outcome and, for structured results, delegates to
+`execution_adjudication_v1` in the same native call. The Python adapter keeps
+process creation, typed-value projection, detailed diagnostics, and the public
+result envelope; it renders the native decision while retaining raw
+diagnostics and process artifacts. Native application calls, including the
+obligation-selection
 CLI, share `tools/mncs_test_native.py` for bounded request transport and
 selected-workspace library resolution, so linked worktrees do not depend on
 the original repository path depth.

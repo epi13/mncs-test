@@ -1,0 +1,159 @@
+mncs 0.18;
+
+// Native classification of observations made at the Test process boundary.
+// The host still starts processes and preserves raw diagnostics; this module
+// decides which bounded failure class those observations represent.
+module mncs.test.process_transport_adjudication_v1;
+
+use mncs.std.application.v1;
+use mncs.test.execution_adjudication_v1 as execution;
+
+record ProcessTransportCaseV1 {
+    process_start_failed: bool,
+    timed_out: bool,
+    structured_result_present: bool,
+    nonzero_exit: bool,
+    diagnostics_present: bool,
+    execution_case: execution.ExecutionCaseV1
+}
+
+record ProcessTransportRequestV1 {
+    schema_version: [byte; up_to 64],
+    case: ProcessTransportCaseV1
+}
+
+record ProcessTransportDecisionV1 {
+    decision: [byte; up_to 64],
+    failure_class: [byte; up_to 64],
+    terminal: bool
+}
+
+record ProcessTransportResultV1 {
+    schema_version: [byte; up_to 64],
+    decision: [byte; up_to 64],
+    failure_class: [byte; up_to 64],
+    terminal: bool,
+    execution_outcome_present: bool,
+    execution_outcome: execution.ExecutionOutcomeV1
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 99, 101, 115, 115, 45, 116, 114, 97, 110, 115, 112, 111, 114, 116, 45, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 112, 114, 111, 99, 101, 115, 115, 45, 116, 114, 97, 110, 115, 112, 111, 114, 116, 45, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 47, 50];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        if left[i] != right[i] {
+            return false;
+        }
+        next same = true;
+    }
+    return true;
+}
+
+fn is_request_schema(value: [byte; up_to 64]) -> (result: bool) {
+    return same_bytes(value, request_schema());
+}
+
+fn valid_request(value: ProcessTransportRequestV1) -> (result: bool) {
+    if !is_request_schema(value.schema_version) {
+        return false;
+    }
+    if value.case.process_start_failed
+        || value.case.timed_out
+        || !value.case.structured_result_present {
+        return true;
+    }
+    return execution.valid_case(value.case.execution_case);
+}
+
+fn classify(value: ProcessTransportCaseV1) -> (result: ProcessTransportDecisionV1) {
+    if value.process_start_failed {
+        return ProcessTransportDecisionV1 {
+            decision: [115, 116, 97, 114, 116, 95, 102, 97, 105, 108, 117, 114, 101],
+            failure_class: [105, 110, 102, 114, 97, 115, 116, 114, 117, 99, 116, 117, 114, 101, 95, 102, 97, 105, 108, 117, 114, 101],
+            terminal: true
+        };
+    }
+    if value.timed_out {
+        return ProcessTransportDecisionV1 {
+            decision: [116, 105, 109, 101, 111, 117, 116],
+            failure_class: [116, 105, 109, 101, 111, 117, 116],
+            terminal: true
+        };
+    }
+    if value.structured_result_present {
+        return ProcessTransportDecisionV1 {
+            decision: [99, 111, 110, 116, 105, 110, 117, 101],
+            failure_class: [],
+            terminal: false
+        };
+    }
+    if value.nonzero_exit && value.diagnostics_present {
+        return ProcessTransportDecisionV1 {
+            decision: [99, 111, 109, 112, 105, 108, 101, 95, 102, 97, 105, 108, 117, 114, 101],
+            failure_class: [99, 111, 109, 112, 105, 108, 101, 95, 102, 97, 105, 108, 117, 114, 101],
+            terminal: true
+        };
+    }
+    return ProcessTransportDecisionV1 {
+        decision: [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 114, 101, 115, 117, 108, 116],
+        failure_class: [105, 110, 102, 114, 97, 115, 116, 114, 117, 99, 116, 117, 114, 101, 95, 102, 97, 105, 108, 117, 114, 101],
+        terminal: true
+    };
+}
+
+fn build_result(request: ProcessTransportRequestV1) -> (result: ProcessTransportResultV1) {
+    let outcome: ProcessTransportDecisionV1 = classify(request.case);
+    if outcome.terminal {
+        return ProcessTransportResultV1 {
+            schema_version: result_schema(),
+            decision: outcome.decision,
+            failure_class: outcome.failure_class,
+            terminal: true,
+            execution_outcome_present: false,
+            execution_outcome: execution.ExecutionOutcomeV1 {
+                decision: [],
+                status: [],
+                verdict: [],
+                failure_class: [],
+                expected_failure: false
+            }
+        };
+    }
+    return ProcessTransportResultV1 {
+        schema_version: result_schema(),
+        decision: outcome.decision,
+        failure_class: outcome.failure_class,
+        terminal: false,
+        execution_outcome_present: true,
+        execution_outcome: execution.adjudicate_case(request.case.execution_case)
+    };
+}
+
+fn process_transport_adjudication_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 112, 114, 111, 99, 101, 115, 115, 32, 116, 114, 97, 110, 115, 112, 111, 114, 116, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ProcessTransportRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 112, 114, 111, 99, 101, 115, 115, 32, 116, 114, 97, 110, 115, 112, 111, 114, 116, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let result: ProcessTransportResultV1 = build_result(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([112, 114, 111, 99, 101, 115, 115, 32, 116, 114, 97, 110, 115, 112, 111, 114, 116, 32, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

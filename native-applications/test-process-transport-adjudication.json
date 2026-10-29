@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.process-transport-adjudication",
+  "source": "../native/mncs/test/process_transport_adjudication_v1.mncs",
+  "module": "mncs.test.process_transport_adjudication_v1",
+  "entry_function": "process_transport_adjudication_app_v1",
+  "profile": "0.18",
+  "interface_identity": "bf91956552959ce20e493441083fd41cdedc128bbb42d4cc38a4a0ebafa1a268",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}
