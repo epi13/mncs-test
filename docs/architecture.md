@@ -252,15 +252,17 @@ granularity stands until a compiler contract states otherwise
 
 ## Native digest
 
-`mncs.test.digest` owns the relevance decision for agents: counts fold
-through `mncs.test.suite` (never recomputed), failure rows echo the
-oracle expected/actual/code triple plus source location in test order
-under a `max_failures` bound, omissions are counted, and verdicts are
-never invented. The host projects the documented result schema into a
-`DigestRequest` (mechanical field re-keying; unknown vocabulary fails
-closed) and renders the returned digest as text. Measured on a two-test
-failing suite: 21223-byte result → 1158-byte digest JSON → 322-byte
-text. `bin/mncs-test-digest` is the transport adapter and
+`mncs.test.digest` owns the relevance decision and typed projection for
+agents: `structured_read` validates the bounded `mncs.test-result/1` view,
+including verdict and failure-kind vocabulary; counts fold through
+`mncs.test.suite` (never recomputed); failure rows echo the oracle's
+expected/actual/code triple plus source location in test order under a
+`max_failures` bound; omissions are counted; verdicts are never invented.
+The host wraps the original result, aliases the reserved `scope.module`
+wire key, fills the result schema's optional source-span location with
+zeroes, and renders the native digest as text. Measured on a two-test
+failing suite: 21223-byte result → 1158-byte digest JSON → 322-byte text.
+`bin/mncs-test-digest` is the transport adapter and
 `tools/mncs_test_digest.py` the transport; both are native-first and do
 not import the frozen compatibility oracle.
 

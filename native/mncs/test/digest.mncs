@@ -8,33 +8,18 @@ mncs 0.18;
 // module owns the relevance decision: which rows survive, in what order,
 // under what bound, and whether anything was omitted.
 //
-// The host projects one test-result into a DigestRequest (mechanical field
-// re-keying of the documented result schema, never output parsing) and
-// transports records; every counting, verdict-precedence, row-selection,
-// and truncation decision below is native. The digest never invents
-// verdicts: counts fold through `mncs.test.suite`, and failure rows echo
-// the native oracle's expected/actual/code triple plus source location.
+// The host wraps one test-result document and transports it; this module
+// reads the contract-owned wire view, validates its vocabulary, projects
+// the typed fields, and owns counting, verdict precedence, row selection,
+// and truncation. The digest never invents verdicts: counts fold through
+// `mncs.test.suite`, and failure rows echo the native oracle's
+// expected/actual/code triple plus source location.
 module mncs.test.digest;
 
 use mncs.std.application.v1;
+use mncs.core.sequences.v1 as sequences;
 use mncs.test.assertions;
 use mncs.test.suite;
-
-// One executed-or-skipped test, projected from `mncs.test-result/1`.
-record DigestTest {
-    qualified_name: [byte; up_to 1024],
-    verdict: Verdict,
-    failure_kind: FailureKind,
-    assertions: u64,
-    failures: u64,
-    expected: i64,
-    actual: i64,
-    assertion_code: u64,
-    source: [byte; up_to 1024],
-    line: u64,
-    column: u64,
-    semantic_fingerprint: [byte; up_to 128]
-}
 
 // Run echo: enough provenance to name the execution, not to replay it.
 record DigestRun {
@@ -45,11 +30,58 @@ record DigestRun {
     artifact_identity: [byte; up_to 1024]
 }
 
+// Forward-compatible wire view of `mncs.test-result/1`. The structured
+// artifact reader checks every declared field and type while allowing the
+// result contract to carry additional provenance fields.
+record DigestInputScope {
+    module_name: [byte; up_to 1024],
+    source: [byte; up_to 1024]
+}
+
+record DigestInputExecution {
+    backend: [byte; up_to 128],
+    artifact_identity: [byte; up_to 1024]
+}
+
+record DigestInputSpan {
+    line: u64,
+    column: u64
+}
+
+record DigestInputSemantic {
+    qualified_name: [byte; up_to 1024],
+    semantic_fingerprint: [byte; up_to 128]
+}
+
+record DigestInputNativeResult {
+    verdict: Verdict,
+    failure_kind: [byte; up_to 64],
+    assertions: u64,
+    failures: u64,
+    expected: i64,
+    actual: i64,
+    assertion_code: u64
+}
+
+record DigestInputTest {
+    source: [byte; up_to 1024],
+    source_span: DigestInputSpan,
+    semantic: DigestInputSemantic,
+    native_result: DigestInputNativeResult
+}
+
+record DigestInputDocument {
+    schema_version: [byte; up_to 64],
+    run_id: [byte; up_to 128],
+    scope: DigestInputScope,
+    execution: DigestInputExecution,
+    tests: [DigestInputTest; up_to 256]
+}
+
 record DigestRequest {
     schema_version: [byte; up_to 64],
     max_failures: u64,
-    run: DigestRun,
-    tests: [DigestTest; up_to 256]
+    result: DigestInputDocument
 }
 
 record DigestFailure {
@@ -86,6 +118,100 @@ fn result_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 100, 105, 103, 101, 115, 116, 47, 49];
 }
 
+fn test_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 47, 49];
+}
+
+fn ascii_lower(value: byte) -> (result: byte) {
+    if value >= 65 && value <= 90 {
+        return (value as u64 +% 32) as byte;
+    }
+    return value;
+}
+
+fn ascii_case_equal(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && ascii_lower(left[i]) == ascii_lower(right[i]);
+    }
+    return same;
+}
+
+fn nofailure_name() -> (result: [byte; up_to 64]) {
+    return [110, 111, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn none_name() -> (result: [byte; up_to 64]) {
+    return [110, 111, 110, 101];
+}
+
+fn assertion_name() -> (result: [byte; up_to 64]) {
+    return [97, 115, 115, 101, 114, 116, 105, 111, 110];
+}
+
+fn setup_name() -> (result: [byte; up_to 64]) {
+    return [115, 101, 116, 117, 112];
+}
+
+fn compile_name() -> (result: [byte; up_to 64]) {
+    return [99, 111, 109, 112, 105, 108, 101];
+}
+
+fn runtime_name() -> (result: [byte; up_to 64]) {
+    return [114, 117, 110, 116, 105, 109, 101];
+}
+
+fn timeout_name() -> (result: [byte; up_to 64]) {
+    return [116, 105, 109, 101, 111, 117, 116];
+}
+
+fn unsupported_name() -> (result: [byte; up_to 64]) {
+    return [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100];
+}
+
+fn infrastructure_name() -> (result: [byte; up_to 64]) {
+    return [105, 110, 102, 114, 97, 115, 116, 114, 117, 99, 116, 117, 114, 101];
+}
+
+fn failure_kind_is_valid(value: [byte; up_to 64]) -> (result: bool) {
+    return ascii_case_equal(value, nofailure_name())
+        || ascii_case_equal(value, none_name())
+        || ascii_case_equal(value, assertion_name())
+        || ascii_case_equal(value, setup_name())
+        || ascii_case_equal(value, compile_name())
+        || ascii_case_equal(value, runtime_name())
+        || ascii_case_equal(value, timeout_name())
+        || ascii_case_equal(value, unsupported_name())
+        || ascii_case_equal(value, infrastructure_name());
+}
+
+fn failure_kind_for(value: [byte; up_to 64]) -> (result: FailureKind) {
+    if ascii_case_equal(value, nofailure_name()) || ascii_case_equal(value, none_name()) {
+        return FailureKind.NoFailure;
+    }
+    if ascii_case_equal(value, assertion_name()) {
+        return FailureKind.Assertion;
+    }
+    if ascii_case_equal(value, setup_name()) {
+        return FailureKind.Setup;
+    }
+    if ascii_case_equal(value, compile_name()) {
+        return FailureKind.Compile;
+    }
+    if ascii_case_equal(value, runtime_name()) {
+        return FailureKind.Runtime;
+    }
+    if ascii_case_equal(value, timeout_name()) {
+        return FailureKind.Timeout;
+    }
+    if ascii_case_equal(value, unsupported_name()) {
+        return FailureKind.Unsupported;
+    }
+    return FailureKind.Infrastructure;
+}
+
 fn verdict_code(value: Verdict) -> (result: u64) {
     return match value {
         Verdict.PASS => 0,
@@ -104,30 +230,63 @@ fn verdict_is_fail(value: Verdict) -> (result: bool) {
     };
 }
 
-fn to_result(test: DigestTest) -> (result: TestResult) {
-    return TestResult {
-        verdict: test.verdict,
-        verdict_code: verdict_code(test.verdict),
-        failure_kind: test.failure_kind,
-        failure_code: test.assertion_code,
-        assertions: test.assertions,
-        failures: test.failures,
-        expected: test.expected,
-        actual: test.actual,
-        assertion_code: test.assertion_code
+fn input_test_is_valid(test: DigestInputTest) -> (result: bool) {
+    return test.source.len > 0
+        && test.semantic.qualified_name.len > 0
+        && test.semantic.semantic_fingerprint.len > 0
+        && failure_kind_is_valid(test.native_result.failure_kind);
+}
+
+fn digest_input_is_valid(request: DigestRequest) -> (result: bool) {
+    let document: DigestInputDocument = request.result;
+    if !sequences.equals_byte_view(document.schema_version, test_result_schema())
+        || document.run_id.len == 0
+        || document.scope.module_name.len == 0
+        || document.scope.source.len == 0
+        || document.execution.backend.len == 0
+        || document.execution.artifact_identity.len == 0 {
+        return false;
+    }
+    iterate i over document.tests carrying valid: bool = true {
+        next valid = valid && input_test_is_valid(document.tests[i]);
+    }
+    return valid;
+}
+
+fn to_run(document: DigestInputDocument) -> (result: DigestRun) {
+    return DigestRun {
+        run_id: document.run_id,
+        module_name: document.scope.module_name,
+        source: document.scope.source,
+        backend: document.execution.backend,
+        artifact_identity: document.execution.artifact_identity
     };
 }
 
-fn to_failure(test: DigestTest) -> (result: DigestFailure) {
+fn to_result(test: DigestInputTest) -> (result: TestResult) {
+    return TestResult {
+        verdict: test.native_result.verdict,
+        verdict_code: verdict_code(test.native_result.verdict),
+        failure_kind: failure_kind_for(test.native_result.failure_kind),
+        failure_code: test.native_result.assertion_code,
+        assertions: test.native_result.assertions,
+        failures: test.native_result.failures,
+        expected: test.native_result.expected,
+        actual: test.native_result.actual,
+        assertion_code: test.native_result.assertion_code
+    };
+}
+
+fn to_failure(test: DigestInputTest) -> (result: DigestFailure) {
     return DigestFailure {
-        qualified_name: test.qualified_name,
-        expected: test.expected,
-        actual: test.actual,
-        assertion_code: test.assertion_code,
+        qualified_name: test.semantic.qualified_name,
+        expected: test.native_result.expected,
+        actual: test.native_result.actual,
+        assertion_code: test.native_result.assertion_code,
         source: test.source,
-        line: test.line,
-        column: test.column,
-        semantic_fingerprint: test.semantic_fingerprint
+        line: test.source_span.line,
+        column: test.source_span.column,
+        semantic_fingerprint: test.semantic.semantic_fingerprint
     };
 }
 
@@ -155,8 +314,8 @@ fn builder_empty() -> (result: DigestBuilder) {
 // Row admission: failures arrive in test order; the first `cap` rows are
 // retained and every further failure is counted as omitted, never dropped
 // silently. `cap` is already clamped to the row bound by the caller.
-fn builder_push(builder: DigestBuilder, test: DigestTest, cap: u64) -> (result: DigestBuilder) {
-    if !verdict_is_fail(test.verdict) {
+fn builder_push(builder: DigestBuilder, test: DigestInputTest, cap: u64) -> (result: DigestBuilder) {
+    if !verdict_is_fail(test.native_result.verdict) {
         return builder;
     }
     if builder.length < cap {
@@ -186,12 +345,12 @@ fn clamp_cap(max_failures: u64) -> (result: u64) {
 
 fn build_digest(request: DigestRequest) -> (result: DigestResult) {
     let cap: u64 = clamp_cap(request.max_failures);
-    iterate i over request.tests carrying summary: SuiteSummary = empty() {
-        next summary = observe(summary, to_result(request.tests[i]));
+    iterate i over request.result.tests carrying summary: SuiteSummary = empty() {
+        next summary = observe(summary, to_result(request.result.tests[i]));
     }
     let folded: SuiteSummary = summary;
-    iterate j over request.tests carrying builder: DigestBuilder = builder_empty() {
-        next builder = builder_push(builder, request.tests[j], cap);
+    iterate j over request.result.tests carrying builder: DigestBuilder = builder_empty() {
+        next builder = builder_push(builder, request.result.tests[j], cap);
     }
     return DigestResult {
         schema_version: result_schema(),
@@ -199,7 +358,7 @@ fn build_digest(request: DigestRequest) -> (result: DigestResult) {
         failures: builder_finish(builder),
         failure_rows: folded.failed,
         failures_omitted: builder.omitted,
-        run: request.run
+        run: to_run(request.result)
     };
 }
 
@@ -212,6 +371,9 @@ fn digest_app(context: ApplicationContext) -> (result: ApplicationExit)
         return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 100, 105, 103, 101, 115, 116, 32, 112, 97, 116, 104, 115], 2);
     }
     let request: DigestRequest = structured_read(context.argv[0], request_schema());
+    if !digest_input_is_valid(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 32, 100, 105, 103, 101, 115, 116, 32, 105, 110, 112, 117, 116], 4);
+    }
     let result: DigestResult = build_digest(request);
     let published: u64 = structured_write(context.argv[1], result_schema(), result);
     if published == 0 {

@@ -12,12 +12,19 @@ sys.path.insert(0, str(ROOT / "tools"))
 from mncs_test_digest import (
     DigestError,
     evaluate_digest,
-    project_digest_request,
     render_digest_text,
 )
 
-LANGUAGE_ROOT = ROOT.parent / "mncs-language"
-COMMONS_ROOT = ROOT.parent / "MNCS-Commons"
+WORKSPACE_ROOT = next(
+    (
+        candidate
+        for candidate in (ROOT.parent, ROOT.parent.parent, ROOT.parent.parent.parent)
+        if (candidate / "mncs-language").is_dir()
+    ),
+    ROOT.parent,
+)
+LANGUAGE_ROOT = WORKSPACE_ROOT / "mncs-language"
+COMMONS_ROOT = WORKSPACE_ROOT / "MNCS-Commons"
 MNCS = Path(os.environ.get("MNCS_BINARY", LANGUAGE_ROOT / "target/debug/mncs"))
 
 
@@ -26,7 +33,7 @@ def _stdlib_library() -> Path:
     explicit = os.environ.get("MNCS_STDLIB_ROOT")
     if explicit:
         return Path(explicit) / "library"
-    sibling = ROOT.parent / "mncs-stdlib"
+    sibling = WORKSPACE_ROOT / "mncs-stdlib"
     if (sibling / "stdlib-manifest.json").is_file():
         return sibling / "library"
     return LANGUAGE_ROOT / "library"
@@ -91,18 +98,15 @@ def make_result(entries: list[dict]) -> dict:
 
 
 def test_digest_counts_fold_through_the_native_suite(tmp_path: Path) -> None:
-    request = project_digest_request(
-        make_result(
-            [
-                make_entry("s::wrong", "FAIL", "assertion", 43, 42, 2001, 5),
-                make_entry("s::right", "PASS", "nofailure", 42, 42, 2002, 8),
-                make_entry("s::later", "SKIP", "nofailure", 0, 0, 0, 11),
-            ]
-        ),
-        max_failures=8,
+    result = make_result(
+        [
+            make_entry("s::wrong", "FAIL", "assertion", 43, 42, 2001, 5),
+            make_entry("s::right", "PASS", "nofailure", 42, 42, 2002, 8),
+            make_entry("s::later", "SKIP", "nofailure", 0, 0, 0, 11),
+        ]
     )
     digest = evaluate_digest(
-        request, mncs=str(MNCS), cwd=tmp_path, environment=compiler_environment()
+        result, max_failures=8, mncs=str(MNCS), cwd=tmp_path, environment=compiler_environment()
     )
     assert digest["schema_version"] == "mncs.test-digest/1"
     summary = digest["summary"]
@@ -118,17 +122,14 @@ def test_digest_counts_fold_through_the_native_suite(tmp_path: Path) -> None:
 
 
 def test_digest_truncation_counts_omissions_without_changing_the_verdict(tmp_path: Path) -> None:
-    request = project_digest_request(
-        make_result(
-            [
-                make_entry("s::wrong", "FAIL", "assertion", 43, 42, 2001, 5),
-                make_entry("s::alsowrong", "FAIL", "assertion", 1, 2, 2002, 9),
-            ]
-        ),
-        max_failures=1,
+    result = make_result(
+        [
+            make_entry("s::wrong", "FAIL", "assertion", 43, 42, 2001, 5),
+            make_entry("s::alsowrong", "FAIL", "ASSERTION", 1, 2, 2002, 9),
+        ]
     )
     digest = evaluate_digest(
-        request, mncs=str(MNCS), cwd=tmp_path, environment=compiler_environment()
+        result, max_failures=1, mncs=str(MNCS), cwd=tmp_path, environment=compiler_environment()
     )
     assert digest["summary"]["verdict"] == "FAIL"
     assert digest["failure_rows"] == 2
@@ -137,17 +138,33 @@ def test_digest_truncation_counts_omissions_without_changing_the_verdict(tmp_pat
     assert row["qualified_name"] == "s::wrong"
 
 
-def test_digest_rejects_unknown_result_vocabulary() -> None:
+def test_digest_rejects_unknown_result_vocabulary(tmp_path: Path) -> None:
+    environment = compiler_environment()
     with pytest.raises(DigestError):
-        project_digest_request(
-            make_result([make_entry("s::weird", "MAYBE", "nofailure", 0, 0, 0, 1)])
+        evaluate_digest(
+            make_result([make_entry("s::weird", "MAYBE", "nofailure", 0, 0, 0, 1)]),
+            mncs=str(MNCS), cwd=tmp_path, environment=environment,
         )
     with pytest.raises(DigestError):
-        project_digest_request(
-            make_result([make_entry("s::weird", "FAIL", "cosmic-ray", 0, 0, 0, 1)])
+        evaluate_digest(
+            make_result([make_entry("s::weird", "FAIL", "cosmic-ray", 0, 0, 0, 1)]),
+            mncs=str(MNCS), cwd=tmp_path, environment=environment,
         )
     with pytest.raises(DigestError):
-        project_digest_request({"schema_version": "mncs.test-result/0"})
+        evaluate_digest(
+            {"schema_version": "mncs.test-result/0"},
+            mncs=str(MNCS), cwd=tmp_path, environment=environment,
+        )
+
+
+def test_digest_defaults_optional_source_span_to_zero(tmp_path: Path) -> None:
+    result = make_result([make_entry("s::wrong", "FAIL", "assertion", 43, 42, 2001, 5)])
+    result["tests"][0].pop("source_span")
+    digest = evaluate_digest(
+        result, mncs=str(MNCS), cwd=tmp_path, environment=compiler_environment()
+    )
+    (row,) = digest["failures"]
+    assert (row["line"], row["column"]) == (0, 0)
 
 
 def test_rendered_digest_names_every_failure_compactly() -> None:

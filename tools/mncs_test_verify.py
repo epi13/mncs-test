@@ -58,7 +58,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mncs_test_digest import (  # noqa: E402
     DigestError,
     evaluate_digest,
-    project_digest_request,
     render_digest_text,
 )
 from mncs_test_native import NativeTransportError, run_native_app  # noqa: E402
@@ -2306,9 +2305,8 @@ def finish_execution(
         stats["subprocesses"] += 1
         stats["digest_runs"] += 1
         try:
-            request = project_digest_request(result, max_failures=max_failures)
             digest = evaluate_digest(
-                request, mncs=mncs, cwd=repo,
+                result, max_failures=max_failures, mncs=mncs, cwd=repo,
                 environment=inventory_environment(dict(os.environ), world["libraries"]),
             )
         except (DigestError, VerifyError, NativeTransportError) as error:

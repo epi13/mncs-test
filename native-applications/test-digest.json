@@ -5,7 +5,7 @@
   "module": "mncs.test.digest",
   "entry_function": "digest_app",
   "profile": "0.18",
-  "interface_identity": "163c7d94048802aefad74c678e16b5bc51b0371eaad89b007f5ae8fbc884b9db",
+  "interface_identity": "17f610099b19e5372143cf765bc52b82a2e4cd4999796cecd6be9fe61693c387",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native",
