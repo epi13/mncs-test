@@ -584,6 +584,7 @@ class RunnerTests(unittest.TestCase):
             document = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(document["verdict"], "PASS")
             self.assertEqual(document["tests"][0]["status"], "expected_failure")
+            self.assertEqual(document["tests"][0]["compile_verdict"], "expected_failure")
             self.assertTrue(document["tests"][0]["diagnostics"])
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -606,6 +607,51 @@ class RunnerTests(unittest.TestCase):
             document = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(document["verdict"], "PASS")
             self.assertEqual(document["tests"][0]["status"], "passed")
+            self.assertEqual(document["tests"][0]["compile_verdict"], "compile_pass")
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_compile_expectation_mismatch_is_reported(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-compile-mismatch-") as directory:
+            result = Path(directory) / "result.json"
+            completed = self.invoke(
+                "run",
+                "--manifest",
+                "tests/fixtures/compile-unexpected-success.toml",
+                *self.live_args(),
+                "--result",
+                str(result),
+                "--check-result",
+                str(Path(directory) / "check.json"),
+                "--artifacts",
+                str(Path(directory) / "artifacts"),
+            )
+            self.assertEqual(completed.returncode, 1, completed.stdout)
+            document = json.loads(result.read_text(encoding="utf-8"))
+            item = document["tests"][0]
+            self.assertEqual(item["compile_verdict"], "compile_expectation_mismatch")
+            self.assertEqual(item["failure"]["class"], "compile_expectation_mismatch")
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_compile_failure_is_reported_for_compile_pass_expectation(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-compile-failure-") as directory:
+            result = Path(directory) / "result.json"
+            completed = self.invoke(
+                "run",
+                "--manifest",
+                "tests/fixtures/compile-unexpected-failure.toml",
+                *self.live_args(),
+                "--result",
+                str(result),
+                "--check-result",
+                str(Path(directory) / "check.json"),
+                "--artifacts",
+                str(Path(directory) / "artifacts"),
+            )
+            self.assertEqual(completed.returncode, 4, completed.stdout)
+            document = json.loads(result.read_text(encoding="utf-8"))
+            item = document["tests"][0]
+            self.assertEqual(item["compile_verdict"], "compile_failure")
+            self.assertEqual(item["failure"]["class"], "compile_failure")
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_expected_runtime_failure(self):

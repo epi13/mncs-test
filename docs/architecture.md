@@ -72,11 +72,12 @@ per-test executable dispatch. The toolchain then calls native
 summary. If the native toolchain is not available, the command fails closed.
 A legacy manifest retains its behavior only through `mncs-test-compat`.
 
-Compile-only entries invoke `mncs validate`. A compile-fail or diagnostic
-entry passes only when the compiler rejects the source and the MNCS application
-`mncs.test.diagnostic_match_v1` finds every declared prefix in the structured
-diagnostic codes. The host adapter forwards bounded code records and validates
-the native result; it does not decide which prefixes match.
+Compile-only entries invoke `mncs validate`. The MNCS application
+`mncs.test.compile_verdict_v1` owns the pass, expected-failure,
+expectation-mismatch, diagnostic-mismatch, and compiler-failure decisions for
+compile-pass, compile-fail, and diagnostic entries. The host adapter carries
+the raw process exit code and bounded structured compiler fields, then maps the
+native verdict into the established result envelope.
 
 The result has two layers:
 

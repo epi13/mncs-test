@@ -42,7 +42,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.2"
+RUNNER_VERSION = "0.2.3"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -53,14 +53,14 @@ VERIFICATION_COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
 VERIFICATION_COHERENCE_MAX_OBLIGATIONS = 32
 VERIFICATION_COHERENCE_MAX_IDENTITIES = 64
 VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
-DIAGNOSTIC_MATCH_REQUEST_SCHEMA = "mncs.test-diagnostic-match-request/1"
-DIAGNOSTIC_MATCH_RESULT_SCHEMA = "mncs.test-diagnostic-match/1"
-DIAGNOSTIC_MATCH_EXPECTED_BATCH = 16
-DIAGNOSTIC_MATCH_ACTUAL_BATCH = 32
+COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
+COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
+COMPILE_VERDICT_EXPECTED_BATCH = 16
+COMPILE_VERDICT_ACTUAL_BATCH = 32
 MAX_DIAGNOSTIC_CODE_BYTES = 512
-MAX_DIAGNOSTIC_MATCH_PAIRS = 65_536
-MAX_DIAGNOSTIC_MATCH_CALLS = 64
-MAX_DIAGNOSTIC_EXPECTATIONS = DIAGNOSTIC_MATCH_EXPECTED_BATCH * MAX_DIAGNOSTIC_MATCH_CALLS
+MAX_COMPILE_VERDICT_PAIRS = 65_536
+MAX_COMPILE_VERDICT_CALLS = 64
+MAX_DIAGNOSTIC_EXPECTATIONS = COMPILE_VERDICT_EXPECTED_BATCH * MAX_COMPILE_VERDICT_CALLS
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -310,20 +310,31 @@ def diagnostic_list(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-def native_diagnostic_matches(
+def native_compile_verdict(
     diagnostics: Iterable[dict[str, Any]],
     expected: list[str],
     *,
+    compiler_exit_code: int,
+    compiler_result_is_object: bool,
+    valid_field_present: bool,
+    valid_field_is_true: bool,
+    expects_failure: bool,
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
-) -> bool:
-    """Carry structured diagnostic codes to the native Test matcher."""
+) -> str:
+    """Carry compiler fields to MNCS and return its compile-only verdict."""
+    if type(compiler_exit_code) is not int:
+        raise AdapterError("compiler exit status is not an integer")
+    if any(type(value) is not bool for value in (
+        compiler_result_is_object, valid_field_present, valid_field_is_true, expects_failure,
+    )):
+        raise AdapterError("compiler result metadata is malformed")
     if len(expected) > MAX_DIAGNOSTIC_EXPECTATIONS:
-        raise AdapterError("diagnostic matching exceeds the bounded native invocation limit")
+        raise AdapterError("compile verdict exceeds the bounded native invocation limit")
 
     expected_codes: list[str] = []
-    for item in expected:
+    for item in (expected if expects_failure else []):
         if not isinstance(item, str):
             raise ManifestError("diagnostic expectations must be text prefixes")
         try:
@@ -335,11 +346,11 @@ def native_diagnostic_matches(
             raise ManifestError("diagnostic expectations must be valid UTF-8") from error
         expected_codes.append(item)
     expected_batch_count = (
-        len(expected_codes) + DIAGNOSTIC_MATCH_EXPECTED_BATCH - 1
-    ) // DIAGNOSTIC_MATCH_EXPECTED_BATCH
+        len(expected_codes) + COMPILE_VERDICT_EXPECTED_BATCH - 1
+    ) // COMPILE_VERDICT_EXPECTED_BATCH
     expected_batch_count = max(1, expected_batch_count)
-    if expected_batch_count > MAX_DIAGNOSTIC_MATCH_CALLS:
-        raise AdapterError("diagnostic matching exceeds the bounded native invocation limit")
+    if expected_batch_count > MAX_COMPILE_VERDICT_CALLS:
+        raise AdapterError("compile verdict exceeds the bounded native invocation limit")
 
     def bounded_code(item: dict[str, Any]) -> str:
         try:
@@ -351,7 +362,9 @@ def native_diagnostic_matches(
         # native record bounded.
         return raw[:MAX_DIAGNOSTIC_CODE_BYTES].decode("utf-8", errors="ignore")
 
-    if not expected_codes:
+    if not expects_failure:
+        actual_codes: list[str] = []
+    elif not expected_codes:
         # The native policy only asks whether a diagnostic exists in this
         # case, so forwarding one real diagnostic keeps the request bounded.
         absent = object()
@@ -360,37 +373,44 @@ def native_diagnostic_matches(
     else:
         actual_codes: list[str] = []
         maximum_actual_codes = (
-            MAX_DIAGNOSTIC_MATCH_CALLS // expected_batch_count
-        ) * DIAGNOSTIC_MATCH_ACTUAL_BATCH
+            MAX_COMPILE_VERDICT_CALLS // expected_batch_count
+        ) * COMPILE_VERDICT_ACTUAL_BATCH
         for item in diagnostics:
             if len(actual_codes) >= maximum_actual_codes:
                 raise AdapterError(
-                    "diagnostic matching exceeds the bounded native invocation limit"
+                    "compile verdict exceeds the bounded native invocation limit"
                 )
             actual_codes.append(bounded_code(item))
 
-    if len(expected_codes) * len(actual_codes) > MAX_DIAGNOSTIC_MATCH_PAIRS:
-        raise AdapterError("diagnostic matching exceeds the bounded native comparison limit")
+    if len(expected_codes) * len(actual_codes) > MAX_COMPILE_VERDICT_PAIRS:
+        raise AdapterError("compile verdict exceeds the bounded native comparison limit")
 
     expected_batches = [
-        expected_codes[index:index + DIAGNOSTIC_MATCH_EXPECTED_BATCH]
-        for index in range(0, len(expected_codes), DIAGNOSTIC_MATCH_EXPECTED_BATCH)
+        expected_codes[index:index + COMPILE_VERDICT_EXPECTED_BATCH]
+        for index in range(0, len(expected_codes), COMPILE_VERDICT_EXPECTED_BATCH)
     ] or [[]]
     actual_batches = [
-        actual_codes[index:index + DIAGNOSTIC_MATCH_ACTUAL_BATCH]
-        for index in range(0, len(actual_codes), DIAGNOSTIC_MATCH_ACTUAL_BATCH)
+        actual_codes[index:index + COMPILE_VERDICT_ACTUAL_BATCH]
+        for index in range(0, len(actual_codes), COMPILE_VERDICT_ACTUAL_BATCH)
     ] or [[]]
-    if len(expected_batches) * len(actual_batches) > MAX_DIAGNOSTIC_MATCH_CALLS:
-        raise AdapterError("diagnostic matching exceeds the bounded native invocation limit")
+    if len(expected_batches) * len(actual_batches) > MAX_COMPILE_VERDICT_CALLS:
+        raise AdapterError("compile verdict exceeds the bounded native invocation limit")
 
     all_expected_before = True
+    final_verdict: str | None = None
     for expected_batch in expected_batches:
-        matched_before = [False] * DIAGNOSTIC_MATCH_EXPECTED_BATCH
+        matched_before = [False] * COMPILE_VERDICT_EXPECTED_BATCH
         diagnostics_seen_before = False
         final_match: bool | None = None
+        batch_verdict: str | None = None
         for actual_batch in actual_batches:
             request = {
-                "schema_version": DIAGNOSTIC_MATCH_REQUEST_SCHEMA,
+                "schema_version": COMPILE_VERDICT_REQUEST_SCHEMA,
+                "compiler_exit_code": compiler_exit_code,
+                "compiler_result_is_object": compiler_result_is_object,
+                "valid_field_present": valid_field_present,
+                "valid_field_is_true": valid_field_is_true,
+                "expects_failure": expects_failure,
                 "expected_count": len(expected_batch),
                 "expected": [{"value": item} for item in expected_batch],
                 "actual_count": len(actual_batch),
@@ -401,17 +421,17 @@ def native_diagnostic_matches(
             }
             try:
                 result = run_native_app(
-                    "test-diagnostic-match.json",
+                    "test-compile-verdict.json",
                     request,
-                    request_schema=DIAGNOSTIC_MATCH_REQUEST_SCHEMA,
-                    result_schema=DIAGNOSTIC_MATCH_RESULT_SCHEMA,
+                    request_schema=COMPILE_VERDICT_REQUEST_SCHEMA,
+                    result_schema=COMPILE_VERDICT_RESULT_SCHEMA,
                     mncs=mncs,
                     cwd=cwd,
                     environment=environment,
                     step_budget=1_048_576,
                 )
             except NativeTransportError as error:
-                raise AdapterError(f"native diagnostic matching failed: {error}") from error
+                raise AdapterError(f"native compile verdict failed: {error}") from error
 
             returned_count = result.get("expected_count")
             returned_matches = result.get("matched")
@@ -421,19 +441,31 @@ def native_diagnostic_matches(
                 type(returned_count) is not int
                 or returned_count != len(expected_batch)
                 or not isinstance(returned_matches, list)
-                or len(returned_matches) != DIAGNOSTIC_MATCH_EXPECTED_BATCH
+                or len(returned_matches) != COMPILE_VERDICT_EXPECTED_BATCH
                 or any(type(value) is not bool for value in returned_matches)
                 or type(returned_all) is not bool
                 or type(returned_seen) is not bool
             ):
-                raise AdapterError("native diagnostic matcher returned malformed decisions")
+                raise AdapterError("MNCS compile-verdict app returned malformed state")
+            verdict = result.get("verdict")
+            if not isinstance(verdict, str) or verdict not in {
+                "compile_pass", "expected_failure", "compile_expectation_mismatch",
+                "diagnostic_mismatch", "compile_failure",
+            }:
+                raise AdapterError("MNCS compile-verdict app returned an unknown verdict")
             matched_before = returned_matches
             diagnostics_seen_before = returned_seen
             final_match = returned_all
+            batch_verdict = verdict
         if final_match is None:
-            raise AdapterError("native diagnostic matcher returned no batch decision")
+            raise AdapterError("MNCS compile-verdict app returned no batch decision")
+        if batch_verdict is None:
+            raise AdapterError("MNCS compile-verdict app returned no verdict")
         all_expected_before = final_match
-    return all_expected_before
+        final_verdict = batch_verdict
+    if final_verdict is None:
+        raise AdapterError("MNCS compile-verdict app returned no verdict")
+    return final_verdict
 
 
 def parse_json_output(stdout: bytes) -> Any:
@@ -1904,44 +1936,55 @@ def compile_entry(
     diagnostics = diagnostic_list(decoded)
     test_result["process_exit_code"] = process["returncode"]
     test_result["diagnostics"] = diagnostics
-    passed_compile = process["returncode"] == 0 and (
-        isinstance(decoded, dict) and decoded.get("valid") is True
-        or isinstance(decoded, dict) and "valid" not in decoded
-    )
     kind = test["kind"]
-    if kind in {"compile-fail", "diagnostic"}:
-        if passed_compile:
-            return result_failure(
-                test_result,
-                failure_class="compile_expectation_mismatch",
-                message="source compiled but the manifest expected a diagnostic",
-            )
-        expected_codes = list(test.get("diagnostic_codes", []))
-        if not native_diagnostic_matches(
-            diagnostics,
-            expected_codes,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
-        ):
-            return result_failure(
-                test_result,
-                failure_class="diagnostic_mismatch",
-                message="compiler diagnostics did not match the manifest",
-                expected_codes=expected_codes,
-                observed_codes=[str(item.get("code", "")) for item in diagnostics],
-            )
+    expects_failure = kind in {"compile-fail", "diagnostic"}
+    expected_codes = list(test.get("diagnostic_codes", [])) if expects_failure else []
+    if type(process["returncode"]) is not int:
+        raise AdapterError("MNCS validation returned no process exit status")
+    compiler_result_is_object = isinstance(decoded, dict)
+    valid_field_present = compiler_result_is_object and "valid" in decoded
+    valid_field_is_true = compiler_result_is_object and decoded.get("valid") is True
+    native_verdict = native_compile_verdict(
+        diagnostics,
+        expected_codes,
+        compiler_exit_code=process["returncode"],
+        compiler_result_is_object=compiler_result_is_object,
+        valid_field_present=valid_field_present,
+        valid_field_is_true=valid_field_is_true,
+        expects_failure=expects_failure,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    test_result["compile_verdict"] = native_verdict
+    if native_verdict == "expected_failure":
         test_result["status"] = "expected_failure"
         test_result["verdict"] = "PASS"
         test_result["expected_failure"] = True
         return test_result
-    if passed_compile:
+    if native_verdict == "compile_pass":
         test_result["status"] = "passed"
         test_result["verdict"] = "PASS"
         return test_result
+    if native_verdict == "compile_expectation_mismatch":
+        return result_failure(
+            test_result,
+            failure_class=native_verdict,
+            message="source compiled but the manifest expected a diagnostic",
+        )
+    if native_verdict == "diagnostic_mismatch":
+        return result_failure(
+            test_result,
+            failure_class=native_verdict,
+            message="compiler diagnostics did not match the manifest",
+            expected_codes=expected_codes,
+            observed_codes=[str(item.get("code", "")) for item in diagnostics],
+        )
+    if native_verdict != "compile_failure":
+        raise AdapterError("MNCS compile verdict is not recognized by the Test adapter")
     return result_failure(
         test_result,
-        failure_class="compile_failure",
+        failure_class=native_verdict,
         message="source did not compile",
         diagnostics=diagnostics,
     )
@@ -2659,7 +2702,7 @@ def _verify_repository_obligation_identities(
             "declared_dependencies": local_invalidation,
             "external_executor_libraries": external_invalidation,
         })
-        verifier = executor.get("verifier_identity") or "mncs-test-runner/0.2.1"
+        verifier = executor.get("verifier_identity") or f"mncs-test-runner/{RUNNER_VERSION}"
         executor_identity = _digest_identity({
             "provider": executor.get("provider"),
             "kind": executor.get("kind"),

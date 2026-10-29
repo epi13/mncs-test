@@ -73,10 +73,11 @@ diagnostic_codes = ["MNE"]
 
 Compile-pass, compile-fail, diagnostic, malformed-source, and profile-refusal
 cases remain external manifest-addressable experiments because their source
-is intentionally invalid or is not an executable test declaration. They are
-still represented as bounded RFC 0034 observations and use structured
-diagnostic fields (code, stage, severity, and span), not human-readable prose
-matching.
+is intentionally invalid or is not an executable test declaration. The native
+`mncs.test.compile_verdict_v1` application decides compile success and
+expected-diagnostic outcomes from the exit status and structured diagnostic
+codes. These cases remain bounded RFC 0034 observations and never match
+human-readable compiler prose.
 
 For an expected runtime trap, use `kind = "runtime-failure"` and
 `expected_status = "runtime_failure"`. This documents intent and prevents an

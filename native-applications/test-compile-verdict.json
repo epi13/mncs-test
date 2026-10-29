@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.compile-verdict",
+  "source": "../native/mncs/test/compile_verdict_v1.mncs",
+  "module": "mncs.test.compile_verdict_v1",
+  "entry_function": "compile_verdict_app_v1",
+  "profile": "0.18",
+  "interface_identity": "c6032e6a89b66404f14cb7286daead9aa9f53a1b51f8f72e70cfee68b692f923",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

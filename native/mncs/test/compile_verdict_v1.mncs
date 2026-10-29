@@ -1,0 +1,199 @@
+mncs 0.18;
+
+module mncs.test.compile_verdict_v1;
+
+use mncs.std.application.v1;
+
+record DiagnosticCodeV1 {
+    value: [byte; up_to 512]
+}
+
+record CompileVerdictRequestV1 {
+    schema_version: [byte; up_to 64],
+    compiler_exit_code: i64,
+    compiler_result_is_object: bool,
+    valid_field_present: bool,
+    valid_field_is_true: bool,
+    expects_failure: bool,
+    expected_count: u64,
+    expected: [DiagnosticCodeV1; up_to 16],
+    actual_count: u64,
+    actual: [DiagnosticCodeV1; up_to 32],
+    matched_before: [bool; 16],
+    all_expected_before: bool,
+    diagnostics_seen_before: bool
+}
+
+record CompileVerdictResultV1 {
+    schema_version: [byte; up_to 64],
+    expected_count: u64,
+    matched: [bool; 16],
+    all_matched: bool,
+    diagnostics_seen: bool,
+    verdict: [byte; up_to 64]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 111, 109, 112, 105, 108, 101, 45, 118, 101, 114, 100, 105, 99, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 111, 109, 112, 105, 108, 101, 45, 118, 101, 114, 100, 105, 99, 116, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn has_prefix(actual: [byte; up_to 512], expected: [byte; up_to 512]) -> (result: bool) {
+    if expected.len == 0 {
+        return true;
+    }
+    if expected.len > actual.len {
+        return false;
+    }
+    iterate i over expected carrying same: bool = true {
+        next same = same && actual[i] == expected[i];
+    }
+    return same;
+}
+
+fn expected_has_actual_prefix(
+    request: CompileVerdictRequestV1,
+    expected_index: u64
+) -> (result: bool) {
+    let expected: DiagnosticCodeV1 = request.expected[expected_index];
+    iterate i over request.actual carrying found: bool = false {
+        let actual: DiagnosticCodeV1 = request.actual[i];
+        let matched: bool = i < request.actual_count && has_prefix(actual.value, expected.value);
+        next found = found || matched;
+    }
+    return found;
+}
+
+fn update_matches(request: CompileVerdictRequestV1) -> (result: [bool; 16]) {
+    iterate i over request.expected carrying matches: [bool; 16] = request.matched_before {
+        let matched: bool = matches[i] || expected_has_actual_prefix(request, i);
+        next matches = replace(matches, i, matched);
+    }
+    return matches;
+}
+
+fn all_expected_matched(matches: [bool; 16], count: u64) -> (result: bool) {
+    iterate i over matches carrying all: bool = true {
+        next all = all && (i >= count || matches[i]);
+    }
+    return all;
+}
+
+fn batch_matches(
+    matches: [bool; 16],
+    count: u64,
+    diagnostics_seen: bool
+) -> (result: bool) {
+    if count == 0 {
+        return diagnostics_seen;
+    }
+    return all_expected_matched(matches, count);
+}
+
+fn compiler_succeeded(request: CompileVerdictRequestV1) -> (result: bool) {
+    if request.compiler_exit_code != 0 || !request.compiler_result_is_object {
+        return false;
+    }
+    if request.valid_field_present && !request.valid_field_is_true {
+        return false;
+    }
+    return true;
+}
+
+fn verdict_compile_pass() -> (result: [byte; up_to 64]) {
+    return [99, 111, 109, 112, 105, 108, 101, 95, 112, 97, 115, 115];
+}
+
+fn verdict_expected_failure() -> (result: [byte; up_to 64]) {
+    return [101, 120, 112, 101, 99, 116, 101, 100, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn verdict_compile_expectation_mismatch() -> (result: [byte; up_to 64]) {
+    return [99, 111, 109, 112, 105, 108, 101, 95, 101, 120, 112, 101, 99, 116, 97, 116, 105, 111, 110, 95, 109, 105, 115, 109, 97, 116, 99, 104];
+}
+
+fn verdict_diagnostic_mismatch() -> (result: [byte; up_to 64]) {
+    return [100, 105, 97, 103, 110, 111, 115, 116, 105, 99, 95, 109, 105, 115, 109, 97, 116, 99, 104];
+}
+
+fn verdict_compile_failure() -> (result: [byte; up_to 64]) {
+    return [99, 111, 109, 112, 105, 108, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn compile_verdict(
+    request: CompileVerdictRequestV1,
+    all_matched: bool
+) -> (result: [byte; up_to 64]) {
+    let succeeded: bool = compiler_succeeded(request);
+    if request.expects_failure {
+        if succeeded {
+            return verdict_compile_expectation_mismatch();
+        }
+        if all_matched {
+            return verdict_expected_failure();
+        }
+        return verdict_diagnostic_mismatch();
+    }
+    if succeeded {
+        return verdict_compile_pass();
+    }
+    return verdict_compile_failure();
+}
+
+fn evaluate(request: CompileVerdictRequestV1) -> (result: CompileVerdictResultV1) {
+    let matches: [bool; 16] = update_matches(request);
+    let diagnostics_seen: bool = request.diagnostics_seen_before || request.actual_count > 0;
+    let current_batch_matches: bool = batch_matches(
+        matches,
+        request.expected_count,
+        diagnostics_seen
+    );
+    let all_matched: bool = request.all_expected_before && current_batch_matches;
+    return CompileVerdictResultV1 {
+        schema_version: result_schema(),
+        expected_count: request.expected_count,
+        matched: matches,
+        all_matched: all_matched,
+        diagnostics_seen: diagnostics_seen,
+        verdict: compile_verdict(request, all_matched)
+    };
+}
+
+fn compile_verdict_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 99, 111, 109, 112, 105, 108, 101, 32, 118, 101, 114, 100, 105, 99, 116, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: CompileVerdictRequestV1 = structured_read(context.argv[0], request_schema());
+    if !same_bytes(request.schema_version, request_schema()) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 99, 111, 109, 112, 105, 108, 101, 32, 118, 101, 114, 100, 105, 99, 116, 32, 114, 101, 113, 117, 101, 115, 116, 32, 115, 99, 104, 101, 109, 97], 3);
+    }
+    if request.expected_count != request.expected.len
+        || request.expected_count > 16
+        || request.actual_count != request.actual.len
+        || request.actual_count > 32 {
+        return failure([99, 111, 109, 112, 105, 108, 101, 32, 118, 101, 114, 100, 105, 99, 116, 32, 99, 111, 117, 110, 116, 32, 109, 105, 115, 109, 97, 116, 99, 104], 4);
+    }
+    let result: CompileVerdictResultV1 = evaluate(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([99, 111, 109, 112, 105, 108, 101, 32, 118, 101, 114, 100, 105, 99, 116, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 4);
+    }
+    return success([]);
+}
