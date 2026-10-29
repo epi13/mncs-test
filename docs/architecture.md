@@ -91,19 +91,19 @@ CLI, share `tools/mncs_test_native.py` for bounded request transport and
 selected-workspace library resolution, so linked worktrees do not depend on
 the original repository path depth.
 
-`mncs.test.inventory_filter_v1` owns substring filtering over the Test
+`mncs.test.inventory_filter_v2` owns substring filtering over the Test
 inventory. The adapter prepares the runner's existing searchable fields and
 projects native-selected indices back to their records. Candidate and filter
-batches are bounded at 16, and each native record carries at most 1024 UTF-8
-bytes. Longer candidate text is split into overlapping bounded windows, sized
-from the longest filter in the current batch, so every possible full
-substring match remains inside a native record. The MNCS kernel searches only
-valid starting offsets and rejects endpoint mismatches before comparing a
-full substring. The adapter estimates work from those endpoint matches, splits
-expensive batches before execution, and caps each selection at 64 native calls.
-Filters over 1024 bytes, a single pair that still exceeds the native step
-budget, and plans that exceed the call limit retain the prior host filter as
-an explicit, reported fallback.
+batches are bounded at 16. Each MNCS request scans a complete search text up to
+8192 UTF-8 bytes and filters up to 1024 bytes; the host no longer splits long
+candidate text into overlapping windows. The MNCS kernel directly scans
+matches contained in each part and checks only starts that cross a part
+boundary, while rejecting endpoint mismatches before a full comparison. The
+adapter estimates scan and request-decoding work, splits expensive batches
+before execution, and caps each selection at 64 native calls.
+Search text over 8192 bytes, filters over 1024 bytes, a single pair that still
+exceeds the native step budget, and plans that exceed the call limit retain the
+prior host filter as an explicit, reported fallback.
 
 `mncs.test.exact_identity_selection_v2` owns matching family-check compiler
 test identities against the current inventory. The adapter retains sorted

@@ -76,7 +76,7 @@ def test_native_inventory_filter_matches_independent_reference(tmp_path: Path) -
     assert result["filter_count"] == len(filters)
 
 
-def test_native_inventory_filter_searches_long_unicode_text_with_overlapping_windows(
+def test_native_inventory_filter_searches_full_long_unicode_text(
     tmp_path: Path,
 ) -> None:
     search_texts = [
@@ -88,11 +88,11 @@ def test_native_inventory_filter_searches_long_unicode_text_with_overlapping_win
     result = _select(tmp_path, search_texts, filters)
 
     assert result["selected_indices"] == _reference(search_texts, filters) == [0]
-    assert result["calls"] == 1
+    assert result["calls"] == 2
     assert result["case_count"] == 2
 
 
-def test_native_inventory_filter_keeps_the_full_maximum_filter_overlap(
+def test_native_inventory_filter_matches_maximum_length_filter(
     tmp_path: Path,
 ) -> None:
     search_texts = ["a" * 1024 + "b"]
@@ -174,7 +174,7 @@ def test_runner_uses_adaptive_native_batches_for_endpoint_mismatches(
     tmp_path: Path,
 ) -> None:
     tests = [{"id": "a" * 1000, "entry": ""} for _ in range(16)]
-    filters = ["a" * 900 + "b"] * 16
+    filters = ["a" * 899 + chr(ord("b") + index) + "b" for index in range(16)]
     summary: dict[str, object] = {}
 
     selected = mncs_test.select_tests(
@@ -188,12 +188,12 @@ def test_runner_uses_adaptive_native_batches_for_endpoint_mismatches(
     )
 
     assert selected == []
-    assert summary["authority"] == "mncs.test.inventory_filter_v1"
+    assert summary["authority"] == "mncs.test.inventory_filter_v2"
     assert summary["status"] == "returned"
-    assert summary["calls"] == 2
+    assert summary["calls"] == 16
 
 
-def test_runner_routes_long_inventory_text_through_native_windows(
+def test_runner_routes_long_inventory_text_through_native_segments(
     tmp_path: Path,
 ) -> None:
     tests = [
@@ -213,7 +213,7 @@ def test_runner_routes_long_inventory_text_through_native_windows(
     )
 
     assert selected == [tests[0]]
-    assert summary["authority"] == "mncs.test.inventory_filter_v1"
+    assert summary["authority"] == "mncs.test.inventory_filter_v2"
     assert summary["status"] == "returned"
     assert summary["calls"] == 1
     assert summary["case_count"] == len(tests)
@@ -241,15 +241,16 @@ def test_runner_reports_host_fallback_when_native_call_limit_is_exceeded(
     assert summary["fallback_reason"] == "native_batch_call_limit_exceeded"
 
 
-def test_runner_rejects_excessive_long_text_window_plans_before_execution(
+def test_runner_rejects_cross_product_native_call_plan_before_execution(
     tmp_path: Path,
 ) -> None:
-    tests = [{"id": "x" * 70_000, "entry": ""}]
+    tests = [{"id": f"record-{index}", "entry": ""} for index in range(65)]
+    filters = ["record"] * 1025
     summary: dict[str, object] = {}
 
     selected = mncs_test.select_tests(
         tests,
-        ["x" * 1024],
+        filters,
         mncs="not-invoked-for-excessive-window-plan",
         cwd=tmp_path,
         environment={},
@@ -302,3 +303,51 @@ def test_runner_reports_host_fallback_for_native_work_estimate(tmp_path: Path) -
     assert selected == []
     assert summary["status"] == "host_fallback_work_estimate"
     assert summary["fallback_reason"] == "estimated_work_exceeds_native_step_budget"
+
+
+def test_native_inventory_filter_scans_text_at_8192_byte_bound(
+    tmp_path: Path,
+) -> None:
+    search_text = ("x" * 8186) + "needle"
+    assert len(search_text.encode("utf-8")) == 8192
+
+    result = _select(tmp_path, [search_text], ["needle"])
+
+    assert result["selected_indices"] == [0]
+    assert result["calls"] == 1
+
+
+def test_native_inventory_filter_matches_across_utf8_part_boundary(
+    tmp_path: Path,
+) -> None:
+    search_text = ("x" * 4095) + "é" + ("y" * 4000)
+    assert len(search_text.encode("utf-8")) == 8097
+
+    result = _select(tmp_path, [search_text], ["xé"])
+
+    assert result["selected_indices"] == [0]
+    assert result["calls"] == 1
+
+
+def test_runner_preserves_long_search_text_with_explicit_host_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test = {"id": "x" * 8193, "entry": "needle"}
+    summary: dict[str, object] = {}
+    monkeypatch.setattr(
+        mncs_test_native,
+        "run_native_app",
+        lambda *args, **kwargs: pytest.fail("overbound search text must fall back before native execution"),
+    )
+
+    selected = mncs_test.select_tests(
+        [test], ["needle"], mncs=str(MNCS), cwd=tmp_path,
+        environment=_environment(), timeout_seconds=120,
+        selection_summary=summary,
+    )
+
+    assert selected == [test]
+    assert summary["authority"] == "mncs-test.python_filter_fallback"
+    assert summary["requested_native_authority"] == "mncs.test.inventory_filter_v2"
+    assert summary["status"] == "host_fallback_input_bound"
+    assert summary["fallback_reason"] == "input_exceeds_native_8192_byte_bound"

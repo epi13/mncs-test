@@ -292,10 +292,12 @@ EXECUTION_STATUS_VALUES = frozenset({
     "returned", "runtime_failure", "unsupported", "budget_exhausted", "invalid_request",
 })
 
-INVENTORY_FILTER_REQUEST_SCHEMA = "mncs.test-inventory-filter-request/1"
-INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/1"
+INVENTORY_FILTER_REQUEST_SCHEMA = "mncs.test-inventory-filter-request/2"
+INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/2"
 INVENTORY_FILTER_BATCH_SIZE = 16
-INVENTORY_FILTER_TEXT_MAX_BYTES = 1024
+INVENTORY_FILTER_FILTER_MAX_BYTES = 1024
+INVENTORY_FILTER_SEARCH_TEXT_MAX_BYTES = 8192
+INVENTORY_FILTER_SEARCH_TEXT_PART_MAX_BYTES = 4096
 INVENTORY_FILTER_ESTIMATED_WORK_MAX = 65_536
 INVENTORY_FILTER_MAX_NATIVE_CALLS = 64
 EXACT_IDENTITY_SELECTION_REQUEST_SCHEMA = "mncs.test-exact-identity-selection-request/2"
@@ -382,11 +384,17 @@ def run_test_inventory_filter(
     candidate_sources = [
         checked_text_size(value, "search text") for value in search_texts
     ]
+    for _, size in candidate_sources:
+        if size > INVENTORY_FILTER_SEARCH_TEXT_MAX_BYTES:
+            raise NativeInputBoundError(
+                "Test inventory search text exceeds the native 8192-byte bound",
+                reason="input_exceeds_native_8192_byte_bound",
+            )
     normalized_filters: list[str] = []
     encoded_filters: list[bytes] = []
     for value in filters:
         text, size = checked_text_size(value, "filter")
-        if size > INVENTORY_FILTER_TEXT_MAX_BYTES:
+        if size > INVENTORY_FILTER_FILTER_MAX_BYTES:
             raise NativeInputBoundError(
                 "Test inventory filter exceeds the native 1024-byte bound",
                 reason="input_exceeds_native_1024_byte_bound",
@@ -399,40 +407,40 @@ def run_test_inventory_filter(
         for offset in range(0, len(filter_entries), INVENTORY_FILTER_BATCH_SIZE)
     ] or [[]]
 
-    def window_count(candidate_bytes: int, max_filter_bytes: int) -> int:
-        if candidate_bytes <= INVENTORY_FILTER_TEXT_MAX_BYTES or max_filter_bytes == 0:
-            return 1
-        stride = INVENTORY_FILTER_TEXT_MAX_BYTES - max_filter_bytes + 1
-        return (
-            candidate_bytes - INVENTORY_FILTER_TEXT_MAX_BYTES + stride - 1
-        ) // stride + 1
-
-    window_plans: list[tuple[list[tuple[str, bytes]], int]] = []
-    base_call_count = 0
-    for filter_batch in filter_batches:
-        max_filter_bytes = max((len(needle) for _, needle in filter_batch), default=0)
-        candidate_window_count = sum(
-            window_count(candidate_bytes, max_filter_bytes)
-            for _, candidate_bytes in candidate_sources
-        )
-        batch_count = (
-            candidate_window_count + INVENTORY_FILTER_BATCH_SIZE - 1
-        ) // INVENTORY_FILTER_BATCH_SIZE
-        base_call_count += batch_count
-        if base_call_count > INVENTORY_FILTER_MAX_NATIVE_CALLS:
-            raise NativeInputBoundError(
-                "Test inventory selection would exceed its bounded native call count",
-                reason="native_batch_call_limit_exceeded",
-            )
-        window_plans.append((filter_batch, max_filter_bytes))
-
     encoded_texts = [text.encode("utf-8") for text, _ in candidate_sources]
-    selected_indices: set[int] = set()
-    planned_calls: list[tuple[list[tuple[int, str, bytes]], list[tuple[str, bytes]]]] = []
-    estimated_pair_work: dict[tuple[bytes, bytes], int] = {}
 
-    def estimate_pair_work(haystack: bytes, needle: bytes) -> int:
-        cache_key = (haystack, needle)
+    def segmented_search_text(encoded_text: bytes) -> dict[str, object]:
+        parts: list[dict[str, str]] = []
+        offset = 0
+        while offset < len(encoded_text):
+            end = min(
+                offset + INVENTORY_FILTER_SEARCH_TEXT_PART_MAX_BYTES,
+                len(encoded_text),
+            )
+            if end < len(encoded_text):
+                while end > offset and encoded_text[end] & 0xC0 == 0x80:
+                    end -= 1
+            if end <= offset:
+                raise NativeTransportError(
+                    "Test inventory search text could not be split at a UTF-8 boundary"
+                )
+            parts.append({"bytes": encoded_text[offset:end].decode("utf-8")})
+            offset = end
+        return {
+            "byte_count": len(encoded_text),
+            "part_count": len(parts),
+            "parts": parts,
+        }
+
+    native_search_texts = [segmented_search_text(text) for text in encoded_texts]
+    selected_indices: set[int] = set()
+    planned_calls: list[
+        tuple[list[tuple[int, dict[str, object], bytes, int]], list[tuple[str, bytes]]]
+    ] = []
+    estimated_pair_work: dict[tuple[bytes, bytes, int], int] = {}
+
+    def estimate_pair_work(haystack: bytes, needle: bytes, part_count: int) -> int:
+        cache_key = (haystack, needle, part_count)
         cached = estimated_pair_work.get(cache_key)
         if cached is not None:
             return cached
@@ -445,20 +453,32 @@ def run_test_inventory_filter(
                 and haystack[start + len(needle) - 1] == needle[-1]
                 for start in range(starts)
             )
-            # Each valid start pays for the range iteration and endpoint checks.
-            # Only endpoint matches enter the full needle comparison loop.
-            work = 4 * starts + endpoint_hits * len(needle)
+            # Account for repeated scan work and request decoding. Each start
+            # pays for branch and endpoint checks; only starts near a segment
+            # seam traverse the part list. Candidate bytes and filter bytes
+            # also consume the VM budget while the structured request is read.
+            boundary_starts = min(
+                starts,
+                max(0, len(needle) - 1) * max(0, part_count - 1),
+            )
+            work = (
+                7 * starts
+                + len(haystack)
+                + 2 * len(needle)
+                + 2 * boundary_starts * (part_count - 1)
+                + endpoint_hits * len(needle) * part_count
+            )
         estimated_pair_work[cache_key] = work
         return work
 
     def plan_batch(
-        candidates: list[tuple[int, str, bytes]],
+        candidates: list[tuple[int, dict[str, object], bytes, int]],
         patterns: list[tuple[str, bytes]],
     ) -> None:
         estimated_work = 0
-        for _, _, haystack in candidates:
+        for _, _, haystack, part_count in candidates:
             for _, needle in patterns:
-                estimated_work += estimate_pair_work(haystack, needle)
+                estimated_work += estimate_pair_work(haystack, needle, part_count)
                 if estimated_work > INVENTORY_FILTER_ESTIMATED_WORK_MAX:
                     break
             if estimated_work > INVENTORY_FILTER_ESTIMATED_WORK_MAX:
@@ -485,31 +505,13 @@ def run_test_inventory_filter(
         plan_batch(candidates, patterns[:midpoint])
         plan_batch(candidates, patterns[midpoint:])
 
-    for filter_batch, max_filter_bytes in window_plans:
-        candidate_entries: list[tuple[int, str, bytes]] = []
-        stride = INVENTORY_FILTER_TEXT_MAX_BYTES - max_filter_bytes + 1
-        for index, ((text, _), encoded_text) in enumerate(
-            zip(candidate_sources, encoded_texts, strict=True)
-        ):
-            if len(encoded_text) <= INVENTORY_FILTER_TEXT_MAX_BYTES:
-                candidate_entries.append((index, text, encoded_text))
-                continue
-            if max_filter_bytes == 0:
-                window = encoded_text[:INVENTORY_FILTER_TEXT_MAX_BYTES]
-                window_text = window.decode("utf-8", errors="ignore")
-                candidate_entries.append((index, window_text, window_text.encode("utf-8")))
-                continue
-            offset = 0
-            while True:
-                window = encoded_text[offset:offset + INVENTORY_FILTER_TEXT_MAX_BYTES]
-                # Byte windows can meet inside a multibyte character. Dropping
-                # only the partial boundary characters preserves any complete
-                # UTF-8 filter occurrence, which the overlap keeps in a window.
-                window_text = window.decode("utf-8", errors="ignore")
-                candidate_entries.append((index, window_text, window_text.encode("utf-8")))
-                if offset + INVENTORY_FILTER_TEXT_MAX_BYTES >= len(encoded_text):
-                    break
-                offset += stride
+    candidate_entries = [
+        (index, native_search_text, encoded_text, len(native_search_text["parts"]))
+        for index, (native_search_text, encoded_text) in enumerate(
+            zip(native_search_texts, encoded_texts, strict=True)
+        )
+    ]
+    for filter_batch in filter_batches:
         for offset in range(0, len(candidate_entries), INVENTORY_FILTER_BATCH_SIZE):
             plan_batch(
                 candidate_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE],
@@ -522,7 +524,7 @@ def run_test_inventory_filter(
             "candidate_count": len(candidate_batch),
             "candidates": [
                 {"test_index": index, "search_text": value}
-                for index, value, _ in candidate_batch
+                for index, value, _, _ in candidate_batch
             ],
             "filter_count": len(filter_batch),
             "filters": [pattern for pattern, _ in filter_batch],
@@ -544,7 +546,7 @@ def run_test_inventory_filter(
             raise NativeTransportError(
                 "native Test inventory filter returned a mismatched result count"
             )
-        allowed_indices = {index for index, _, _ in candidate_batch}
+        allowed_indices = {index for index, _, _, _ in candidate_batch}
         for index in indices:
             if type(index) is not int or index not in allowed_indices:
                 raise NativeTransportError(

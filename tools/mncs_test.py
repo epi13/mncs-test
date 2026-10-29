@@ -4274,9 +4274,9 @@ def select_tests(
             timeout_seconds=timeout_seconds,
         )
     except NativeInputBoundError as error:
-        # MNCS filter records admit 1024 UTF-8 bytes. Preserve the legacy
-        # behavior for longer filter terms and report the host fallback
-        # instead of silently claiming native selection.
+        # MNCS v2 bounds search text at 8192 bytes and filter terms at 1024.
+        # Preserve the legacy behavior beyond either input bound and report
+        # the host fallback instead of claiming native selection.
         selected_tests = []
         if not filters:
             selected_tests = tests
@@ -4286,11 +4286,14 @@ def select_tests(
                     selected_tests.append(test)
         selection_summary.update({
             "authority": "mncs-test.python_filter_fallback",
-            "requested_native_authority": "mncs.test.inventory_filter_v1",
+            "requested_native_authority": "mncs.test.inventory_filter_v2",
             "mode": "substring_any",
             "status": (
                 "host_fallback_input_bound"
-                if error.reason == "input_exceeds_native_1024_byte_bound"
+                if error.reason in {
+                    "input_exceeds_native_1024_byte_bound",
+                    "input_exceeds_native_8192_byte_bound",
+                }
                 else "host_fallback_call_limit"
                 if error.reason == "native_batch_call_limit_exceeded"
                 else "host_fallback_work_estimate"
@@ -4308,7 +4311,7 @@ def select_tests(
     if not isinstance(indices, list):
         raise ManifestError("native Test inventory filter returned malformed selection indices")
     selection_summary.update({
-        "authority": "mncs.test.inventory_filter_v1",
+        "authority": "mncs.test.inventory_filter_v2",
         "mode": "substring_any",
         "status": "returned" if selected["calls"] else "not_run",
         "calls": selected["calls"],

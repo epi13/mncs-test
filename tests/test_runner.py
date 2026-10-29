@@ -431,7 +431,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(
                 document["execution"]["native_selection"],
                 {
-                    "authority": "mncs.test.inventory_filter_v1",
+                    "authority": "mncs.test.inventory_filter_v2",
                     "mode": "substring_any",
                     "status": "returned",
                     "calls": 1,

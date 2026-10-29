@@ -1,11 +1,11 @@
 {
   "schema_version": "mncs.native-application/1",
   "application_identity": "mncs-test.inventory-filter",
-  "source": "../native/mncs/test/inventory_filter_v1.mncs",
-  "module": "mncs.test.inventory_filter_v1",
-  "entry_function": "inventory_filter_app_v1",
-  "profile": "0.18",
-  "interface_identity": "d0769b49c20f731913e8ce6058acd1b9f4e72066668076af04f02647cd906148",
+  "source": "../native/mncs/test/inventory_filter_v2.mncs",
+  "module": "mncs.test.inventory_filter_v2",
+  "entry_function": "inventory_filter_app_v2",
+  "profile": "0.19",
+  "interface_identity": "b6b65187b97546c2f08002de4c2b6329ade76cb7571ca6570d82f936cb793d44",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
