@@ -32,6 +32,7 @@ from family_contract import (
     validate_obligation_plan,
     validate_plan,
 )
+from mncs_test_native import NativeTransportError, run_runner_policy
 
 RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
@@ -1796,25 +1797,47 @@ def compile_entry(
     )
 
 
-def classification_for_failure(failure_class: str) -> str:
-    if failure_class in {"assertion", "expectation_mismatch", "diagnostic_mismatch", "compile_expectation_mismatch"}:
-        return "test_failure"
-    if failure_class in {"runtime_failure"}:
-        return "runtime_failure"
-    if failure_class in {"setup"}:
-        return "setup_failure"
-    if failure_class in {"compile_failure", "diagnostic_mismatch"}:
-        return "compile_failure"
-    if failure_class == "timeout":
-        return "timeout"
-    if failure_class == "unsupported":
-        return "unsupported"
-    if failure_class in {"malformed_test_declaration", "malformed_test_result", "infrastructure_failure"}:
-        return "infrastructure_failure"
-    return "test_failure"
+def native_runner_policy(
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    failure_class: str | None = None,
+    classification: str | None = None,
+    allow_unsupported: bool = False,
+) -> tuple[str, int]:
+    """Run the Test-owned MNCS classification and exit policy."""
+    try:
+        return run_runner_policy(
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            failure_class=failure_class,
+            classification=classification,
+            allow_unsupported=allow_unsupported,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native runner policy failed: {error}") from error
 
 
-def exit_code_for(classification: str, *, allow_unsupported: bool = False) -> int:
+def classification_for_failure(
+    failure_class: str,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str:
+    classification, _exit_code = native_runner_policy(
+        failure_class=failure_class,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    return classification
+
+
+def bootstrap_exit_code_for(classification: str, *, allow_unsupported: bool = False) -> int:
+    """Map only early failures that occur before the native policy can run."""
     if classification == "success":
         return EXIT_SUCCESS
     if classification == "test_failure" or classification in {"runtime_failure", "setup_failure"}:
@@ -3312,6 +3335,7 @@ def make_result(
     source_text: str,
     mncs: str,
     cwd: Path,
+    environment: dict[str, str],
     library_paths: list[Path],
     artifacts: ArtifactStore,
     test_results: list[dict[str, Any]],
@@ -3330,6 +3354,13 @@ def make_result(
     obligation_plan_ref: dict[str, Any] | None = None,
     obligation_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _resolved_classification, result_exit_code = native_runner_policy(
+        classification=classification,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        allow_unsupported=allow_unsupported,
+    )
     source_path = Path(manifest["source_path"])
     if suite_summary is not None:
         summary = {
@@ -3473,7 +3504,7 @@ def make_result(
         "verdict": verdict,
         "classification": classification,
         "failure_class": failure_class,
-        "exit_code": exit_code_for(classification, allow_unsupported=allow_unsupported),
+        "exit_code": result_exit_code,
         "run_id": run_id,
         "scope": {
             "manifest": str(manifest["name"]),
@@ -3597,7 +3628,7 @@ def minimal_result(*, classification: str, message: str, cwd: Path) -> dict[str,
         "verdict": "UNKNOWN" if classification in {"invalid_invocation", "unsupported", "infrastructure_failure"} else "FAIL",
         "classification": classification,
         "failure_class": classification,
-        "exit_code": exit_code_for(classification),
+        "exit_code": bootstrap_exit_code_for(classification),
         "run_id": sha256_bytes(message.encode()),
         "scope": {"manifest": None, "cwd": str(cwd)},
         "summary": {"total": 0, "passed": 0, "failed": 0, "skipped": 0, "unsupported": 0, "authority": "adapter"},
@@ -4434,13 +4465,17 @@ def run_manifest(args: argparse.Namespace) -> int:
         failure_details: dict[str, Any] | None = None
         if inventory_failure:
             failure_class = inventory_failure["class"]
-            classification = classification_for_failure(failure_class)
+            classification = classification_for_failure(
+                failure_class, mncs=mncs, cwd=cwd, environment=environment,
+            )
             message = inventory_failure["message"]
             failure_details = inventory_failure.get("details")
         if suite_result and suite_result.get("failure"):
             failure = suite_result["failure"]
             failure_class = str(failure.get("class", "infrastructure_failure"))
-            classification = classification_for_failure(failure_class)
+            classification = classification_for_failure(
+                failure_class, mncs=mncs, cwd=cwd, environment=environment,
+            )
             message = str(failure.get("message", "native suite failed"))
         elif suite_summary is not None:
             suite_verdict = external_verdict(suite_summary["verdict"])
@@ -4472,7 +4507,9 @@ def run_manifest(args: argparse.Namespace) -> int:
                 if item.get("verdict") == "FAIL":
                     failure = item.get("failure", {})
                     failure_class = str(failure.get("class", "test_failure"))
-                    classification = classification_for_failure(failure_class)
+                    classification = classification_for_failure(
+                        failure_class, mncs=mncs, cwd=cwd, environment=environment,
+                    )
                     message = str(failure.get("message", "test failed"))
                     break
                 if item.get("verdict") == "UNKNOWN":
@@ -4527,6 +4564,7 @@ def run_manifest(args: argparse.Namespace) -> int:
             source_text=source_text,
             mncs=mncs,
             cwd=cwd,
+            environment=environment,
             library_paths=library_paths,
             artifacts=artifacts,
             test_results=test_results,

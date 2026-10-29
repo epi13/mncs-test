@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.runner-policy",
+  "source": "../native/mncs/test/runner.mncs",
+  "module": "mncs.test.runner",
+  "entry_function": "runner_policy_app",
+  "profile": "0.18",
+  "interface_identity": "f89d3e12a83a72cef93ce17825ad25213fb52e36eb060fe8f6afac9b659289fe",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native",
+    "../../MNCS-Commons/src/mncs_commons/mesh/mncs"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

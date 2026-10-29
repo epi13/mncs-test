@@ -1,4 +1,4 @@
-mncs 0.16;
+mncs 0.18;
 
 // mncs.test.runner — the canonical execution-policy vocabulary.
 //
@@ -7,6 +7,8 @@ mncs 0.16;
 // makes the native path and its no-fallback rule data, rather than an
 // undocumented convention in a host launcher.
 module mncs.test.runner;
+
+use mncs.std.application.v1;
 
 enum ExecutionMode { NativeCanonical, NativeShadow, HostCompatibility }
 
@@ -30,4 +32,270 @@ fn is_native(policy: Policy) -> (result: bool) {
         NativeShadow => !policy.fallback_allowed && policy.host_subprocesses == 0,
         HostCompatibility => false
     };
+}
+
+enum ResultClassification {
+    Success,
+    TestFailure,
+    RuntimeFailure,
+    SetupFailure,
+    InvalidInvocation,
+    InfrastructureFailure,
+    CompileFailure,
+    Timeout,
+    Unsupported
+}
+
+record RunnerPolicyRequest {
+    schema_version: [byte; up_to 64],
+    failure_class: [byte; up_to 128],
+    classification: [byte; up_to 128],
+    classification_override: bool,
+    allow_unsupported: bool
+}
+
+record RunnerPolicyResult {
+    schema_version: [byte; up_to 64],
+    classification: [byte; up_to 128],
+    exit_code: u64
+}
+
+fn runner_name_success() -> (result: [byte; up_to 128]) {
+    return [115, 117, 99, 99, 101, 115, 115];
+}
+
+fn runner_name_test_failure() -> (result: [byte; up_to 128]) {
+    return [116, 101, 115, 116, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn runner_name_runtime_failure() -> (result: [byte; up_to 128]) {
+    return [114, 117, 110, 116, 105, 109, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn runner_name_setup_failure() -> (result: [byte; up_to 128]) {
+    return [115, 101, 116, 117, 112, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn runner_name_setup() -> (result: [byte; up_to 128]) {
+    return [115, 101, 116, 117, 112];
+}
+
+fn runner_name_invalid_invocation() -> (result: [byte; up_to 128]) {
+    return [105, 110, 118, 97, 108, 105, 100, 95, 105, 110, 118, 111, 99, 97, 116, 105, 111, 110];
+}
+
+fn runner_name_infrastructure_failure() -> (result: [byte; up_to 128]) {
+    return [105, 110, 102, 114, 97, 115, 116, 114, 117, 99, 116, 117, 114, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn runner_name_compile_failure() -> (result: [byte; up_to 128]) {
+    return [99, 111, 109, 112, 105, 108, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn runner_name_timeout() -> (result: [byte; up_to 128]) {
+    return [116, 105, 109, 101, 111, 117, 116];
+}
+
+fn runner_name_unsupported() -> (result: [byte; up_to 128]) {
+    return [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100];
+}
+
+fn runner_name_assertion() -> (result: [byte; up_to 128]) {
+    return [97, 115, 115, 101, 114, 116, 105, 111, 110];
+}
+
+fn runner_name_expectation_mismatch() -> (result: [byte; up_to 128]) {
+    return [101, 120, 112, 101, 99, 116, 97, 116, 105, 111, 110, 95, 109, 105, 115, 109, 97, 116, 99, 104];
+}
+
+fn runner_name_diagnostic_mismatch() -> (result: [byte; up_to 128]) {
+    return [100, 105, 97, 103, 110, 111, 115, 116, 105, 99, 95, 109, 105, 115, 109, 97, 116, 99, 104];
+}
+
+fn runner_name_compile_expectation_mismatch() -> (result: [byte; up_to 128]) {
+    return [99, 111, 109, 112, 105, 108, 101, 95, 101, 120, 112, 101, 99, 116, 97, 116, 105, 111, 110, 95, 109, 105, 115, 109, 97, 116, 99, 104];
+}
+
+fn runner_name_malformed_test_declaration() -> (result: [byte; up_to 128]) {
+    return [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 116, 101, 115, 116, 95, 100, 101, 99, 108, 97, 114, 97, 116, 105, 111, 110];
+}
+
+fn runner_name_malformed_test_result() -> (result: [byte; up_to 128]) {
+    return [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 116, 101, 115, 116, 95, 114, 101, 115, 117, 108, 116];
+}
+
+fn runner_request_schema() -> (result: [byte; up_to 128]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn runner_result_schema() -> (result: [byte; up_to 128]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 47, 49];
+}
+
+fn runner_bytes_equal_64(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn runner_bytes_equal_128(left: [byte; up_to 128], right: [byte; up_to 128]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn runner_classify_failure(failure_class: [byte; up_to 128]) -> (result: ResultClassification) {
+    if runner_bytes_equal_128(failure_class, runner_name_assertion())
+        || runner_bytes_equal_128(failure_class, runner_name_expectation_mismatch())
+        || runner_bytes_equal_128(failure_class, runner_name_diagnostic_mismatch())
+        || runner_bytes_equal_128(failure_class, runner_name_compile_expectation_mismatch()) {
+        return ResultClassification.TestFailure;
+    }
+    if runner_bytes_equal_128(failure_class, runner_name_runtime_failure()) {
+        return ResultClassification.RuntimeFailure;
+    }
+    if runner_bytes_equal_128(failure_class, runner_name_setup()) {
+        return ResultClassification.SetupFailure;
+    }
+    if runner_bytes_equal_128(failure_class, runner_name_compile_failure()) {
+        return ResultClassification.CompileFailure;
+    }
+    if runner_bytes_equal_128(failure_class, runner_name_timeout()) {
+        return ResultClassification.Timeout;
+    }
+    if runner_bytes_equal_128(failure_class, runner_name_unsupported()) {
+        return ResultClassification.Unsupported;
+    }
+    if runner_bytes_equal_128(failure_class, runner_name_malformed_test_declaration())
+        || runner_bytes_equal_128(failure_class, runner_name_malformed_test_result())
+        || runner_bytes_equal_128(failure_class, runner_name_infrastructure_failure()) {
+        return ResultClassification.InfrastructureFailure;
+    }
+    return ResultClassification.TestFailure;
+}
+
+fn runner_classify_text(classification: [byte; up_to 128]) -> (result: ResultClassification) {
+    if runner_bytes_equal_128(classification, runner_name_success()) {
+        return ResultClassification.Success;
+    }
+    if runner_bytes_equal_128(classification, runner_name_test_failure()) {
+        return ResultClassification.TestFailure;
+    }
+    if runner_bytes_equal_128(classification, runner_name_runtime_failure()) {
+        return ResultClassification.RuntimeFailure;
+    }
+    if runner_bytes_equal_128(classification, runner_name_setup_failure()) {
+        return ResultClassification.SetupFailure;
+    }
+    if runner_bytes_equal_128(classification, runner_name_invalid_invocation()) {
+        return ResultClassification.InvalidInvocation;
+    }
+    if runner_bytes_equal_128(classification, runner_name_infrastructure_failure()) {
+        return ResultClassification.InfrastructureFailure;
+    }
+    if runner_bytes_equal_128(classification, runner_name_compile_failure()) {
+        return ResultClassification.CompileFailure;
+    }
+    if runner_bytes_equal_128(classification, runner_name_timeout()) {
+        return ResultClassification.Timeout;
+    }
+    if runner_bytes_equal_128(classification, runner_name_unsupported()) {
+        return ResultClassification.Unsupported;
+    }
+    return ResultClassification.InfrastructureFailure;
+}
+
+fn runner_classification_name(classification: ResultClassification) -> (result: [byte; up_to 128]) {
+    return match classification {
+        ResultClassification.Success => runner_name_success(),
+        ResultClassification.TestFailure => runner_name_test_failure(),
+        ResultClassification.RuntimeFailure => runner_name_runtime_failure(),
+        ResultClassification.SetupFailure => runner_name_setup_failure(),
+        ResultClassification.InvalidInvocation => runner_name_invalid_invocation(),
+        ResultClassification.InfrastructureFailure => runner_name_infrastructure_failure(),
+        ResultClassification.CompileFailure => runner_name_compile_failure(),
+        ResultClassification.Timeout => runner_name_timeout(),
+        ResultClassification.Unsupported => runner_name_unsupported()
+    };
+}
+
+fn runner_exit_code(classification: ResultClassification, allow_unsupported: bool) -> (result: u64) {
+    return match classification {
+        ResultClassification.Success => 0,
+        ResultClassification.TestFailure => 1,
+        ResultClassification.RuntimeFailure => 1,
+        ResultClassification.SetupFailure => 1,
+        ResultClassification.InvalidInvocation => 2,
+        ResultClassification.InfrastructureFailure => 3,
+        ResultClassification.CompileFailure => 4,
+        ResultClassification.Timeout => 5,
+        ResultClassification.Unsupported => runner_unsupported_exit_code(allow_unsupported)
+    };
+}
+
+fn runner_unsupported_exit_code(allow_unsupported: bool) -> (result: u64) {
+    if allow_unsupported {
+        return 0;
+    }
+    return 6;
+}
+
+fn runner_selected_classification(request: RunnerPolicyRequest) -> (result: ResultClassification) {
+    if request.classification_override {
+        return runner_classify_text(request.classification);
+    }
+    return runner_classify_failure(request.failure_class);
+}
+
+fn runner_published_classification(
+    request: RunnerPolicyRequest,
+    classification: ResultClassification
+) -> (result: [byte; up_to 128]) {
+    if request.classification_override { return request.classification; }
+    return runner_classification_name(classification);
+}
+
+fn runner_policy_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn runner_policy_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 47, 49];
+}
+
+fn runner_policy_request_is_valid(request: RunnerPolicyRequest) -> (result: bool) {
+    return runner_bytes_equal_64(request.schema_version, runner_policy_request_schema());
+}
+
+fn runner_policy(request: RunnerPolicyRequest) -> (result: RunnerPolicyResult) {
+    let classification: ResultClassification = runner_selected_classification(request);
+    return RunnerPolicyResult {
+        schema_version: runner_policy_result_schema(),
+        classification: runner_published_classification(request, classification),
+        exit_code: runner_exit_code(classification, request.allow_unsupported)
+    };
+}
+
+fn runner_policy_app(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: RunnerPolicyRequest = structured_read(context.argv[0], runner_policy_request_schema());
+    if !runner_policy_request_is_valid(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let result: RunnerPolicyResult = runner_policy(request);
+    let published: u64 = structured_write(context.argv[1], runner_policy_result_schema(), result);
+    if published == 0 {
+        return failure([114, 117, 110, 110, 101, 114, 45, 112, 111, 108, 105, 99, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
 }

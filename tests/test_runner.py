@@ -317,7 +317,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],
-            "2f078840f82666933217dcdbbdca00a244e08fced7883ba12bfd1dbd9d814148",
+            "f2e216bd1af0f77d1c9ca5de6dcd34f9f2d1f611070edb88f99d5d5576c0d4ca",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
