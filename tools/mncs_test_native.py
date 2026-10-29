@@ -338,39 +338,20 @@ def run_test_inventory_filter(
     """
     if not isinstance(search_texts, list) or not isinstance(filters, list):
         raise NativeTransportError("Test inventory filters and search text must be lists")
-
-    def bounded_text(value: object, field: str) -> str:
-        if not isinstance(value, str):
-            raise NativeTransportError(f"Test inventory {field} must be text")
-        try:
-            size = len(value.encode("utf-8"))
-        except UnicodeEncodeError as error:
-            raise NativeTransportError(
-                f"Test inventory {field} must be valid UTF-8"
-            ) from error
-        if size > INVENTORY_FILTER_TEXT_MAX_BYTES:
-            raise NativeInputBoundError(
-                f"Test inventory {field} exceeds the native 1024-byte bound",
-                reason="input_exceeds_native_1024_byte_bound",
-            )
-        return value
-
-    normalized_texts = [bounded_text(value, "search text") for value in search_texts]
-    normalized_filters = [bounded_text(value, "filter") for value in filters]
-    if not normalized_texts:
+    if not search_texts:
         return {
             "selected_indices": [],
             "calls": 0,
             "case_count": 0,
-            "filter_count": len(normalized_filters),
+            "filter_count": len(filters),
             "selected_count": 0,
         }
     candidate_batch_count = (
-        len(normalized_texts) + INVENTORY_FILTER_BATCH_SIZE - 1
+        len(search_texts) + INVENTORY_FILTER_BATCH_SIZE - 1
     ) // INVENTORY_FILTER_BATCH_SIZE
     filter_batch_count = max(
         1,
-        (len(normalized_filters) + INVENTORY_FILTER_BATCH_SIZE - 1)
+        (len(filters) + INVENTORY_FILTER_BATCH_SIZE - 1)
         // INVENTORY_FILTER_BATCH_SIZE,
     )
     if candidate_batch_count * filter_batch_count > INVENTORY_FILTER_MAX_NATIVE_CALLS:
@@ -378,13 +359,70 @@ def run_test_inventory_filter(
             "Test inventory selection would exceed its bounded native call count",
             reason="native_batch_call_limit_exceeded",
         )
-    encoded_texts = [value.encode("utf-8") for value in normalized_texts]
-    encoded_filters = [value.encode("utf-8") for value in normalized_filters]
-    selected_indices: set[int] = set()
-    candidate_entries = list(zip(
-        range(len(normalized_texts)), normalized_texts, encoded_texts, strict=True,
-    ))
+
+    def checked_text_size(value: object, field: str) -> tuple[str, int]:
+        if not isinstance(value, str):
+            raise NativeTransportError(f"Test inventory {field} must be text")
+        try:
+            size = sum(
+                len(value[offset:offset + 4096].encode("utf-8"))
+                for offset in range(0, len(value), 4096)
+            )
+        except UnicodeEncodeError as error:
+            raise NativeTransportError(
+                f"Test inventory {field} must be valid UTF-8"
+            ) from error
+        return value, size
+
+    candidate_sources = [
+        checked_text_size(value, "search text") for value in search_texts
+    ]
+    normalized_filters: list[str] = []
+    encoded_filters: list[bytes] = []
+    for value in filters:
+        text, size = checked_text_size(value, "filter")
+        if size > INVENTORY_FILTER_TEXT_MAX_BYTES:
+            raise NativeInputBoundError(
+                "Test inventory filter exceeds the native 1024-byte bound",
+                reason="input_exceeds_native_1024_byte_bound",
+            )
+        normalized_filters.append(text)
+        encoded_filters.append(text.encode("utf-8"))
     filter_entries = list(zip(normalized_filters, encoded_filters, strict=True))
+    filter_batches = [
+        filter_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
+        for offset in range(0, len(filter_entries), INVENTORY_FILTER_BATCH_SIZE)
+    ] or [[]]
+
+    def window_count(candidate_bytes: int, max_filter_bytes: int) -> int:
+        if candidate_bytes <= INVENTORY_FILTER_TEXT_MAX_BYTES or max_filter_bytes == 0:
+            return 1
+        stride = INVENTORY_FILTER_TEXT_MAX_BYTES - max_filter_bytes + 1
+        return (
+            candidate_bytes - INVENTORY_FILTER_TEXT_MAX_BYTES + stride - 1
+        ) // stride + 1
+
+    window_plans: list[tuple[list[tuple[str, bytes]], int]] = []
+    base_call_count = 0
+    for filter_batch in filter_batches:
+        max_filter_bytes = max((len(needle) for _, needle in filter_batch), default=0)
+        candidate_window_count = sum(
+            window_count(candidate_bytes, max_filter_bytes)
+            for _, candidate_bytes in candidate_sources
+        )
+        batch_count = (
+            candidate_window_count + INVENTORY_FILTER_BATCH_SIZE - 1
+        ) // INVENTORY_FILTER_BATCH_SIZE
+        base_call_count += batch_count
+        if base_call_count > INVENTORY_FILTER_MAX_NATIVE_CALLS:
+            raise NativeInputBoundError(
+                "Test inventory selection would exceed its bounded native call count",
+                reason="native_batch_call_limit_exceeded",
+            )
+        window_plans.append((filter_batch, max_filter_bytes))
+
+    encoded_texts = [text.encode("utf-8") for text, _ in candidate_sources]
+    selected_indices: set[int] = set()
     planned_calls: list[tuple[list[tuple[int, str, bytes]], list[tuple[str, bytes]]]] = []
     estimated_pair_work: dict[tuple[bytes, bytes], int] = {}
 
@@ -442,17 +480,36 @@ def run_test_inventory_filter(
         plan_batch(candidates, patterns[:midpoint])
         plan_batch(candidates, patterns[midpoint:])
 
-    candidate_batches = [
-        candidate_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
-        for offset in range(0, len(candidate_entries), INVENTORY_FILTER_BATCH_SIZE)
-    ]
-    filter_batches = [
-        filter_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
-        for offset in range(0, len(filter_entries), INVENTORY_FILTER_BATCH_SIZE)
-    ] or [[]]
-    for candidate_batch in candidate_batches:
-        for filter_batch in filter_batches:
-            plan_batch(candidate_batch, filter_batch)
+    for filter_batch, max_filter_bytes in window_plans:
+        candidate_entries: list[tuple[int, str, bytes]] = []
+        stride = INVENTORY_FILTER_TEXT_MAX_BYTES - max_filter_bytes + 1
+        for index, ((text, _), encoded_text) in enumerate(
+            zip(candidate_sources, encoded_texts, strict=True)
+        ):
+            if len(encoded_text) <= INVENTORY_FILTER_TEXT_MAX_BYTES:
+                candidate_entries.append((index, text, encoded_text))
+                continue
+            if max_filter_bytes == 0:
+                window = encoded_text[:INVENTORY_FILTER_TEXT_MAX_BYTES]
+                window_text = window.decode("utf-8", errors="ignore")
+                candidate_entries.append((index, window_text, window_text.encode("utf-8")))
+                continue
+            offset = 0
+            while True:
+                window = encoded_text[offset:offset + INVENTORY_FILTER_TEXT_MAX_BYTES]
+                # Byte windows can meet inside a multibyte character. Dropping
+                # only the partial boundary characters preserves any complete
+                # UTF-8 filter occurrence, which the overlap keeps in a window.
+                window_text = window.decode("utf-8", errors="ignore")
+                candidate_entries.append((index, window_text, window_text.encode("utf-8")))
+                if offset + INVENTORY_FILTER_TEXT_MAX_BYTES >= len(encoded_text):
+                    break
+                offset += stride
+        for offset in range(0, len(candidate_entries), INVENTORY_FILTER_BATCH_SIZE):
+            plan_batch(
+                candidate_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE],
+                filter_batch,
+            )
 
     for candidate_batch, filter_batch in planned_calls:
         request = {
@@ -492,7 +549,7 @@ def run_test_inventory_filter(
     return {
         "selected_indices": sorted(selected_indices),
         "calls": len(planned_calls),
-        "case_count": len(normalized_texts),
+        "case_count": len(candidate_sources),
         "filter_count": len(normalized_filters),
         "selected_count": len(selected_indices),
     }

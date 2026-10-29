@@ -76,6 +76,34 @@ def test_native_inventory_filter_matches_independent_reference(tmp_path: Path) -
     assert result["filter_count"] == len(filters)
 
 
+def test_native_inventory_filter_searches_long_unicode_text_with_overlapping_windows(
+    tmp_path: Path,
+) -> None:
+    search_texts = [
+        ("x" * 1023) + "café" + ("x" * 1023) + "café" + ("z" * 100),
+        "unmatched " + ("y" * 2200),
+    ]
+    filters = ["café", "not-present"]
+
+    result = _select(tmp_path, search_texts, filters)
+
+    assert result["selected_indices"] == _reference(search_texts, filters) == [0]
+    assert result["calls"] == 1
+    assert result["case_count"] == 2
+
+
+def test_native_inventory_filter_keeps_the_full_maximum_filter_overlap(
+    tmp_path: Path,
+) -> None:
+    search_texts = ["a" * 1024 + "b"]
+    filters = ["a" * 1023 + "b"]
+
+    result = _select(tmp_path, search_texts, filters)
+
+    assert result["selected_indices"] == _reference(search_texts, filters) == [0]
+    assert result["calls"] == 1
+
+
 @pytest.mark.parametrize("filters", [[], [""]])
 def test_empty_filters_preserve_all_inventory_records(
     tmp_path: Path, filters: list[str],
@@ -165,6 +193,32 @@ def test_runner_uses_adaptive_native_batches_for_endpoint_mismatches(
     assert summary["calls"] == 2
 
 
+def test_runner_routes_long_inventory_text_through_native_windows(
+    tmp_path: Path,
+) -> None:
+    tests = [
+        {"id": ("x" * 1023) + "needle" + ("y" * 1200), "entry": ""},
+        {"id": "other" * 300, "entry": ""},
+    ]
+    summary: dict[str, object] = {}
+
+    selected = mncs_test.select_tests(
+        tests,
+        ["needle"],
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        timeout_seconds=120,
+        selection_summary=summary,
+    )
+
+    assert selected == [tests[0]]
+    assert summary["authority"] == "mncs.test.inventory_filter_v1"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 1
+    assert summary["case_count"] == len(tests)
+
+
 def test_runner_reports_host_fallback_when_native_call_limit_is_exceeded(
     tmp_path: Path,
 ) -> None:
@@ -187,15 +241,37 @@ def test_runner_reports_host_fallback_when_native_call_limit_is_exceeded(
     assert summary["fallback_reason"] == "native_batch_call_limit_exceeded"
 
 
-def test_runner_preserves_overbound_filter_behavior_with_explicit_host_fallback(
+def test_runner_rejects_excessive_long_text_window_plans_before_execution(
     tmp_path: Path,
 ) -> None:
-    tests = [{"id": "needle" + ("x" * 1025), "entry": "long_name"}]
+    tests = [{"id": "x" * 70_000, "entry": ""}]
     summary: dict[str, object] = {}
 
     selected = mncs_test.select_tests(
         tests,
-        ["needle"],
+        ["x" * 1024],
+        mncs="not-invoked-for-excessive-window-plan",
+        cwd=tmp_path,
+        environment={},
+        timeout_seconds=1,
+        selection_summary=summary,
+    )
+
+    assert selected == tests
+    assert summary["status"] == "host_fallback_call_limit"
+    assert summary["fallback_reason"] == "native_batch_call_limit_exceeded"
+
+
+def test_runner_preserves_overbound_filter_behavior_with_explicit_host_fallback(
+    tmp_path: Path,
+) -> None:
+    overbound_filter = "needle" + ("x" * 1025)
+    tests = [{"id": overbound_filter, "entry": "long_name"}]
+    summary: dict[str, object] = {}
+
+    selected = mncs_test.select_tests(
+        tests,
+        [overbound_filter],
         mncs="not-invoked-for-overbound-input",
         cwd=tmp_path,
         environment={},

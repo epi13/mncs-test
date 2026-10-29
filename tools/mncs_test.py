@@ -4305,9 +4305,9 @@ def select_tests(
             timeout_seconds=timeout_seconds,
         )
     except NativeInputBoundError as error:
-        # MNCS bounded byte views currently admit 1024 bytes. Preserve the
-        # legacy behavior for exceptional larger selectors and report this
-        # exact host boundary instead of silently claiming native selection.
+        # MNCS filter records admit 1024 UTF-8 bytes. Preserve the legacy
+        # behavior for longer filter terms and report the host fallback
+        # instead of silently claiming native selection.
         selected_tests = []
         if not filters:
             selected_tests = tests
