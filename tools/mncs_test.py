@@ -54,7 +54,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.9"
+RUNNER_VERSION = "0.2.10"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -1157,10 +1157,50 @@ def normalize_inventory_tests(
 
 
 class ArtifactStore:
-    def __init__(self, root: Path):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        mncs: str | None = None,
+        cwd: Path | None = None,
+        environment: dict[str, str] | None = None,
+    ):
+        native_context = (mncs is not None, cwd is not None, environment is not None)
+        if any(native_context) and not all(native_context):
+            raise AdapterError(
+                "native artifact hashing requires MNCS, cwd, and environment together"
+            )
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.items: list[dict[str, str]] = []
+        self.mncs = mncs
+        self.cwd = cwd.resolve() if cwd is not None else None
+        self.environment = environment
+
+    def digest_payload(self, payload: bytes) -> str:
+        """Hash a bounded artifact payload through MNCS when configured."""
+        if self.mncs is None:
+            return sha256_bytes(payload)
+        if self.cwd is None or self.environment is None:
+            raise AdapterError("native artifact hashing context is incomplete")
+        return result_identity_sha256(
+            payload,
+            mncs=self.mncs,
+            cwd=self.cwd,
+            environment=self.environment,
+        )
+
+    def digest_file(self, path: Path) -> str:
+        """Hash a small file natively and stream larger files on the host."""
+        with path.open("rb") as handle:
+            payload = handle.read(TEST_RESULT_IDENTITY_MAX_BYTES + 1)
+        if (
+            len(payload) > TEST_RESULT_IDENTITY_MAX_BYTES
+            or result_identity_step_budget([payload])
+            > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+        ):
+            return sha256_file(path)
+        return self.digest_payload(payload)
 
     def write(self, relative: str, payload: bytes, kind: str) -> str:
         path = (self.root / relative).resolve()
@@ -1170,7 +1210,7 @@ class ArtifactStore:
             raise AdapterError(f"unsafe artifact path: {relative}") from error
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
-        digest = sha256_bytes(payload)
+        digest = self.digest_payload(payload)
         item = {"path": path.relative_to(self.root).as_posix(), "kind": kind, "sha256": digest}
         self.items.append(item)
         return item["path"]
@@ -1180,10 +1220,10 @@ class ArtifactStore:
 
         try:
             relative = path.resolve().relative_to(self.root).as_posix()
-            payload = path.read_bytes()
+            digest = self.digest_file(path)
         except (OSError, ValueError) as error:
             raise AdapterError(f"unable to record compiler artifact {path}: {error}") from error
-        item = {"path": relative, "kind": kind, "sha256": sha256_bytes(payload)}
+        item = {"path": relative, "kind": kind, "sha256": digest}
         self.items.append(item)
         return relative
 
@@ -1868,7 +1908,7 @@ def execute_entry(
     request_artifact = {
         "path": request_path.relative_to(artifacts.root).as_posix(),
         "kind": "execution-request",
-        "sha256": sha256_file(request_path),
+        "sha256": artifacts.digest_file(request_path),
     }
     artifacts.items.append(request_artifact)
     process = run_process(
@@ -4876,7 +4916,12 @@ def run_manifest(args: argparse.Namespace) -> int:
                 deduplicated_libraries.append(resolved_library)
         library_paths = deduplicated_libraries
         environment = command_environment(library_paths)
-        artifacts = ArtifactStore(artifact_root)
+        artifacts = ArtifactStore(
+            artifact_root,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
         suite_result: dict[str, Any] | None = None
         suite_summary: dict[str, Any] | None = None
         test_results: list[dict[str, Any]] = []
@@ -5443,7 +5488,12 @@ def discover_command(args: argparse.Namespace) -> int:
                         cwd=Path.cwd(),
                         environment=command_environment(libraries),
                         timeout_seconds=manifest["timeout_seconds"],
-                        artifacts=ArtifactStore(Path(directory)),
+                        artifacts=ArtifactStore(
+                            Path(directory),
+                            mncs=mncs,
+                            cwd=Path.cwd(),
+                            environment=command_environment(libraries),
+                        ),
                     )
                 if inventory is None:
                     errors.append(

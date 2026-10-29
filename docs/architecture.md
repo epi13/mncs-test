@@ -114,8 +114,11 @@ the canonical JSON inputs and formats the final result envelope. The adapter
 batches up to 16 payloads, 64 chunks, 65,536 bytes, and the toolchain's
 8,000,000-step application ceiling per request; larger payload lists split into
 bounded calls. An individual identity payload whose byte or step estimate
-exceeds those bounds keeps the host compatibility hash. File/artifact content
-hashes remain host responsibilities.
+exceeds those bounds keeps the host compatibility hash. `ArtifactStore` also
+uses this application for bounded artifact payloads and small compiler-created
+files, including execution-request digests. Filesystem reads and writes remain
+host operations; an artifact file whose native byte, chunk, or step estimate
+exceeds the application bound is hashed by the streaming host fallback.
 
 `mncs.test.inventory_filter_v2` owns substring filtering over the Test
 inventory. The adapter prepares the runner's existing searchable fields and
