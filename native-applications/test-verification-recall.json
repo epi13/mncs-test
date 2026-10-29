@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.verification-recall",
+  "source": "../native/mncs/test/verification_recall_v1.mncs",
+  "module": "mncs.test.verification_recall_v1",
+  "entry_function": "recall_app_v1",
+  "profile": "0.18",
+  "interface_identity": "072d524d8f3580cfc348938b88450b63cd375db695bca1c5dadc823bbe4e91fb",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native",
+    "../../MNCS-Commons/src/mncs_commons/mesh/mncs"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

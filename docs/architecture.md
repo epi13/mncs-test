@@ -199,10 +199,13 @@ deterministic smallest-id rule for concurrent forks. Receipt files
 are projections repaired Store→file when divergent; unreadable
 authority fails closed (fresh execution, never silent reuse); only
 `--no-store` accepts file authority, explicitly degraded. When the
-head is stale, the host walks the head-anchored chain for the newest
-vaulted evidence matching this exact semantic world and native
-policy verifies admission on a second pass; recalled reuse is
-reported distinctly (`recalled-closure`, recall note, head context).
+head is stale, the host walks the head-anchored chain and filters by
+producer and selected-test coverage. A native recall application
+batches semantic comparisons through the v2 `closure_admits`
+predicate, including its trusted, non-empty closure checks. Native
+coherence policy then verifies each selected receipt on a second pass;
+recalled reuse is reported distinctly (`recalled-closure`, recall
+note, head context).
 
 Policy generations, steady state: v1 (`/1`) serves the environment's
 ambient verification flow and the frozen oracle's compatibility
@@ -234,12 +237,14 @@ Run cost model (measured 2026-10-03 on this repo, 4 obligations):
   2 store opens (1 shared reader, 1 shared writer). A first-ever run
   with no vault opens nothing for reads (`empty` without opening)
   and opens the writer once for admission.
-- coherence is already one native batch per pass (initial plus, only
-  when stale rows have recall candidates, one recall pass); one
-  malformed obligation cannot contaminate the others.
+- coherence is one native batch per pass (initial plus, when selected
+  recall candidates exist, one recall pass). Semantic recall batches
+  at most 256 candidate comparisons per process and splits larger
+  workloads into bounded calls; one malformed obligation cannot
+  contaminate the other coherence rows.
 - the remaining warm floor is owned elsewhere: Store session init
   (pressure MNCS-TEST-P-017) and `mncs` process startup per
-  inventory/coherence call. No test-owned resident daemon exists:
+  inventory, coherence, and recall call. No test-owned resident daemon exists:
   it would amortize only the Store open while adding lifecycle and
   staleness risk, so the fix belongs in the Store layer.
 

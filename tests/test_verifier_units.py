@@ -22,7 +22,6 @@ from mncs_test_verify import (  # noqa: E402
     build_coherence_row,
     evidence_envelope,
     evidence_id_for,
-    find_recall_candidate,
     finish_execution,
     measure_closure,
     measure_obligation,
@@ -31,7 +30,7 @@ from mncs_test_verify import (  # noqa: E402
     receipt_core,
     resolve_obligation_evidence,
     run_stamp,
-    semantic_match,
+    recall_candidates,
     stdlib_bundle_digest,
     toolchain_identity,
 )
@@ -374,6 +373,10 @@ def test_closure_bounds_fail_closed_without_exceptions(tmp_path: Path) -> None:
 def test_stdlib_root_authority_tristate(tmp_path: Path, monkeypatch) -> None:
     import mncs_test_verify as verify_module
 
+    binary = tmp_path / "mncs-language" / "target" / "release" / "mncs"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"toolchain")
+    monkeypatch.setattr(verify_module.shutil, "which", lambda _command: str(binary))
     monkeypatch.delenv("MNCS_STDLIB_ROOT", raising=False)
     marker, extra = verify_module.stdlib_root_authority("mncs-absent")
     assert (marker, extra) == ("stdlib-root:absent", None)
@@ -515,17 +518,6 @@ def test_obligation_scope_is_stable_and_prefixed() -> None:
     assert first.endswith(b":")
 
 
-def test_semantic_match_ignores_revision_only() -> None:
-    current = _bound(repository_revision="r2", repository_fingerprint="p2")
-    candidate = _bound(repository_revision="r1", repository_fingerprint="p1")
-    assert semantic_match(candidate, current) is True
-    assert semantic_match(_bound(closure_identity="other"), current) is False
-    assert semantic_match(_bound(closure_trusted=False), current) is False
-    assert semantic_match(_bound(closure_fileset="other/1"), current) is False
-    assert semantic_match(_bound(toolchain_identity="other"), current) is False
-    assert semantic_match(_bound(definition_identity="other"), current) is False
-
-
 def _history_evidence(evidence_id: str, bound: dict, previous: str | None) -> dict:
     return {
         "evidence_id": evidence_id,
@@ -547,31 +539,80 @@ def _recall_world(head: dict, history: list[dict], bound: dict) -> dict:
     }
 
 
-def test_find_recall_candidate_walks_chain_newest_first() -> None:
+def test_recall_candidates_walk_chain_newest_first_before_native_admission() -> None:
     world_bound = _bound()
     old = _history_evidence("old", _bound(), None)
     mid = _history_evidence("mid", _bound(closure_identity="other"), "old")
     head = _history_evidence("head", _bound(closure_identity="another"), "mid")
     world = _recall_world(head, [head, mid, old], world_bound)
-    assert find_recall_candidate(world)["evidence_id"] == "old"
+    assert [item["evidence_id"] for item in recall_candidates(world)] == ["mid", "old"]
 
 
-def test_find_recall_candidate_rejects_mismatch_and_gaps() -> None:
+def test_recall_candidates_reject_gaps_and_ineligible_provenance() -> None:
     world_bound = _bound()
     head = _history_evidence("head", _bound(closure_identity="another"), "mid")
-    # No match anywhere on the chain.
+    # A missing link invalidates the entire lineage, including prior entries.
     world = _recall_world(head, [head], world_bound)
-    assert find_recall_candidate(world) is None
-    # Chain leaves known history.
+    assert recall_candidates(world) == []
+    # The known prefix remains eligible before the old walker reaches a gap.
     orphan = _history_evidence("orphan", _bound(), "missing-parent")
-    world = _recall_world(head, [head, orphan], world_bound)
-    assert find_recall_candidate(world) is None
-    # Producer drift disqualifies even an exact semantic match.
+    linked_head = _history_evidence("linked-head", _bound(closure_identity="x"), "orphan")
+    world = _recall_world(linked_head, [linked_head, orphan], world_bound)
+    assert [item["evidence_id"] for item in recall_candidates(world)] == ["orphan"]
+    # Producer and selection checks remain host-owned provenance filters.
     stale = _history_evidence("stale", _bound(), None)
     stale["producer"] = "mncs-test-verify/0.0.0"
     head2 = _history_evidence("head2", _bound(closure_identity="x"), "stale")
     world = _recall_world(head2, [head2, stale], world_bound)
-    assert find_recall_candidate(world) is None
+    assert recall_candidates(world) == []
+    wrong_selection = _history_evidence("wrong", _bound(), None)
+    wrong_selection["selected_test_identities"] = ["other"]
+    head3 = _history_evidence("head3", _bound(closure_identity="x"), "wrong")
+    world = _recall_world(head3, [head3, wrong_selection], world_bound)
+    assert recall_candidates(world) == []
+
+
+def test_semantic_recall_chunks_candidate_comparisons(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mncs_test_verify as verify_module
+
+    batch_sizes: list[int] = []
+
+    def fake_native_app(_descriptor, request, **_kwargs):
+        scans = request["scans"]
+        batch_sizes.append(sum(len(scan["candidates"]) for scan in scans))
+        responses = [
+            {
+                "candidate_count": len(scan["candidates"]),
+                "matches": [False] * verify_module.MAX_HISTORY_SCAN,
+            }
+            for scan in scans
+        ]
+        responses.extend(
+            {
+                "candidate_count": 0,
+                "matches": [False] * verify_module.MAX_HISTORY_SCAN,
+            }
+            for _ in range(verify_module.MAX_OBLIGATIONS - len(responses))
+        )
+        return {
+            "schema_version": verify_module.RECALL_RESULT_SCHEMA,
+            "scan_count": len(scans),
+            "scans": responses,
+        }
+
+    monkeypatch.setattr(verify_module, "run_native_app", fake_native_app)
+    bound = _bound()
+    searches = [(bound, [bound] * verify_module.MAX_HISTORY_SCAN) for _ in range(5)]
+    stats = {"subprocesses": 0, "recall_runs": 0}
+    decisions = verify_module.evaluate_semantic_recall(
+        searches, mncs="unused", cwd=tmp_path, environment={}, stats=stats
+    )
+
+    assert [len(item) for item in decisions] == [64] * 5
+    assert batch_sizes == [256, 64]
+    assert stats == {"subprocesses": 2, "recall_runs": 2}
 
 
 class _FakeStore:

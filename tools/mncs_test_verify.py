@@ -69,11 +69,15 @@ COHERENCE_REQUEST_SCHEMA = "mncs.test-verification-coherence-request/1"
 COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
 COHERENCE_DESCRIPTOR_V2 = "test-verification-coherence-v2.json"
 COHERENCE_REQUEST_SCHEMA_V2 = "mncs.test-verification-coherence-request/2"
+RECALL_DESCRIPTOR = "test-verification-recall.json"
+RECALL_REQUEST_SCHEMA = "mncs.test-verification-recall-request/1"
+RECALL_RESULT_SCHEMA = "mncs.test-verification-recall/1"
 RECEIPT_SCHEMA = "mncs.test-receipt/1"
 REPORT_SCHEMA = "mncs.test-verify-report/1"
 STORE_RECEIPT_SCHEMA = b"mncs.test-receipt/1"
 EVIDENCE_ENVELOPE_SCHEMA = "mncs.test-evidence/1"
 MAX_HISTORY_SCAN = 64
+MAX_RECALL_BATCH_CANDIDATES = 256
 
 MAX_OBLIGATIONS = 32
 MAX_IDENTITIES = 64
@@ -248,9 +252,11 @@ def verifier_key() -> str:
         "native/mncs/test/digest.mncs",
         "native/mncs/test/verification_coherence.mncs",
         "native/mncs/test/verification_coherence_v2.mncs",
+        "native/mncs/test/verification_recall_v1.mncs",
         "native-applications/test-digest.json",
         "native-applications/test-verification-coherence.json",
         "native-applications/test-verification-coherence-v2.json",
+        "native-applications/test-verification-recall.json",
     ]
     digest = hashlib.sha256(VERIFY_VERSION.encode())
     for member in members:
@@ -1331,6 +1337,168 @@ def evaluate_coherence(
         raise VerifyError(str(error)) from error
 
 
+RECALL_BOUND_FIELDS = (
+    "definition_identity",
+    "subject_identity",
+    "subject_fingerprint",
+    "executor_identity",
+    "invalidation_identity",
+    "toolchain_identity",
+    "inventory_identity",
+    "closure_identity",
+    "closure_trusted",
+    "closure_fileset",
+)
+
+
+def _recall_bound_record(bound: dict, label: str) -> dict:
+    if not isinstance(bound, dict):
+        raise VerifyError(f"{label} semantic bound must be an object")
+    record: dict = {}
+    for field in RECALL_BOUND_FIELDS:
+        value = bound.get(field)
+        if field == "closure_trusted":
+            if type(value) is not bool:
+                raise VerifyError(f"{label} closure trust must be a boolean")
+            record[field] = value
+            continue
+        if not isinstance(value, str):
+            raise VerifyError(f"{label} {field} must be text")
+        limit = MAX_IDENTITY_BYTES if field == "subject_identity" else MAX_FINGERPRINT_BYTES
+        if len(value.encode("utf-8")) > limit:
+            raise VerifyError(f"{label} {field} exceeds the native recall bound")
+        record[field] = value
+    return record
+
+
+def evaluate_semantic_recall(
+    searches: list[tuple[dict, list[dict]]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    stats: dict | None = None,
+) -> list[list[bool]]:
+    """Batch bounded lineage searches through the native closure predicate."""
+    if not searches or len(searches) > MAX_OBLIGATIONS:
+        raise VerifyError("semantic recall scan batch is outside its bound")
+    normalized: list[dict] = []
+    for scan_index, (current, candidates) in enumerate(searches):
+        if not candidates or len(candidates) > MAX_HISTORY_SCAN:
+            raise VerifyError("semantic recall candidate scan is outside its bound")
+        normalized.append({
+            "current": _recall_bound_record(current, f"scan {scan_index} current"),
+            "candidates": [
+                _recall_bound_record(candidate, f"scan {scan_index} candidate {index}")
+                for index, candidate in enumerate(candidates)
+            ],
+        })
+
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    batch_candidates = 0
+    for scan in normalized:
+        count = len(scan["candidates"])
+        if batch and batch_candidates + count > MAX_RECALL_BATCH_CANDIDATES:
+            batches.append(batch)
+            batch = []
+            batch_candidates = 0
+        batch.append(scan)
+        batch_candidates += count
+    if batch:
+        batches.append(batch)
+
+    decisions: list[list[bool]] = []
+    for batch in batches:
+        request = {"schema_version": RECALL_REQUEST_SCHEMA, "scans": batch}
+        if stats is not None:
+            stats["subprocesses"] += 1
+            stats["recall_runs"] += 1
+        try:
+            result = run_native_app(
+                RECALL_DESCRIPTOR,
+                request,
+                request_schema=RECALL_REQUEST_SCHEMA,
+                result_schema=RECALL_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+        except NativeTransportError as error:
+            raise VerifyError(f"native semantic recall failed: {error}") from error
+        scans = result.get("scans")
+        scan_count = result.get("scan_count")
+        if (
+            type(scan_count) is not int
+            or scan_count != len(batch)
+            or not isinstance(scans, list)
+            or len(scans) != MAX_OBLIGATIONS
+        ):
+            raise VerifyError("native semantic recall returned a malformed scan list")
+        for response, scan in zip(scans[:scan_count], batch, strict=True):
+            matches = response.get("matches") if isinstance(response, dict) else None
+            candidate_count = (
+                response.get("candidate_count") if isinstance(response, dict) else None
+            )
+            expected_count = len(scan["candidates"])
+            if (
+                type(candidate_count) is not int
+                or candidate_count != expected_count
+                or not isinstance(matches, list)
+                or len(matches) != MAX_HISTORY_SCAN
+                or any(type(match) is not bool for match in matches)
+            ):
+                raise VerifyError("native semantic recall returned malformed decisions")
+            decisions.append(matches[:expected_count])
+    return decisions
+
+
+def find_recall_candidates(
+    worlds: list[dict],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    stats: dict | None = None,
+) -> list[dict | None]:
+    """Select the newest native-admitted candidate for each bounded world."""
+    if len(worlds) > MAX_OBLIGATIONS:
+        raise VerifyError("semantic recall world batch is outside its bound")
+    result: list[dict | None] = [None] * len(worlds)
+    candidates_by_index = {
+        index: recall_candidates(world)
+        for index, world in enumerate(worlds)
+    }
+    active = [
+        index for index, candidates in candidates_by_index.items()
+        if candidates
+    ]
+    if not active:
+        return result
+    searches = [
+        (
+            worlds[index]["bound"],
+            [candidate["bound"] for candidate in candidates_by_index[index]],
+        )
+        for index in active
+    ]
+    decisions = evaluate_semantic_recall(
+        searches,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        stats=stats,
+    )
+    for index, candidates, matches in zip(
+        active, (candidates_by_index[item] for item in active), decisions, strict=True
+    ):
+        for candidate, matched in zip(candidates, matches, strict=True):
+            if matched:
+                result[index] = candidate
+                break
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Suite execution through `mncs test` (identity-bound, file-captured).
 # ---------------------------------------------------------------------------
@@ -1485,6 +1653,7 @@ def _verify_repository_inner(
         "inventory_runs": 0,
         "suite_runs": 0,
         "coherence_runs": 0,
+        "recall_runs": 0,
         "digest_runs": 0,
         "closure_files": 0,
         "closure_bytes": 0,
@@ -1631,12 +1800,20 @@ def _verify_repository_inner(
     # (if any) and let native policy verify admission on it. The head
     # stays the projection target and lineage anchor; recall only
     # changes which evidence the verdict speaks about.
+    stale_identities = [
+        identity for identity in row_order
+        if verdicts.get(identity, {}).get("status") == "stale"
+    ]
+    selected_candidates = find_recall_candidates(
+        [measured[identity] for identity in stale_identities],
+        mncs=mncs,
+        cwd=repo,
+        environment=base_environment,
+        stats=stats,
+    )
     recall_rows: list[dict] = []
     recall_candidates: dict[str, dict] = {}
-    for identity in row_order:
-        if verdicts.get(identity, {}).get("status") != "stale":
-            continue
-        candidate = find_recall_candidate(measured[identity])
+    for identity, candidate in zip(stale_identities, selected_candidates, strict=True):
         if candidate is None:
             continue
         try:
@@ -1914,73 +2091,42 @@ def required_selection(world: dict) -> list[str] | None:
     return required
 
 
-RECALL_IDENTITIES = (
-    "definition_identity",
-    "subject_identity",
-    "subject_fingerprint",
-    "executor_identity",
-    "invalidation_identity",
-    "toolchain_identity",
-    "inventory_identity",
-    "closure_identity",
-)
+def recall_candidates(world: dict) -> list[dict]:
+    """Return bounded lineage candidates that pass host-owned provenance filters.
 
-
-def semantic_match(candidate_bound: dict, current_bound: dict) -> bool:
-    """Exact semantic equivalence for historical recall candidacy.
-
-    Mirrors the native closure_admits comparison (minus revision and
-    fingerprint, which recall deliberately crosses): every semantic
-    identity equal, both closures trusted, filesets equal. This only
-    SELECTS a candidate to present; native policy still verifies
-    admission on the presented evidence.
-    """
-    if not current_bound.get("closure_trusted") or not candidate_bound.get(
-        "closure_trusted"
-    ):
-        return False
-    if candidate_bound.get("closure_fileset") != current_bound.get("closure_fileset"):
-        return False
-    return all(
-        candidate_bound.get(key) == current_bound.get(key) for key in RECALL_IDENTITIES
-    )
-
-
-def find_recall_candidate(world: dict) -> dict | None:
-    """Find vaulted evidence for this exact semantic world, if any.
-
-    Walks the head-anchored lineage chain (newest first) for an exact
-    semantic match written by this verifier version with a covering
-    selection. Returns None when nothing matches, the chain leaves
-    known history, or the walk exceeds its bound.
+    Semantic equivalence is intentionally not decided here; the native
+    verification-coherence predicate owns that decision.
     """
     head = world.get("receipt")
     history = world.get("history", [])
     if head is None or not history:
-        return None
+        return []
     required = required_selection(world)
     if required is None:
-        return None
+        return []
     by_id = {item["evidence_id"]: item for item in history}
     seen = {head["evidence_id"]}
     current = head.get("previous_evidence_id")
     steps = 0
+    candidates: list[dict] = []
     while current and current not in seen and steps < MAX_HISTORY_SCAN:
         seen.add(current)
         steps += 1
         candidate = by_id.get(current)
         if candidate is None:
-            return None
+            # Candidates earlier in the lineage were checked before the
+            # former host walker reached this gap. Preserve that prefix so
+            # native admission can still select an earlier match.
+            return candidates
         recorded = candidate.get("selected_test_identities")
         if (
             candidate.get("producer") == VERIFY_VERSION
             and isinstance(recorded, list)
             and sorted(recorded) == sorted(required)
-            and semantic_match(candidate["bound"], world["bound"])
         ):
-            return candidate
+            candidates.append(candidate)
         current = candidate.get("previous_evidence_id")
-    return None
+    return candidates
 
 
 def bound_diff(world: dict) -> list[str]:
@@ -2145,7 +2291,7 @@ def act_on_verdict(
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
-                stores=stores,
+                stores=stores, environment=base_environment,
             )
         # A `current` verdict carries no resolved selection (nothing to
         # execute), so the host proves selection equivalence itself: the
@@ -2171,7 +2317,7 @@ def act_on_verdict(
             return execute_bound_suite(
                 world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
                 suite_timeout, max_failures, admit_store, stats, list(required),
-                stores=stores,
+                stores=stores, environment=base_environment,
             )
         # The receipt consulted here is already authoritative: with
         # Store admission it is the vault head (the file is a projection
@@ -2218,7 +2364,7 @@ def act_on_verdict(
         return execute_bound_suite(
             world, entry, repo, mncs, receipts_dir, artifacts_root, store_dir,
             suite_timeout, max_failures, admit_store, stats, resolved,
-            stores=stores,
+            stores=stores, environment=base_environment,
         )
     if verdict.get("deferred", False):
         entry["action"] = "deferred"
@@ -2245,6 +2391,7 @@ def execute_bound_suite(
     admit_store: bool,
     stats: dict,
     resolved: list[str],
+    environment: dict[str, str] | None = None,
     stores: RunStores | None = None,
 ) -> dict:
     obligation = world["obligation"]
@@ -2275,6 +2422,7 @@ def execute_bound_suite(
     return finish_execution(
         world, entry, execution, artifacts_dir, receipts_dir, store_dir,
         mncs, repo, max_failures, admit_store, stats, resolved, stores=stores,
+        environment=environment,
     )
 
 
@@ -2292,6 +2440,7 @@ def finish_execution(
     stats: dict,
     resolved: list[str],
     stores: RunStores | None = None,
+    environment: dict[str, str] | None = None,
 ) -> dict:
     obligation = world["obligation"]
     identity = obligation["identity"]
@@ -2307,7 +2456,7 @@ def finish_execution(
         try:
             digest = evaluate_digest(
                 result, max_failures=max_failures, mncs=mncs, cwd=repo,
-                environment=inventory_environment(dict(os.environ), world["libraries"]),
+                environment=environment if environment is not None else dict(os.environ),
             )
         except (DigestError, VerifyError, NativeTransportError) as error:
             entry["action"] = "unresolved"
@@ -2576,8 +2725,8 @@ def render_report_text(report: dict) -> str:
     lines.append(
         f"  cost: {stats.get('subprocesses', 0)} subprocesses "
         f"({stats.get('inventory_runs', 0)} inventory, {stats.get('suite_runs', 0)} suite, "
-        f"{stats.get('coherence_runs', 0)} coherence, {stats.get('digest_runs', 0)} digest; "
-        f"{store_opens} store opens)"
+        f"{stats.get('coherence_runs', 0)} coherence, {stats.get('recall_runs', 0)} recall, "
+        f"{stats.get('digest_runs', 0)} digest; {store_opens} store opens)"
     )
     return "\n".join(lines) + "\n"
 

@@ -1,0 +1,156 @@
+mncs 0.18;
+
+// Historical Test evidence recall delegates semantic admission to the same
+// trusted closure predicate used by ambient coherence policy.
+module mncs.test.verification_recall_v1;
+
+use mncs.std.application.v1;
+use mncs.commons.family.obligations.v1 as contracts;
+use mncs.test.verification_coherence_v2 as coherence;
+
+record RecallBoundV1 {
+    definition_identity: [byte; up_to 128],
+    subject_identity: [byte; up_to 1024],
+    subject_fingerprint: [byte; up_to 128],
+    executor_identity: [byte; up_to 128],
+    invalidation_identity: [byte; up_to 128],
+    toolchain_identity: [byte; up_to 128],
+    inventory_identity: [byte; up_to 128],
+    closure_identity: [byte; up_to 128],
+    closure_trusted: bool,
+    closure_fileset: [byte; up_to 128]
+}
+
+record RecallScanV1 {
+    current: RecallBoundV1,
+    candidates: [RecallBoundV1; up_to 64]
+}
+
+record RecallDecisionV1 {
+    candidate_count: u64,
+    matches: [bool; 64]
+}
+
+record RecallRequestV1 {
+    schema_version: [byte; up_to 64],
+    scans: [RecallScanV1; up_to 32]
+}
+
+record RecallResultV1 {
+    schema_version: [byte; up_to 64],
+    scan_count: u64,
+    scans: [RecallDecisionV1; 32]
+}
+
+record RecallAccumulatorV1 {
+    scans: [RecallDecisionV1; 32],
+    count: u64
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 45, 114, 101, 99, 97, 108, 108, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 45, 114, 101, 99, 97, 108, 108, 47, 49];
+}
+
+fn as_coherence_current(bound: RecallBoundV1) -> (result: coherence.CoherenceCurrentV2) {
+    return coherence.CoherenceCurrentV2 {
+        definition_identity: bound.definition_identity,
+        subject_identity: bound.subject_identity,
+        subject_fingerprint: bound.subject_fingerprint,
+        executor_identity: bound.executor_identity,
+        invalidation_identity: bound.invalidation_identity,
+        toolchain_identity: bound.toolchain_identity,
+        inventory_identity: bound.inventory_identity,
+        repository_revision: [0; 0],
+        repository_fingerprint: [0; 0],
+        closure_identity: bound.closure_identity,
+        closure_trusted: bound.closure_trusted,
+        closure_fileset: bound.closure_fileset
+    };
+}
+
+fn as_coherence_evidence(bound: RecallBoundV1) -> (result: coherence.CoherenceEvidenceV2) {
+    return coherence.CoherenceEvidenceV2 {
+        definition_identity: bound.definition_identity,
+        subject_identity: bound.subject_identity,
+        subject_fingerprint: bound.subject_fingerprint,
+        executor_identity: bound.executor_identity,
+        verifier_identity: [0; 0],
+        invalidation_identity: bound.invalidation_identity,
+        toolchain_identity: bound.toolchain_identity,
+        inventory_identity: bound.inventory_identity,
+        repository_revision: [0; 0],
+        repository_fingerprint: [0; 0],
+        closure_identity: bound.closure_identity,
+        closure_trusted: bound.closure_trusted,
+        closure_fileset: bound.closure_fileset,
+        verdict: contracts.EvidenceVerdict.UNKNOWN,
+        evidence_id: [0; 0]
+    };
+}
+
+fn empty_decision() -> (result: RecallDecisionV1) {
+    return RecallDecisionV1 {
+        candidate_count: 0,
+        matches: [false; 64]
+    };
+}
+
+fn evaluate_scan(scan: RecallScanV1) -> (result: RecallDecisionV1) {
+    let seed: RecallDecisionV1 = RecallDecisionV1 {
+        matches: [false; 64],
+        candidate_count: 0
+    };
+    iterate i over scan.candidates carrying acc: RecallDecisionV1 = seed {
+        let matched: bool = coherence.closure_admits(
+            as_coherence_evidence(scan.candidates[i]),
+            as_coherence_current(scan.current)
+        );
+        next acc = RecallDecisionV1 {
+            matches: replace(acc.matches, i, matched),
+            candidate_count: acc.candidate_count +% 1
+        };
+    }
+    return RecallDecisionV1 {
+        candidate_count: acc.candidate_count,
+        matches: acc.matches
+    };
+}
+
+fn build_result(request: RecallRequestV1) -> (result: RecallResultV1) {
+    let seed: RecallAccumulatorV1 = RecallAccumulatorV1 {
+        scans: [empty_decision(); 32],
+        count: 0
+    };
+    iterate i over request.scans carrying acc: RecallAccumulatorV1 = seed {
+        next acc = RecallAccumulatorV1 {
+            scans: replace(acc.scans, i, evaluate_scan(request.scans[i])),
+            count: acc.count +% 1
+        };
+    }
+    return RecallResultV1 {
+        schema_version: result_schema(),
+        scan_count: acc.count,
+        scans: acc.scans
+    };
+}
+
+fn recall_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 114, 101, 99, 97, 108, 108, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: RecallRequestV1 = structured_read(context.argv[0], request_schema());
+    let result: RecallResultV1 = build_result(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([114, 101, 99, 97, 108, 108, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
