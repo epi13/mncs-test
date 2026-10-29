@@ -54,7 +54,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.7"
+RUNNER_VERSION = "0.2.8"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -71,6 +71,11 @@ COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
 TEST_RESULT_SUMMARY_RESULT_SCHEMA = "mncs.test-result-summary/1"
+TEST_RESULT_IDENTITY_REQUEST_SCHEMA = "mncs.test-result-identity-request/1"
+TEST_RESULT_IDENTITY_RESULT_SCHEMA = "mncs.test-result-identity/1"
+TEST_RESULT_IDENTITY_MAX_BYTES = 65536
+TEST_RESULT_IDENTITY_MAX_PAYLOADS = 16
+TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 COMPILE_VERDICT_EXPECTED_BATCH = 16
 COMPILE_VERDICT_ACTUAL_BATCH = 32
 MAX_DIAGNOSTIC_CODE_BYTES = 512
@@ -662,6 +667,121 @@ def native_result_summary(
     ):
         raise AdapterError("MNCS result-summary app returned malformed counters")
     return {field: int(value) for field, value in summary.items()}
+
+
+def result_identity_sha256(
+    payload: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str:
+    """Hash a bounded result identity payload through the MNCS SHA-256 app.
+
+    The canonical JSON projection remains a Python transport boundary. The
+    common path's digest computation is owned by ``mncs.std.sha256.v1``.
+    Extremely large identity payloads retain the compatibility hash path so
+    this bounded application does not narrow the existing result contract.
+    """
+    if not isinstance(payload, bytes):
+        raise AdapterError("Test result identity payload must be bytes")
+    if (
+        len(payload) > TEST_RESULT_IDENTITY_MAX_BYTES
+        or result_identity_step_budget([payload]) > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+    ):
+        return sha256_bytes(payload)
+
+    return result_identity_sha256_batch(
+        [payload], mncs=mncs, cwd=cwd, environment=environment
+    )[0]
+
+
+def result_identity_sha256_batch(
+    payloads: list[bytes],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> list[str]:
+    """Hash a bounded set of payloads through the MNCS result-identity app."""
+    if not isinstance(payloads, list) or len(payloads) > TEST_RESULT_IDENTITY_MAX_PAYLOADS:
+        raise NativeInputBoundError(
+            "result identity batch exceeds its 16-payload native bound",
+            reason="result_identity_payload_count",
+        )
+    if any(not isinstance(payload, bytes) for payload in payloads):
+        raise AdapterError("Test result identity payloads must be bytes")
+    total_bytes = sum(len(payload) for payload in payloads)
+    if total_bytes > TEST_RESULT_IDENTITY_MAX_BYTES:
+        raise NativeInputBoundError(
+            "result identity batch exceeds its 65,536-byte native bound",
+            reason="result_identity_payload_bytes",
+        )
+
+    chunks: list[list[int]] = []
+    slices: list[dict[str, int]] = []
+    for payload in payloads:
+        first_chunk = len(chunks)
+        for offset in range(0, len(payload), 1024):
+            chunks.append(list(payload[offset:offset + 1024]))
+        slices.append({
+            "first_chunk": first_chunk,
+            "chunk_count": len(chunks) - first_chunk,
+        })
+    if len(chunks) > 64:
+        raise NativeInputBoundError(
+            "result identity batch exceeds its 64-chunk native bound",
+            reason="result_identity_chunk_count",
+        )
+
+    request = {
+        "schema_version": TEST_RESULT_IDENTITY_REQUEST_SCHEMA,
+        "payload_count": len(payloads),
+        "chunk_count": len(chunks),
+        "payloads": slices,
+        "chunks": chunks,
+    }
+    step_budget = result_identity_step_budget(payloads)
+    if step_budget > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET:
+        raise NativeInputBoundError(
+            "result identity batch exceeds the 8,000,000-step native bound",
+            reason="result_identity_step_budget",
+        )
+    try:
+        result = run_native_app(
+            "test-result-identity.json",
+            request,
+            request_schema=TEST_RESULT_IDENTITY_REQUEST_SCHEMA,
+            result_schema=TEST_RESULT_IDENTITY_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=step_budget,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test result identity failed: {error}") from error
+
+    digests = result.get("digests")
+    if (
+        result.get("payload_count") != len(payloads)
+        or not isinstance(digests, list)
+        or len(digests) != len(payloads)
+    ):
+        raise AdapterError("MNCS result-identity app returned malformed digest records")
+    output: list[str] = []
+    for item in digests:
+        if not isinstance(item, dict):
+            raise AdapterError("MNCS result-identity app returned a malformed digest record")
+        digest = item.get("digest")
+        if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
+            raise AdapterError("MNCS result-identity app returned a malformed digest")
+        output.append(digest)
+    return output
+
+
+def result_identity_step_budget(payloads: list[bytes]) -> int:
+    blocks = sum((len(payload) + 63) // 64 + 2 for payload in payloads)
+    return max(2_097_152, 100_000 + blocks * 32_768)
 
 
 def external_verdict(variant: str) -> str:
@@ -3689,7 +3809,12 @@ def make_result(
             for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
         },
     }
-    run_id = sha256_bytes(compact_json(identity_material).encode())
+    run_id = result_identity_sha256(
+        compact_json(identity_material).encode("utf-8"),
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
     experiment_identity = f"mncs:language:experiment:test:{run_id}"
     experiment_run_identity = f"mncs:language:experiment-run:{run_id}"
     for index, item in enumerate(test_results):

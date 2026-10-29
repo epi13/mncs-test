@@ -1,0 +1,177 @@
+mncs 0.18;
+
+// mncs.test.result_identity_v1 — bounded native SHA-256 for result identities.
+// Canonical JSON is an explicit adapter input; SHA-256 itself is performed
+// by the shared pure MNCS implementation in mncs.std.sha256.v1.
+module mncs.test.result_identity_v1;
+
+use mncs.std.application.v1;
+use mncs.std.sha256.v1 as sha256;
+
+record IdentityPayloadSliceV1 {
+    first_chunk: u64,
+    chunk_count: u64
+}
+
+record IdentityHashV1 {
+    digest: [byte; 32]
+}
+
+record ResultIdentityRequestV1 {
+    schema_version: [byte; up_to 64],
+    payload_count: u64,
+    chunk_count: u64,
+    payloads: [IdentityPayloadSliceV1; up_to 16],
+    chunks: [[byte; up_to 1024]; up_to 64]
+}
+
+record ResultIdentityResultV1 {
+    schema_version: [byte; up_to 64],
+    payload_count: u64,
+    digests: [IdentityHashV1; up_to 16]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn valid_request(request: ResultIdentityRequestV1) -> (result: bool) {
+    if !same_bytes(request.schema_version, request_schema())
+        || request.payload_count != request.payloads.len
+        || request.chunk_count != request.chunks.len
+        || request.payload_count > 16
+        || request.chunk_count > 64 {
+        return false;
+    }
+    let slices_valid: bool = valid_payload_slices(request);
+    return slices_valid && total_chunk_bytes(request) <= 65536;
+}
+
+fn valid_payload_slices(request: ResultIdentityRequestV1) -> (result: bool) {
+    iterate i over request.payloads carrying valid: bool = true {
+        let current: IdentityPayloadSliceV1 = request.payloads[i];
+        let previous: IdentityPayloadSliceV1 = request.payloads[select(i > 0, i -% 1, 0)];
+        let expected_first: u64 = select(
+            i > 0,
+            previous.first_chunk +% previous.chunk_count,
+            0
+        );
+        let within_chunks: bool = current.first_chunk <= request.chunk_count
+            && current.chunk_count <= request.chunk_count -% select(
+                current.first_chunk <= request.chunk_count,
+                current.first_chunk,
+                0
+            );
+        next valid = valid && current.first_chunk == expected_first && within_chunks;
+    }
+    if request.payload_count == 0 {
+        return request.chunk_count == 0;
+    }
+    let last: IdentityPayloadSliceV1 = request.payloads[request.payload_count -% 1];
+    return valid && last.first_chunk +% last.chunk_count == request.chunk_count;
+}
+
+fn total_chunk_bytes(request: ResultIdentityRequestV1) -> (result: u64) {
+    iterate i over request.chunks carrying total: u64 = 0 {
+        next total = total +% request.chunks[i].len;
+    }
+    return total;
+}
+
+fn update_at(
+    state: sha256.DigestState,
+    chunk_bytes: [byte; up_to 1024],
+    offset: u64
+) -> (result: sha256.DigestState) {
+    if offset < chunk_bytes.len {
+        let remaining: u64 = chunk_bytes.len -% offset;
+        let length: u64 = select(remaining < 64, remaining, 64);
+        let end: u64 = offset +% length;
+        let chunk: [byte; up_to 64] = chunk_bytes[offset..end];
+        return sha256.update_standard(state, chunk, length);
+    }
+    return state;
+}
+
+fn block_offsets() -> (result: [u64; 16]) {
+    return [0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960];
+}
+
+fn absorb_chunk(
+    state: sha256.DigestState,
+    chunk_bytes: [byte; up_to 1024]
+) -> (result: sha256.DigestState) {
+    let offsets: [u64; 16] = block_offsets();
+    iterate block over offsets carrying digest: sha256.DigestState = state {
+        next digest = update_at(digest, chunk_bytes, offsets[block]);
+    }
+    return digest;
+}
+
+fn hash_payload(
+    chunks: [[byte; up_to 1024]; up_to 64],
+    payload: IdentityPayloadSliceV1
+) -> (result: [byte; 32]) {
+    let end: u64 = payload.first_chunk +% payload.chunk_count;
+    let selected: [[byte; up_to 1024]; up_to 64] = chunks[payload.first_chunk..end];
+    let initial: sha256.DigestState = sha256.init();
+    iterate i over selected carrying state: sha256.DigestState = initial {
+        next state = absorb_chunk(state, selected[i]);
+    }
+    return sha256.finalize_standard(state);
+}
+
+fn empty_hash() -> (result: IdentityHashV1) {
+    return IdentityHashV1 { digest: [0; 32] };
+}
+
+fn hash_payloads(request: ResultIdentityRequestV1) -> (result: [IdentityHashV1; up_to 16]) {
+    let seed: [IdentityHashV1; 16] = [empty_hash(); 16];
+    iterate i over request.payloads carrying hashes: [IdentityHashV1; 16] = seed {
+        next hashes = replace(
+            hashes,
+            i,
+            IdentityHashV1 { digest: hash_payload(request.chunks, request.payloads[i]) }
+        );
+    }
+    return hashes[0..request.payload_count];
+}
+
+fn result_identity_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ResultIdentityRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let digests: [IdentityHashV1; up_to 16] = hash_payloads(request);
+    let result: ResultIdentityResultV1 = ResultIdentityResultV1 {
+        schema_version: result_schema(),
+        payload_count: digests.len,
+        digests: digests
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

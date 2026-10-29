@@ -107,6 +107,15 @@ adapter rejoins those chunks when it writes the public JSON document.
 The compact count text reuses `mncs.std.json_emit.v1::put_u64`; the application
 returns a typed record and leaves full JSON serialization to the host boundary.
 
+`mncs.test.result_identity_v1` sends the canonical run-identity JSON bytes
+through `mncs.std.sha256.v1`, so the common `run_id` digest is computed in
+MNCS. Python still constructs the canonical JSON input and formats the final
+result envelope. The native application accepts at most 65,536 input bytes
+and the runner respects the toolchain's 8,000,000-step application ceiling;
+payloads whose bounded estimate exceeds that ceiling keep the host digest
+path. Per-test execution/observation lineage hashes and file/artifact content
+hashes also remain host responsibilities.
+
 `mncs.test.inventory_filter_v2` owns substring filtering over the Test
 inventory. The adapter prepares the runner's existing searchable fields and
 projects native-selected indices back to their records. Candidate and filter

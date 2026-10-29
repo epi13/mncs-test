@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -245,6 +246,30 @@ class RunnerTests(unittest.TestCase):
             document = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(document["schema_version"], "mncs.test-result/1")
             self.assertEqual(document["verdict"], "PASS")
+            identity_material = {
+                "manifest": document["provenance"]["manifest"],
+                "source": document["provenance"]["source"],
+                "compiler": document["provenance"]["compiler"],
+                "profile": document["provenance"]["language_profile"],
+                "tests": [item["id"] for item in document["tests"]],
+                "subject_identity": document["test_inventory"].get("subject_identity"),
+                "subject_fingerprint": document["test_inventory"].get("subject_fingerprint"),
+                "verification_plan": document["selection"].get("plan_id"),
+                "obligation_plan": document["verification_obligations"].get("plan_id"),
+                "execution": {
+                    key: document["execution"].get(key)
+                    for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
+                },
+            }
+            reference_run_id = hashlib.sha256(
+                json.dumps(
+                    identity_material,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            self.assertEqual(document["run_id"], reference_run_id)
             self.assertEqual(document["summary"]["total"], 7)
             self.assertEqual(document["summary"]["passed"], 6)
             self.assertEqual(document["summary"]["skipped"], 1)
