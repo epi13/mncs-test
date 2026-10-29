@@ -105,11 +105,19 @@ Filters over 1024 bytes, a single pair that still exceeds the native step
 budget, and plans that exceed the call limit retain the prior host filter as
 an explicit, reported fallback.
 
-`mncs.test.exact_identity_selection_v1` owns matching family-check compiler
+`mncs.test.exact_identity_selection_v2` owns matching family-check compiler
 test identities against the current inventory. The adapter retains sorted
-request order, batches native comparisons, and projects selected inventory
-indices back to their records. Requests beyond the native record or step-work
-bounds use the previous host selection explicitly and report that authority.
+request order, segments UTF-8 identities into at most sixteen 512-byte parts,
+adaptively batches native comparisons, and projects selected inventory
+indices back to their records. Identities beyond 8192 bytes, work plans beyond
+the step budget, and plans beyond 64 native calls use the previous host
+selection explicitly and report that authority.
+
+Verification coherence also uses the shared native-application transport, so
+its descriptor resolves libraries from the selected Environment closure.
+Repository verification resolves declared sibling-library paths from the
+checkout's bounded ancestor roots, keeping the same obligations usable in
+linked worktrees.
 
 When a result has no native suite fold, the MNCS application
 `mncs.test.result_summary_v1` owns its aggregate counters. The adapter sends

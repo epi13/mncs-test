@@ -3469,51 +3469,20 @@ def evaluate_verification_coherence(
                 "verification coherence bound exceeded: at most "
                 f"{VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH} UTF-8 bytes per identity"
             )
-    descriptor = Path(__file__).resolve().parents[1] / "native-applications" / "test-verification-coherence.json"
-    if not descriptor.is_file():
-        raise ManifestError(f"verification coherence descriptor is unavailable: {descriptor}")
     cwd = cwd.resolve()
     try:
-        with tempfile.TemporaryDirectory(prefix=".mncs-test-coherence-", dir=cwd) as directory:
-            directory_path = Path(directory)
-            request_path = directory_path / "request.json"
-            result_path = directory_path / "result.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            relative_request = request_path.relative_to(cwd).as_posix()
-            relative_result = result_path.relative_to(cwd).as_posix()
-            completed = subprocess.run(
-                [
-                    mncs,
-                    "run-app",
-                    str(descriptor),
-                    "--grant-structured",
-                    "test_artifact",
-                    "--step-budget",
-                    "1048576",
-                    "--",
-                    relative_request,
-                    relative_result,
-                ],
-                cwd=str(cwd),
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout_seconds,
-            )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or completed.stdout.strip()
-                raise ManifestError(
-                    f"native verification coherence failed (exit {completed.returncode}): {detail}"
-                )
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                raise ManifestError(f"native verification coherence returned no valid result: {error}") from error
-    except subprocess.TimeoutExpired as error:
-        raise ManifestError(
-            f"native verification coherence exceeded {timeout_seconds}s"
-        ) from error
+        result = run_native_app(
+            "test-verification-coherence.json",
+            request,
+            request_schema=VERIFICATION_COHERENCE_REQUEST_SCHEMA,
+            result_schema=VERIFICATION_COHERENCE_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+    except NativeTransportError as error:
+        raise ManifestError(f"native verification coherence failed: {error}") from error
     if not isinstance(result, dict) or result.get("schema_version") != VERIFICATION_COHERENCE_RESULT_SCHEMA:
         raise ManifestError("native verification coherence returned an invalid result schema")
     return result
@@ -4394,12 +4363,16 @@ def select_exact_test_identities(
         selected = [by_id[test_id] for test_id in expected]
         selection_summary.update({
             "authority": "mncs-test.python_identity_fallback",
-            "requested_native_authority": "mncs.test.exact_identity_selection_v1",
+            "requested_native_authority": "mncs.test.exact_identity_selection_v2",
             "mode": "exact_test_identity",
             "status": (
                 "host_fallback_input_bound"
-                if error.reason == "input_exceeds_native_512_byte_bound"
-                else "host_fallback_work_estimate"
+                if error.reason == "input_exceeds_native_8192_byte_bound"
+                else (
+                    "host_fallback_call_limit"
+                    if error.reason == "native_batch_call_limit_exceeded"
+                    else "host_fallback_work_estimate"
+                )
             ),
             "fallback_reason": error.reason,
             "calls": 0,
@@ -4426,7 +4399,7 @@ def select_exact_test_identities(
             raise ManifestError("native Test identity selection returned an out-of-range test index")
         selected.append(tests[index])
     selection_summary.update({
-        "authority": "mncs.test.exact_identity_selection_v1",
+        "authority": "mncs.test.exact_identity_selection_v2",
         "mode": "exact_test_identity",
         "status": "returned" if selection["calls"] else "not_run",
         "calls": selection["calls"],

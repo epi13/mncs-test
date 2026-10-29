@@ -1,11 +1,11 @@
 {
   "schema_version": "mncs.native-application/1",
-  "application_identity": "mncs-test.exact-identity-selection",
-  "source": "../native/mncs/test/exact_identity_selection_v1.mncs",
-  "module": "mncs.test.exact_identity_selection_v1",
-  "entry_function": "exact_identity_selection_app_v1",
+  "application_identity": "mncs-test.exact-identity-selection-v2",
+  "source": "../native/mncs/test/exact_identity_selection_v2.mncs",
+  "module": "mncs.test.exact_identity_selection_v2",
+  "entry_function": "exact_identity_selection_app_v2",
   "profile": "0.18",
-  "interface_identity": "42500257996f12b6e90ef4ed2608f1c18775344f81da9e1deb59f351e8b30dc0",
+  "interface_identity": "27c54cf560aaf844415a79802f15d6b69b08356fc8c197a76abba9bd2ffe1aa3",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

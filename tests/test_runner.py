@@ -326,7 +326,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(
             response["test_result"]["execution"]["native_selection"],
             {
-                "authority": "mncs.test.exact_identity_selection_v1",
+                "authority": "mncs.test.exact_identity_selection_v2",
                 "mode": "exact_test_identity",
                 "status": "returned",
                 "calls": 1,
@@ -358,7 +358,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(response["execution"]["test_case_identities"]), 2)
         self.assertEqual(
             response["execution"]["inventory_identity"],
-            "f2e216bd1af0f77d1c9ca5de6dcd34f9f2d1f611070edb88f99d5d5576c0d4ca",
+            "368a2b43a34d82c85ad4a2a6f2ea102bbff386080e677bbc7e33c5fc32ca7cba",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -402,7 +402,7 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             response["test_result"]["execution"]["native_selection"]["authority"],
-            "mncs.test.exact_identity_selection_v1",
+            "mncs.test.exact_identity_selection_v2",
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -756,19 +756,19 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["tests"][0]["status"], "expected_failure")
             self.assertEqual(document["tests"][0]["execution_status"], "runtime_failure")
 
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_unsupported_is_explicit_unknown(self):
         completed = self.invoke(
             "run",
             "--manifest",
             "tests/fixtures/unsupported.toml",
+            *self.live_args(),
             "--result",
             "/tmp/mncs-test-unsupported-unittest-result.json",
             "--check-result",
             "/tmp/mncs-test-unsupported-unittest-check.json",
             "--artifacts",
             "/tmp/mncs-test-unsupported-unittest-artifacts",
-            "--library",
-            str(STDLIB_LIBRARY),
         )
         self.assertEqual(completed.returncode, 6, completed.stdout)
         document = json.loads(Path("/tmp/mncs-test-unsupported-unittest-result.json").read_text(encoding="utf-8"))

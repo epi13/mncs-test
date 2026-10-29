@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = Path(os.environ.get("MNCS_WORKSPACE_ROOT", next(
+    (candidate for candidate in (ROOT.parent, *ROOT.parents) if (candidate / "mncs-language").is_dir()),
+    ROOT.parent,
+)))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from mncs_test_verify import (  # noqa: E402
@@ -16,15 +20,15 @@ from mncs_test_verify import (  # noqa: E402
     verify_repository,
 )
 
-LANGUAGE_ROOT = ROOT.parent / "mncs-language"
-MNCS = Path(os.environ.get("MNCS_BINARY", LANGUAGE_ROOT / "target/debug/mncs"))
+LANGUAGE_ROOT = Path(os.environ.get("MNCS_LANGUAGE_REPO", WORKSPACE_ROOT / "mncs-language"))
+MNCS = Path(os.environ.get("MNCS_BINARY", os.environ.get("MNCS", LANGUAGE_ROOT / "target/debug/mncs")))
 
 
 def _stdlib_library() -> Path:
     explicit = os.environ.get("MNCS_STDLIB_ROOT")
     if explicit:
         return Path(explicit) / "library"
-    sibling = ROOT.parent / "mncs-stdlib"
+    sibling = WORKSPACE_ROOT / "mncs-stdlib"
     if (sibling / "stdlib-manifest.json").is_file():
         return sibling / "library"
     return LANGUAGE_ROOT / "library"

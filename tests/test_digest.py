@@ -47,7 +47,7 @@ def compiler_environment() -> dict[str, str]:
     environment["MNCS_LIBRARY_PATH"] = ":".join(
         [
             str(STDLIB_LIBRARY),
-            str(COMMONS_ROOT / "src/mncs_commons/mesh"),
+            str(COMMONS_ROOT / "src/mncs_commons/mesh/mncs"),
             str(ROOT / "native"),
             str(ROOT),
         ]

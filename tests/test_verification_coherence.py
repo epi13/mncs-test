@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = Path(os.environ.get("MNCS_WORKSPACE_ROOT", next(
+    (candidate for candidate in (ROOT.parent, *ROOT.parents) if (candidate / "mncs-language").is_dir()),
+    ROOT.parent,
+)))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from mncs_test import (
@@ -14,9 +18,9 @@ from mncs_test import (
     evaluate_verification_coherence,
 )
 
-LANGUAGE_ROOT = ROOT.parent / "mncs-language"
-COMMONS_ROOT = ROOT.parent / "MNCS-Commons"
-MNCS = Path(os.environ.get("MNCS_BINARY", LANGUAGE_ROOT / "target/debug/mncs"))
+LANGUAGE_ROOT = Path(os.environ.get("MNCS_LANGUAGE_REPO", WORKSPACE_ROOT / "mncs-language"))
+COMMONS_ROOT = Path(os.environ.get("MNCS_COMMONS_REPO", WORKSPACE_ROOT / "MNCS-Commons"))
+MNCS = Path(os.environ.get("MNCS_BINARY", os.environ.get("MNCS", LANGUAGE_ROOT / "target/debug/mncs")))
 
 
 def _stdlib_library() -> Path:
@@ -65,7 +69,7 @@ def compiler_environment() -> dict[str, str]:
     environment["MNCS_LIBRARY_PATH"] = ":".join(
         [
             str(STDLIB_LIBRARY),
-            str(COMMONS_ROOT / "src/mncs_commons/mesh"),
+            str(COMMONS_ROOT / "src/mncs_commons/mesh/mncs"),
             str(ROOT / "native"),
             str(ROOT),
         ]

@@ -76,7 +76,7 @@ def test_native_selection_preserves_sorted_exact_identity_and_last_row_semantics
     assert selected == _reference(tests, requested)
     assert selected == [tests[1], tests[2]]
     assert summary == {
-        "authority": "mncs.test.exact_identity_selection_v1",
+        "authority": "mncs.test.exact_identity_selection_v2",
         "mode": "exact_test_identity",
         "status": "returned",
         "calls": 1,
@@ -121,7 +121,19 @@ def test_native_selection_batches_inventory_and_identity_requests(
     assert summary["selected_count"] == 65
 
 
-def test_overbound_identity_preserves_behavior_with_reported_host_fallback(
+def test_last_duplicate_candidate_wins_across_batch_boundary(tmp_path: Path) -> None:
+    tests = [{"id": f"candidate-{index:02d}"} for index in range(17)]
+    tests[0] = {"id": "repeat", "entry": "first"}
+    tests[-1] = {"id": "repeat", "entry": "last"}
+
+    selected, summary = _select(tmp_path, tests, ["repeat"])
+
+    assert selected == [tests[-1]]
+    assert summary["authority"] == "mncs.test.exact_identity_selection_v2"
+    assert summary["calls"] == 2
+
+
+def test_identity_over_512_bytes_executes_natively(
     tmp_path: Path,
 ) -> None:
     long_identity = "x" * 513
@@ -130,13 +142,36 @@ def test_overbound_identity_preserves_behavior_with_reported_host_fallback(
     selected, summary = _select(tmp_path, tests, [long_identity])
 
     assert selected == tests
-    assert summary["authority"] == "mncs-test.python_identity_fallback"
-    assert summary["requested_native_authority"] == "mncs.test.exact_identity_selection_v1"
-    assert summary["status"] == "host_fallback_input_bound"
-    assert summary["fallback_reason"] == "input_exceeds_native_512_byte_bound"
+    assert summary["authority"] == "mncs.test.exact_identity_selection_v2"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 1
 
 
-def test_overbudget_identity_work_preserves_behavior_with_reported_fallback(
+def test_multibyte_identity_is_segmented_at_utf8_boundaries(tmp_path: Path) -> None:
+    identity = "a" * 511 + "é" * 300
+    tests = [{"id": identity}]
+
+    selected, summary = _select(tmp_path, tests, [identity])
+
+    assert selected == tests
+    assert summary["authority"] == "mncs.test.exact_identity_selection_v2"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 1
+
+
+def test_identity_at_8192_byte_native_bound_executes_natively(tmp_path: Path) -> None:
+    identity = "x" * 8192
+    tests = [{"id": identity}]
+
+    selected, summary = _select(tmp_path, tests, [identity])
+
+    assert selected == tests
+    assert summary["authority"] == "mncs.test.exact_identity_selection_v2"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 1
+
+
+def test_adaptive_batches_keep_overbudget_identity_work_native(
     tmp_path: Path,
 ) -> None:
     identities = ["x" * 255 + f"{index:02d}" for index in range(16)]
@@ -145,6 +180,31 @@ def test_overbudget_identity_work_preserves_behavior_with_reported_fallback(
     selected, summary = _select(tmp_path, tests, identities)
 
     assert selected == _reference(tests, identities)
+    assert summary["authority"] == "mncs.test.exact_identity_selection_v2"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 2
+
+
+def test_identity_over_8192_bytes_uses_reported_host_fallback(tmp_path: Path) -> None:
+    identity = "x" * 8193
+    tests = [{"id": identity}]
+
+    selected, summary = _select(tmp_path, tests, [identity])
+
+    assert selected == tests
     assert summary["authority"] == "mncs-test.python_identity_fallback"
-    assert summary["status"] == "host_fallback_work_estimate"
-    assert summary["fallback_reason"] == "estimated_work_exceeds_native_step_budget"
+    assert summary["requested_native_authority"] == "mncs.test.exact_identity_selection_v2"
+    assert summary["status"] == "host_fallback_input_bound"
+    assert summary["fallback_reason"] == "input_exceeds_native_8192_byte_bound"
+
+
+def test_native_call_limit_uses_reported_host_fallback(tmp_path: Path) -> None:
+    tests = [{"id": f"candidate-{index:04d}"} for index in range(1025)]
+    requested = [str(tests[0]["id"])]
+
+    selected, summary = _select(tmp_path, tests, requested)
+
+    assert selected == [tests[0]]
+    assert summary["authority"] == "mncs-test.python_identity_fallback"
+    assert summary["status"] == "host_fallback_call_limit"
+    assert summary["fallback_reason"] == "native_batch_call_limit_exceeded"

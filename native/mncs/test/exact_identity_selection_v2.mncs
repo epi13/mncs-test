@@ -1,0 +1,216 @@
+mncs 0.18;
+
+// Exact compiler Test identity selection for the Test runner. Long identities
+// are represented as bounded UTF-8 parts and compared entirely in MNCS.
+module mncs.test.exact_identity_selection_v2;
+
+use mncs.std.application.v1;
+
+record IdentityPartV2 {
+    bytes: [byte; up_to 512]
+}
+
+record IdentityTextV2 {
+    byte_count: u64,
+    part_count: u64,
+    parts: [IdentityPartV2; up_to 16]
+}
+
+record IdentityCandidateV2 {
+    test_index: u64,
+    identity: IdentityTextV2
+}
+
+record RequestedIdentityV2 {
+    request_index: u64,
+    identity: IdentityTextV2
+}
+
+record ExactIdentitySelectionRequestV2 {
+    schema_version: [byte; up_to 64],
+    candidate_count: u64,
+    candidates: [IdentityCandidateV2; up_to 16],
+    requested_count: u64,
+    requested: [RequestedIdentityV2; up_to 16]
+}
+
+record CandidateMatchV2 {
+    found: bool,
+    test_index: u64
+}
+
+record RequestedMatchV2 {
+    request_index: u64,
+    found: bool,
+    test_index: u64
+}
+
+record RequestedMatchBuilderV2 {
+    values: [RequestedMatchV2; 16],
+    length: u64
+}
+
+record ExactIdentitySelectionResultV2 {
+    schema_version: [byte; up_to 64],
+    match_count: u64,
+    matches: [RequestedMatchV2; up_to 16]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 101, 120, 97, 99, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 101, 120, 97, 99, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 47, 50];
+}
+
+fn same_bytes(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn identity_byte_total(identity: IdentityTextV2) -> (result: u64) {
+    iterate i over identity.parts carrying total: u64 = 0 {
+        next total = total +% identity.parts[i].bytes.len;
+    }
+    return total;
+}
+
+fn valid_identity(identity: IdentityTextV2) -> (result: bool) {
+    return identity.part_count == identity.parts.len
+        && identity.part_count <= 16
+        && identity.byte_count == identity_byte_total(identity);
+}
+
+fn same_identity(left: IdentityTextV2, right: IdentityTextV2) -> (result: bool) {
+    if left.byte_count != right.byte_count || left.part_count != right.part_count {
+        return false;
+    }
+    iterate i over left.parts carrying same: bool = true {
+        next same = same && same_bytes(left.parts[i].bytes, right.parts[i].bytes);
+    }
+    return same;
+}
+
+fn empty_requested_match_builder() -> (result: RequestedMatchBuilderV2) {
+    return RequestedMatchBuilderV2 {
+        values: [RequestedMatchV2 { request_index: 0, found: false, test_index: 0 }; 16],
+        length: 0
+    };
+}
+
+fn merge_candidate_match(
+    current: CandidateMatchV2,
+    candidate: IdentityCandidateV2,
+    identity: IdentityTextV2,
+    include: bool
+) -> (result: CandidateMatchV2) {
+    if include && same_identity(candidate.identity, identity) {
+        return CandidateMatchV2 {
+            found: true,
+            test_index: candidate.test_index
+        };
+    }
+    return current;
+}
+
+fn last_candidate_match(
+    request: ExactIdentitySelectionRequestV2,
+    identity: IdentityTextV2
+) -> (result: CandidateMatchV2) {
+    let seed: CandidateMatchV2 = CandidateMatchV2 { found: false, test_index: 0 };
+    iterate i over request.candidates carrying selected: CandidateMatchV2 = seed {
+        next selected = merge_candidate_match(
+            selected,
+            request.candidates[i],
+            identity,
+            i < request.candidate_count
+        );
+    }
+    return selected;
+}
+
+fn push_requested_match(
+    builder: RequestedMatchBuilderV2,
+    request_index: u64,
+    candidate: CandidateMatchV2,
+    include: bool
+) -> (result: RequestedMatchBuilderV2) {
+    if !include || builder.length >= 16 {
+        return builder;
+    }
+    return RequestedMatchBuilderV2 {
+        values: replace(
+            builder.values,
+            builder.length,
+            RequestedMatchV2 {
+                request_index: request_index,
+                found: candidate.found,
+                test_index: candidate.test_index
+            }
+        ),
+        length: builder.length +% 1
+    };
+}
+
+fn valid_request(request: ExactIdentitySelectionRequestV2) -> (result: bool) {
+    if !same_bytes(request.schema_version, request_schema())
+        || request.candidate_count != request.candidates.len
+        || request.requested_count != request.requested.len
+        || request.candidate_count > 16
+        || request.requested_count > 16 {
+        return false;
+    }
+    iterate i over request.candidates carrying candidates_valid: bool = true {
+        next candidates_valid = candidates_valid
+            && valid_identity(request.candidates[i].identity);
+    }
+    iterate i over request.requested carrying requests_valid: bool = true {
+        next requests_valid = requests_valid
+            && valid_identity(request.requested[i].identity);
+    }
+    return candidates_valid && requests_valid;
+}
+
+fn select_matches(request: ExactIdentitySelectionRequestV2) -> (result: [RequestedMatchV2; up_to 16]) {
+    let seed: RequestedMatchBuilderV2 = empty_requested_match_builder();
+    iterate i over request.requested carrying selected: RequestedMatchBuilderV2 = seed {
+        next selected = push_requested_match(
+            selected,
+            request.requested[i].request_index,
+            last_candidate_match(request, request.requested[i].identity),
+            i < request.requested_count
+        );
+    }
+    return selected.values[0..selected.length];
+}
+
+fn exact_identity_selection_app_v2(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 101, 120, 97, 99, 116, 32, 84, 101, 115, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ExactIdentitySelectionRequestV2 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 101, 120, 97, 99, 116, 32, 84, 101, 115, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let matches: [RequestedMatchV2; up_to 16] = select_matches(request);
+    let response: ExactIdentitySelectionResultV2 = ExactIdentitySelectionResultV2 {
+        schema_version: result_schema(),
+        match_count: matches.len,
+        matches: matches
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), response);
+    if published == 0 {
+        return failure([101, 120, 97, 99, 116, 32, 84, 101, 115, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

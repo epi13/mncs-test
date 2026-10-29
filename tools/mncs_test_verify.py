@@ -710,7 +710,19 @@ def obligation_libraries(obligation: dict, repo: Path, adapter_native: Path) -> 
         if not isinstance(raw, str) or not raw:
             raise VerifyError("obligation library path must be a non-empty string")
         candidate = Path(raw)
-        resolved = candidate if candidate.is_absolute() else (repo / candidate)
+        if candidate.is_absolute():
+            resolved = candidate
+        else:
+            resolved = (repo.resolve() / candidate).resolve()
+            if not resolved.is_dir() and ".." in candidate.parts:
+                # Linked checkouts live below .worktrees, so a declared sibling
+                # repository path such as ../mncs-stdlib/library must resolve
+                # from the nearest ancestor where that directory exists.
+                for ancestor in repo.resolve().parents[:2]:
+                    ancestor_candidate = ancestor / candidate
+                    if ancestor_candidate.is_dir():
+                        resolved = ancestor_candidate.resolve()
+                        break
         roots.append(str(resolved))
     roots.append(str(repo))
     roots.append(str(adapter_native))

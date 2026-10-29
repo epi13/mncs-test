@@ -13,6 +13,10 @@ from unittest import mock
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = next(
+    (candidate for candidate in (ROOT.parent, *ROOT.parents) if (candidate / "mncs-language").is_dir()),
+    ROOT.parent,
+)
 sys.path.insert(0, str(ROOT / "tools"))
 
 from mncs_test_native import run_native_app, toolchain_cache_dir  # noqa: E402
@@ -25,6 +29,7 @@ from mncs_test_verify import (  # noqa: E402
     finish_execution,
     measure_closure,
     measure_obligation,
+    obligation_libraries,
     obligation_scope,
     parse_evidence_envelope,
     receipt_core,
@@ -47,6 +52,53 @@ def test_cache_scope_is_stable_per_toolchain_and_distinct_across(tmp_path: Path)
     assert toolchain_cache_dir(str(debug)) == first
     assert toolchain_cache_dir(str(release)) != first
     assert first.parent.parent.name == ".mncs"
+
+
+def test_obligation_libraries_resolve_sibling_repo_from_linked_worktree(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "Projects"
+    primary_repo = workspace / "mncs-test"
+    linked_repo = primary_repo / ".worktrees" / "native-slice"
+    sibling_library = workspace / "mncs-stdlib" / "library"
+    sibling_library.mkdir(parents=True)
+    linked_repo.mkdir(parents=True)
+    obligation = {"executor": {"library_paths": ["../mncs-stdlib/library"]}}
+
+    roots = obligation_libraries(
+        obligation,
+        linked_repo,
+        linked_repo / "native",
+    )
+
+    assert roots == [
+        str(sibling_library.resolve()),
+        str(linked_repo.resolve()),
+        str((linked_repo / "native").resolve()),
+    ]
+
+
+def test_obligation_libraries_keep_primary_checkout_relative_resolution(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "Projects"
+    primary_repo = workspace / "mncs-test"
+    sibling_library = workspace / "mncs-stdlib" / "library"
+    sibling_library.mkdir(parents=True)
+    primary_repo.mkdir(parents=True)
+    obligation = {"executor": {"library_paths": ["../mncs-stdlib/library"]}}
+
+    roots = obligation_libraries(
+        obligation,
+        primary_repo,
+        primary_repo / "native",
+    )
+
+    assert roots == [
+        str(sibling_library.resolve()),
+        str(primary_repo.resolve()),
+        str((primary_repo / "native").resolve()),
+    ]
 
 
 def test_bash_and_python_scopes_agree(tmp_path: Path) -> None:
@@ -88,6 +140,15 @@ def test_transport_scopes_cache_unless_overridden(tmp_path: Path) -> None:
 
     environment = dict(os.environ)
     environment.pop("MNCS_NATIVE_APPLICATION_CACHE_DIR", None)
+    environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
+        str(path)
+        for path in (
+            WORKSPACE_ROOT / "mncs-stdlib" / "library",
+            ROOT / "native",
+            WORKSPACE_ROOT / "MNCS-Commons" / "src" / "mncs_commons" / "mesh" / "mncs",
+        )
+        if path.is_dir()
+    )
     with mock.patch("subprocess.run", side_effect=fake_run):
         with pytest.raises(Exception):
             run_native_app(
