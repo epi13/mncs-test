@@ -73,9 +73,10 @@ summary. If the native toolchain is not available, the command fails closed.
 A legacy manifest retains its behavior only through `mncs-test-compat`.
 
 Compile-only entries invoke `mncs validate`. A compile-fail or diagnostic
-entry is passing only when the compiler rejects the source and every declared
-diagnostic prefix is present. This is a temporary structured-output adapter,
-not string matching against human compiler prose.
+entry passes only when the compiler rejects the source and the MNCS application
+`mncs.test.diagnostic_match_v1` finds every declared prefix in the structured
+diagnostic codes. The host adapter forwards bounded code records and validates
+the native result; it does not decide which prefixes match.
 
 The result has two layers:
 

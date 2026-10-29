@@ -32,7 +32,7 @@ from family_contract import (
     validate_obligation_plan,
     validate_plan,
 )
-from mncs_test_native import NativeTransportError, run_runner_policy
+from mncs_test_native import NativeTransportError, run_native_app, run_runner_policy
 
 RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
@@ -42,7 +42,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.1"
+RUNNER_VERSION = "0.2.2"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -53,6 +53,14 @@ VERIFICATION_COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
 VERIFICATION_COHERENCE_MAX_OBLIGATIONS = 32
 VERIFICATION_COHERENCE_MAX_IDENTITIES = 64
 VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
+DIAGNOSTIC_MATCH_REQUEST_SCHEMA = "mncs.test-diagnostic-match-request/1"
+DIAGNOSTIC_MATCH_RESULT_SCHEMA = "mncs.test-diagnostic-match/1"
+DIAGNOSTIC_MATCH_EXPECTED_BATCH = 16
+DIAGNOSTIC_MATCH_ACTUAL_BATCH = 32
+MAX_DIAGNOSTIC_CODE_BYTES = 512
+MAX_DIAGNOSTIC_MATCH_PAIRS = 65_536
+MAX_DIAGNOSTIC_MATCH_CALLS = 64
+MAX_DIAGNOSTIC_EXPECTATIONS = DIAGNOSTIC_MATCH_EXPECTED_BATCH * MAX_DIAGNOSTIC_MATCH_CALLS
 
 EXIT_SUCCESS = 0
 EXIT_TEST_FAILURE = 1
@@ -302,11 +310,130 @@ def diagnostic_list(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-def diagnostic_matches(diagnostics: Iterable[dict[str, Any]], expected: list[str]) -> bool:
-    if not expected:
-        return bool(list(diagnostics))
-    codes = [str(item.get("code", "")) for item in diagnostics]
-    return all(any(code == wanted or code.startswith(wanted) for code in codes) for wanted in expected)
+def native_diagnostic_matches(
+    diagnostics: Iterable[dict[str, Any]],
+    expected: list[str],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bool:
+    """Carry structured diagnostic codes to the native Test matcher."""
+    if len(expected) > MAX_DIAGNOSTIC_EXPECTATIONS:
+        raise AdapterError("diagnostic matching exceeds the bounded native invocation limit")
+
+    expected_codes: list[str] = []
+    for item in expected:
+        if not isinstance(item, str):
+            raise ManifestError("diagnostic expectations must be text prefixes")
+        try:
+            if len(item.encode("utf-8")) > MAX_DIAGNOSTIC_CODE_BYTES:
+                raise ManifestError(
+                    "diagnostic expectation exceeds the native 512-byte prefix bound"
+                )
+        except UnicodeEncodeError as error:
+            raise ManifestError("diagnostic expectations must be valid UTF-8") from error
+        expected_codes.append(item)
+    expected_batch_count = (
+        len(expected_codes) + DIAGNOSTIC_MATCH_EXPECTED_BATCH - 1
+    ) // DIAGNOSTIC_MATCH_EXPECTED_BATCH
+    expected_batch_count = max(1, expected_batch_count)
+    if expected_batch_count > MAX_DIAGNOSTIC_MATCH_CALLS:
+        raise AdapterError("diagnostic matching exceeds the bounded native invocation limit")
+
+    def bounded_code(item: dict[str, Any]) -> str:
+        try:
+            raw = str(item.get("code", "")).encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AdapterError("compiler diagnostic codes must be valid UTF-8") from error
+        # Prefix matching only observes as many actual bytes as an expected
+        # prefix can contain. Truncating preserves that decision and keeps each
+        # native record bounded.
+        return raw[:MAX_DIAGNOSTIC_CODE_BYTES].decode("utf-8", errors="ignore")
+
+    if not expected_codes:
+        # The native policy only asks whether a diagnostic exists in this
+        # case, so forwarding one real diagnostic keeps the request bounded.
+        absent = object()
+        first = next(iter(diagnostics), absent)
+        actual_codes = [bounded_code(first)] if first is not absent else []
+    else:
+        actual_codes: list[str] = []
+        maximum_actual_codes = (
+            MAX_DIAGNOSTIC_MATCH_CALLS // expected_batch_count
+        ) * DIAGNOSTIC_MATCH_ACTUAL_BATCH
+        for item in diagnostics:
+            if len(actual_codes) >= maximum_actual_codes:
+                raise AdapterError(
+                    "diagnostic matching exceeds the bounded native invocation limit"
+                )
+            actual_codes.append(bounded_code(item))
+
+    if len(expected_codes) * len(actual_codes) > MAX_DIAGNOSTIC_MATCH_PAIRS:
+        raise AdapterError("diagnostic matching exceeds the bounded native comparison limit")
+
+    expected_batches = [
+        expected_codes[index:index + DIAGNOSTIC_MATCH_EXPECTED_BATCH]
+        for index in range(0, len(expected_codes), DIAGNOSTIC_MATCH_EXPECTED_BATCH)
+    ] or [[]]
+    actual_batches = [
+        actual_codes[index:index + DIAGNOSTIC_MATCH_ACTUAL_BATCH]
+        for index in range(0, len(actual_codes), DIAGNOSTIC_MATCH_ACTUAL_BATCH)
+    ] or [[]]
+    if len(expected_batches) * len(actual_batches) > MAX_DIAGNOSTIC_MATCH_CALLS:
+        raise AdapterError("diagnostic matching exceeds the bounded native invocation limit")
+
+    all_expected_before = True
+    for expected_batch in expected_batches:
+        matched_before = [False] * DIAGNOSTIC_MATCH_EXPECTED_BATCH
+        diagnostics_seen_before = False
+        final_match: bool | None = None
+        for actual_batch in actual_batches:
+            request = {
+                "schema_version": DIAGNOSTIC_MATCH_REQUEST_SCHEMA,
+                "expected_count": len(expected_batch),
+                "expected": [{"value": item} for item in expected_batch],
+                "actual_count": len(actual_batch),
+                "actual": [{"value": item} for item in actual_batch],
+                "matched_before": matched_before,
+                "all_expected_before": all_expected_before,
+                "diagnostics_seen_before": diagnostics_seen_before,
+            }
+            try:
+                result = run_native_app(
+                    "test-diagnostic-match.json",
+                    request,
+                    request_schema=DIAGNOSTIC_MATCH_REQUEST_SCHEMA,
+                    result_schema=DIAGNOSTIC_MATCH_RESULT_SCHEMA,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    step_budget=1_048_576,
+                )
+            except NativeTransportError as error:
+                raise AdapterError(f"native diagnostic matching failed: {error}") from error
+
+            returned_count = result.get("expected_count")
+            returned_matches = result.get("matched")
+            returned_all = result.get("all_matched")
+            returned_seen = result.get("diagnostics_seen")
+            if (
+                type(returned_count) is not int
+                or returned_count != len(expected_batch)
+                or not isinstance(returned_matches, list)
+                or len(returned_matches) != DIAGNOSTIC_MATCH_EXPECTED_BATCH
+                or any(type(value) is not bool for value in returned_matches)
+                or type(returned_all) is not bool
+                or type(returned_seen) is not bool
+            ):
+                raise AdapterError("native diagnostic matcher returned malformed decisions")
+            matched_before = returned_matches
+            diagnostics_seen_before = returned_seen
+            final_match = returned_all
+        if final_match is None:
+            raise AdapterError("native diagnostic matcher returned no batch decision")
+        all_expected_before = final_match
+    return all_expected_before
 
 
 def parse_json_output(stdout: bytes) -> Any:
@@ -498,6 +625,23 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
             isinstance(code, str) and DIAGNOSTIC_CODE.match(code) for code in diagnostic_codes
         ):
             raise ManifestError(f"tests[{index}].diagnostic_codes must contain diagnostic code prefixes")
+        if len(diagnostic_codes) > MAX_DIAGNOSTIC_EXPECTATIONS:
+            raise ManifestError(
+                f"tests[{index}].diagnostic_codes may contain at most "
+                f"{MAX_DIAGNOSTIC_EXPECTATIONS} prefixes"
+            )
+        for code in diagnostic_codes:
+            try:
+                code_bytes = code.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise ManifestError(
+                    f"tests[{index}].diagnostic_codes must contain valid UTF-8 prefixes"
+                ) from error
+            if len(code_bytes) > MAX_DIAGNOSTIC_CODE_BYTES:
+                raise ManifestError(
+                    f"tests[{index}].diagnostic_codes prefixes must be at most "
+                    f"{MAX_DIAGNOSTIC_CODE_BYTES} UTF-8 bytes"
+                )
         seen.add(test_id)
         normalized = dict(item)
         normalized.setdefault("kind", "unit")
@@ -1773,7 +1917,13 @@ def compile_entry(
                 message="source compiled but the manifest expected a diagnostic",
             )
         expected_codes = list(test.get("diagnostic_codes", []))
-        if not diagnostic_matches(diagnostics, expected_codes):
+        if not native_diagnostic_matches(
+            diagnostics,
+            expected_codes,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        ):
             return result_failure(
                 test_result,
                 failure_class="diagnostic_mismatch",
