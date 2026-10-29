@@ -7,8 +7,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = next(
+    (path for path in (ROOT.parent, *ROOT.parents) if (path / "mncs-language").is_dir()),
+    ROOT.parent,
+)
 sys.path.insert(0, str(ROOT / "tools"))
 
+import mncs_test
 from mncs_test import (
     ArtifactStore,
     _apply_host_grants,
@@ -23,9 +28,9 @@ from mncs_test import (
     validate_manifest,
 )
 
-LANGUAGE_ROOT = ROOT.parent / "mncs-language"
-COMMONS_ROOT = ROOT.parent / "MNCS-Commons"
-MNCS = Path(os.environ.get("MNCS_BINARY", LANGUAGE_ROOT / "target/debug/mncs"))
+LANGUAGE_ROOT = WORKSPACE_ROOT / "mncs-language"
+COMMONS_ROOT = WORKSPACE_ROOT / "MNCS-Commons"
+MNCS = Path(os.environ.get("MNCS_BINARY", os.environ.get("MNCS", LANGUAGE_ROOT / "target/debug/mncs")))
 
 
 def _stdlib_library() -> Path:
@@ -33,7 +38,7 @@ def _stdlib_library() -> Path:
     explicit = os.environ.get("MNCS_STDLIB_ROOT")
     if explicit:
         return Path(explicit) / "library"
-    sibling = ROOT.parent / "mncs-stdlib"
+    sibling = WORKSPACE_ROOT / "mncs-stdlib"
     if (sibling / "stdlib-manifest.json").is_file():
         return sibling / "library"
     return LANGUAGE_ROOT / "library"
@@ -47,7 +52,7 @@ def compiler_environment() -> dict[str, str]:
     environment["MNCS_LIBRARY_PATH"] = ":".join(
         [
             str(STDLIB_LIBRARY),
-            str(COMMONS_ROOT / "src/mncs_commons/mesh"),
+            str(COMMONS_ROOT / "src/mncs_commons/mesh/mncs"),
             str(ROOT / "native"),
             str(ROOT),
         ]
@@ -167,7 +172,10 @@ def test_native_selection_keeps_external_repository_obligations_out_of_its_small
     assert len(summary["new_execution_obligation_identities"]) == 25
 
 
-def test_repository_manifest_grant_is_exactly_selected_and_transported(tmp_path: Path) -> None:
+def test_repository_manifest_grant_is_exactly_selected_and_transported(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     identity = "mncs:0.2:test-case:process::cancel"
     other_identity = "mncs:0.2:test-case:process::observe"
     grant = {"capability": "process_capability", "locator": "/usr/bin/sleep", "bytes": []}
@@ -211,12 +219,29 @@ def test_repository_manifest_grant_is_exactly_selected_and_transported(tmp_path:
             return [{"status": "unsupported"} for _ in requests]
 
     session = Session()
+    monkeypatch.setattr(
+        mncs_test,
+        "run_execution_adjudication",
+        lambda cases, **_kwargs: [
+            {
+                "decision": "unsupported_execution",
+                "status": "unsupported",
+                "verdict": "UNKNOWN",
+                "failure_class": "unsupported",
+                "expected_failure": False,
+            }
+            for _case in cases
+        ],
+    )
     execute_batch(
         tests=[selected[0]],
         source_path=source,
         source_text=source.read_text(encoding="utf-8"),
         module="fixture.process",
         session=session,
+        mncs="mncs",
+        cwd=tmp_path,
+        environment={},
         default_step_budget=10,
         artifacts=ArtifactStore(tmp_path / "artifacts"),
         transport={},

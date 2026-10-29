@@ -79,6 +79,18 @@ compile-pass, compile-fail, and diagnostic entries. The host adapter carries
 the raw process exit code and bounded structured compiler fields, then maps the
 native verdict into the established result envelope.
 
+For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
+Test runner's execution-status, expected-failure, native-verdict, and suite
+result policy. Retained-session batches are projected into bounded cases and
+adjudicated in MNCS batches of at most 256. The Python adapter still owns
+process transport, typed-value projection, detailed diagnostics, and the
+public result envelope; it applies the native decision without reclassifying
+the outcome. The subprocess fallback invokes the same application for each
+decoded result. Native application calls, including the obligation-selection
+CLI, share `tools/mncs_test_native.py` for bounded request transport and
+selected-workspace library resolution, so linked worktrees do not depend on
+the original repository path depth.
+
 When a result has no native suite fold, the MNCS application
 `mncs.test.result_summary_v1` owns its aggregate counters. The adapter sends
 bounded verdict, status, native assertion-count, and failure-class fields;

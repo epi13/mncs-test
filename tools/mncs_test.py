@@ -32,7 +32,13 @@ from family_contract import (
     validate_obligation_plan,
     validate_plan,
 )
-from mncs_test_native import NativeTransportError, run_native_app, run_runner_policy
+from mncs_test_native import (
+    EXECUTION_ADJUDICATION_MAX_CASES,
+    NativeTransportError,
+    run_execution_adjudication,
+    run_native_app,
+    run_runner_policy,
+)
 
 RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
@@ -42,12 +48,14 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.4"
+RUNNER_VERSION = "0.2.5"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
 NATIVE_OBLIGATION_SELECTION_MAX_ITEMS = 16
 NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH = 1024
+OBLIGATION_SELECTION_REQUEST_SCHEMA = "mncs.test-obligation-selection-request/1"
+OBLIGATION_SELECTION_RESULT_SCHEMA = "mncs.test-obligation-selection/1"
 VERIFICATION_COHERENCE_REQUEST_SCHEMA = "mncs.test-verification-coherence-request/1"
 VERIFICATION_COHERENCE_RESULT_SCHEMA = "mncs.test-verification-coherence/1"
 VERIFICATION_COHERENCE_MAX_OBLIGATIONS = 32
@@ -1409,6 +1417,146 @@ def result_failure(
     return test_result
 
 
+def execution_adjudication_case(
+    *,
+    test: dict[str, Any],
+    decoded: dict[str, Any],
+    suite: bool,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Project one decoded output into the bounded native policy request."""
+    status = decoded.get("status")
+    if isinstance(status, str):
+        try:
+            status_size = len(status.encode("utf-8"))
+        except UnicodeEncodeError:
+            status_size = 65
+    else:
+        status_size = 65
+    # Any non-text or oversize status is deliberately mapped to an unknown
+    # native token. The original value remains in TestResult for diagnostics.
+    native_status = (
+        status if isinstance(status, str) and status_size <= 64
+        else "<invalid-status>"
+    )
+    native: dict[str, Any] | None = None
+    if status == "returned":
+        native = native_suite_summary(decoded) if suite else native_test_result(decoded)
+    expected_status = expected_status_for(test) or ""
+    return {
+        "execution_status": native_status,
+        "expected_status": expected_status,
+        "suite": suite,
+        "native_result_present": native is not None,
+        "native_verdict": native.get("verdict", "") if native is not None else "",
+        "native_failure_class": (
+            native.get("failure_kind", "") if native is not None and not suite else ""
+        ),
+    }, native
+
+
+def apply_execution_adjudication(
+    *,
+    test_result: dict[str, Any],
+    decoded: dict[str, Any],
+    native: dict[str, Any] | None,
+    decision: dict[str, Any],
+    step_budget: int,
+    expected_status: str | None,
+    failure_reason_fallback: bool,
+) -> dict[str, Any]:
+    """Materialize the native policy decision in the public result envelope."""
+    classification = decision["decision"]
+    status = decoded.get("status")
+    test_result["status"] = decision["status"]
+    test_result["verdict"] = decision["verdict"]
+    if native is not None:
+        test_result["native_result"] = native
+
+    if classification in {"suite_result", "success", "skip"}:
+        return test_result
+    if classification == "expected_failure":
+        test_result["expected_failure"] = True
+        test_result["failure"] = {
+            "class": decision["failure_class"],
+            "message": f"expected MNCS execution status {status}",
+            "expected": True,
+        }
+        return test_result
+    if classification == "unknown_status":
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message="MNCS emitted an unknown execution status",
+            observed_status=status,
+        )
+    if classification == "malformed_result":
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message="returned value is not the declared native test result shape",
+        )
+    if classification == "unsupported_returned":
+        test_result["failure"] = {
+            "class": decision["failure_class"],
+            "message": "native test reported an unsupported capability",
+            "code": (native or {}).get("failure_code"),
+        }
+        return test_result
+    if classification == "unsupported_execution":
+        test_result["failure"] = {
+            "class": decision["failure_class"],
+            "message": "MNCS reported an unsupported capability",
+        }
+        return test_result
+    if classification == "assertion_failure":
+        observed = native or {}
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message="native assertion failed",
+            expected=observed.get("expected"),
+            actual=observed.get("actual"),
+            assertion_code=observed.get("assertion_code"),
+            native_result=observed,
+        )
+    if classification == "expectation_mismatch":
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message=f"expected execution status {expected_status}, got {status}",
+            expected_status=expected_status,
+            observed_status=status,
+        )
+    if classification == "timeout":
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message="MNCS exhausted the declared step budget",
+            step_budget=step_budget,
+        )
+    if classification == "runtime_failure":
+        failure = decoded.get("failure")
+        if failure_reason_fallback and not failure:
+            failure = decoded.get("failure_reason")
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message="MNCS test entrypoint terminated with a runtime failure",
+            execution_failure=failure,
+        )
+    if classification == "invalid_request":
+        failure = decoded.get("failure")
+        if failure_reason_fallback and not failure:
+            failure = decoded.get("failure_reason")
+        return result_failure(
+            test_result,
+            failure_class=decision["failure_class"],
+            message="MNCS rejected the execution request",
+            execution_failure=failure,
+        )
+    raise AdapterError("MNCS execution adjudication returned an unknown decision")
+
+
 def execution_result_from_decoded(
     *,
     test: dict[str, Any],
@@ -1416,6 +1564,7 @@ def execution_result_from_decoded(
     source_text: str,
     decoded: Any,
     step_budget: int,
+    adjudication: dict[str, Any] | None = None,
     suite: bool = False,
     transport: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1480,100 +1629,21 @@ def execution_result_from_decoded(
             **expected_reference,
             "execution_status": decoded.get("status"),
         }
-    if status not in EXECUTION_STATUSES:
-        return result_failure(
-            test_result,
-            failure_class="infrastructure_failure",
-            message="MNCS emitted an unknown execution status",
-            observed_status=status,
-        )
-    expected_status = expected_status_for(test)
-    if status == "returned":
-        native = native_test_result(decoded)
-        if suite:
-            native = native_suite_summary(decoded)
-        if native is None:
-            return result_failure(
-                test_result,
-                failure_class="malformed_test_result",
-                message="returned value is not the declared native test result shape",
-            )
-        test_result["native_result"] = native
-        if suite:
-            test_result["status"] = "passed" if native["verdict"] == "PASS" else "returned"
-            test_result["verdict"] = external_verdict(native["verdict"])
-            return test_result
-        verdict = native["verdict"]
-        if verdict == "PASS":
-            test_result["status"] = "passed"
-            test_result["verdict"] = "PASS"
-        elif verdict == "SKIP":
-            test_result["status"] = "skipped"
-            test_result["verdict"] = "PASS"
-        elif verdict == "UNSUPPORTED":
-            test_result["status"] = "unsupported"
-            test_result["verdict"] = "UNKNOWN"
-            test_result["failure"] = {
-                "class": "unsupported",
-                "message": "native test reported an unsupported capability",
-                "code": native.get("failure_code"),
-            }
-        else:
-            return result_failure(
-                test_result,
-                failure_class=native.get("failure_kind", "assertion"),
-                message="native assertion failed",
-                expected=native.get("expected"),
-                actual=native.get("actual"),
-                assertion_code=native.get("assertion_code"),
-                native_result=native,
-            )
-        if expected_status and expected_status != status:
-            return result_failure(
-                test_result,
-                failure_class="expectation_mismatch",
-                message=f"expected execution status {expected_status}, got {status}",
-                expected_status=expected_status,
-                observed_status=status,
-            )
-        return test_result
-    if expected_status == status:
-        test_result["status"] = "expected_failure"
-        test_result["verdict"] = "PASS"
-        test_result["expected_failure"] = True
-        test_result["failure"] = {
-            "class": status,
-            "message": f"expected MNCS execution status {status}",
-            "expected": True,
-        }
-        return test_result
-    if status == "unsupported":
-        test_result["verdict"] = "UNKNOWN"
-        test_result["status"] = "unsupported"
-        test_result["failure"] = {
-            "class": "unsupported",
-            "message": "MNCS reported an unsupported capability",
-        }
-        return test_result
-    if status == "budget_exhausted":
-        return result_failure(
-            test_result,
-            failure_class="timeout",
-            message="MNCS exhausted the declared step budget",
-            step_budget=step_budget,
-        )
-    if status == "runtime_failure":
-        return result_failure(
-            test_result,
-            failure_class="runtime_failure",
-            message="MNCS test entrypoint terminated with a runtime failure",
-            execution_failure=decoded.get("failure") or decoded.get("failure_reason"),
-        )
-    return result_failure(
-        test_result,
-        failure_class="malformed_test_declaration",
-        message="MNCS rejected the execution request",
-        execution_failure=decoded.get("failure") or decoded.get("failure_reason"),
+    _native_case, native = execution_adjudication_case(
+        test=test,
+        decoded=decoded,
+        suite=suite,
+    )
+    if not isinstance(adjudication, dict):
+        raise AdapterError("execution result is missing its native adjudication")
+    return apply_execution_adjudication(
+        test_result=test_result,
+        decoded=decoded,
+        native=native,
+        decision=adjudication,
+        step_budget=step_budget,
+        expected_status=expected_status_for(test),
+        failure_reason_fallback=True,
     )
 
 
@@ -1674,100 +1744,25 @@ def execute_entry(
         )
         if key in decoded
     }
-    if status not in EXECUTION_STATUSES:
-        return result_failure(
-            test_result,
-            failure_class="infrastructure_failure",
-            message="MNCS emitted an unknown execution status",
-            observed_status=status,
-        )
-    expected_status = expected_status_for(test)
-    if status == "returned":
-        native = native_test_result(decoded)
-        if suite:
-            native = native_suite_summary(decoded)
-        if native is None:
-            return result_failure(
-                test_result,
-                failure_class="malformed_test_result",
-                message="returned value is not the declared native test result shape",
-            )
-        test_result["native_result"] = native
-        if suite:
-            test_result["status"] = "passed" if native["verdict"] == "PASS" else "returned"
-            test_result["verdict"] = external_verdict(native["verdict"])
-            return test_result
-        verdict = native["verdict"]
-        if verdict == "PASS":
-            test_result["status"] = "passed"
-            test_result["verdict"] = "PASS"
-        elif verdict == "SKIP":
-            test_result["status"] = "skipped"
-            test_result["verdict"] = "PASS"
-        elif verdict == "UNSUPPORTED":
-            test_result["status"] = "unsupported"
-            test_result["verdict"] = "UNKNOWN"
-            test_result["failure"] = {
-                "class": "unsupported",
-                "message": "native test reported an unsupported capability",
-                "code": native.get("failure_code"),
-            }
-        else:
-            return result_failure(
-                test_result,
-                failure_class=native.get("failure_kind", "assertion"),
-                message="native assertion failed",
-                expected=native.get("expected"),
-                actual=native.get("actual"),
-                assertion_code=native.get("assertion_code"),
-                native_result=native,
-            )
-        if expected_status and expected_status != status:
-            return result_failure(
-                test_result,
-                failure_class="expectation_mismatch",
-                message=f"expected execution status {expected_status}, got {status}",
-                expected_status=expected_status,
-                observed_status=status,
-            )
-        return test_result
-    if expected_status == status:
-        test_result["status"] = "expected_failure"
-        test_result["verdict"] = "PASS"
-        test_result["expected_failure"] = True
-        test_result["failure"] = {
-            "class": status,
-            "message": f"expected MNCS execution status {status}",
-            "expected": True,
-        }
-        return test_result
-    if status == "unsupported":
-        test_result["verdict"] = "UNKNOWN"
-        test_result["status"] = "unsupported"
-        test_result["failure"] = {
-            "class": "unsupported",
-            "message": "MNCS reported an unsupported capability",
-        }
-        return test_result
-    if status == "budget_exhausted":
-        return result_failure(
-            test_result,
-            failure_class="timeout",
-            message="MNCS exhausted the declared step budget",
-            step_budget=step_budget,
-        )
-    if status == "runtime_failure":
-        return result_failure(
-            test_result,
-            failure_class="runtime_failure",
-            message="MNCS test entrypoint terminated with a runtime failure",
-            execution_failure=decoded.get("failure"),
-        )
-    return result_failure(
-        test_result,
-        failure_class="malformed_test_declaration",
-        message="MNCS rejected the execution request",
-        execution_failure=decoded.get("failure"),
+    case, native = execution_adjudication_case(
+        test=test,
+        decoded=decoded,
+        suite=suite,
+    )
+    outcome = run_execution_adjudication(
+        [case],
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )[0]
+    return apply_execution_adjudication(
+        test_result=test_result,
+        decoded=decoded,
+        native=native,
+        decision=outcome,
+        step_budget=step_budget,
+        expected_status=expected_status_for(test),
+        failure_reason_fallback=False,
     )
 
 
@@ -1778,10 +1773,14 @@ def execute_batch(
     source_text: str,
     module: str,
     session: EmbedSession,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
     default_step_budget: int,
     artifacts: ArtifactStore,
     transport: dict[str, Any],
     suite: bool = False,
+    native_adjudication_summary: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     request_documents: list[dict[str, Any]] = []
     transport_requests: list[dict[str, Any]] = []
@@ -1868,6 +1867,38 @@ def execute_batch(
             results.append(result)
         return results
     results: list[dict[str, Any]] = []
+    adjudication_cases: list[dict[str, Any]] = []
+    adjudication_indices: list[int] = []
+    for index, test in enumerate(tests):
+        if index >= len(decoded) or not isinstance(decoded[index], dict):
+            continue
+        case, _native = execution_adjudication_case(
+            test=test,
+            decoded=decoded[index],
+            suite=suite,
+        )
+        adjudication_cases.append(case)
+        adjudication_indices.append(index)
+    adjudication_by_index: dict[int, dict[str, Any]] = {}
+    adjudication_calls = 0
+    for offset in range(0, len(adjudication_cases), EXECUTION_ADJUDICATION_MAX_CASES):
+        case_batch = adjudication_cases[offset:offset + EXECUTION_ADJUDICATION_MAX_CASES]
+        index_batch = adjudication_indices[offset:offset + EXECUTION_ADJUDICATION_MAX_CASES]
+        adjudication_results = run_execution_adjudication(
+            case_batch,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+        adjudication_by_index.update(
+            zip(index_batch, adjudication_results, strict=True)
+        )
+        adjudication_calls += 1
+    if native_adjudication_summary is not None:
+        native_adjudication_summary.update({
+            "calls": adjudication_calls,
+            "case_count": len(adjudication_cases),
+        })
     for index, test in enumerate(tests):
         if index >= len(decoded):
             result = result_failure(
@@ -1884,6 +1915,7 @@ def execute_batch(
                 source_text=source_text,
                 decoded=decoded[index],
                 step_budget=int(test.get("step_budget", default_step_budget)),
+                adjudication=adjudication_by_index.get(index),
                 suite=suite,
                 transport=transport,
             )
@@ -3265,7 +3297,7 @@ def apply_obligation_plan(
         if isinstance(test, dict) and isinstance(test.get("id"), str) and test["id"]
     }
     request = {
-        "schema_version": "mncs.test-obligation-selection-request/1",
+        "schema_version": OBLIGATION_SELECTION_REQUEST_SCHEMA,
         "plan_identity": str(obligation_plan.get("obligation_plan_id", "")),
         "obligations": [
             {
@@ -3311,53 +3343,22 @@ def apply_obligation_plan(
             "native obligation selection identity bound exceeded: at most "
             f"{NATIVE_OBLIGATION_SELECTION_MAX_IDENTITY_LENGTH} UTF-8 bytes"
         )
-    descriptor = Path(__file__).resolve().parents[1] / "native-applications" / "obligation-selection.json"
-    if not descriptor.is_file():
-        raise ManifestError(f"native obligation selection descriptor is unavailable: {descriptor}")
     cwd = cwd.resolve()
     try:
-        with tempfile.TemporaryDirectory(prefix=".mncs-test-obligation-selection-", dir=cwd) as directory:
-            directory_path = Path(directory)
-            request_path = directory_path / "request.json"
-            result_path = directory_path / "result.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
-            relative_request = request_path.relative_to(cwd).as_posix()
-            relative_result = result_path.relative_to(cwd).as_posix()
-            completed = subprocess.run(
-                [
-                    mncs,
-                    "run-app",
-                    str(descriptor),
-                    "--grant-structured",
-                    "test_artifact",
-                    "--step-budget",
-                    "1048576",
-                    "--",
-                    relative_request,
-                    relative_result,
-                ],
-                cwd=str(cwd),
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout_seconds,
-            )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or completed.stdout.strip()
-                raise ManifestError(
-                    f"native obligation selection failed (exit {completed.returncode}): {detail}"
-                )
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                raise ManifestError(f"native obligation selection returned no valid result: {error}") from error
-    except subprocess.TimeoutExpired as error:
-        raise ManifestError(
-            f"native obligation selection exceeded {timeout_seconds}s"
-        ) from error
+        result = run_native_app(
+            "obligation-selection.json",
+            request,
+            request_schema=OBLIGATION_SELECTION_REQUEST_SCHEMA,
+            result_schema=OBLIGATION_SELECTION_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+    except NativeTransportError as error:
+        raise ManifestError(f"native obligation selection failed: {error}") from error
 
-    if not isinstance(result, dict) or result.get("schema_version") != "mncs.test-obligation-selection/1":
+    if not isinstance(result, dict) or result.get("schema_version") != OBLIGATION_SELECTION_RESULT_SCHEMA:
         raise ManifestError("native obligation selection returned an invalid result schema")
     missing = _native_selection_identities(result.get("missing_test_identities"), "missing test identities")
     if missing:
@@ -4568,16 +4569,26 @@ def run_manifest(args: argparse.Namespace) -> int:
                             "artifact_sha256": (execution.get("session") or {}).get("artifact_sha256"),
                             "batch_size": len(configured_tests),
                         }
+                        adjudication_summary: dict[str, int] = {}
                         test_results = execute_batch(
                             tests=configured_tests,
                             source_path=Path(manifest["source_path"]),
                             source_text=source_text,
                             module=manifest["module"],
                             session=session,
+                            mncs=mncs,
+                            cwd=cwd,
+                            environment=environment,
                             default_step_budget=args.step_budget or manifest["step_budget"],
                             artifacts=artifacts,
                             transport=transport,
+                            native_adjudication_summary=adjudication_summary,
                         )
+                        execution["native_adjudication"] = {
+                            "authority": "mncs.test.execution_adjudication_v1",
+                            "status": "returned" if adjudication_summary.get("calls", 0) else "not_run",
+                            **adjudication_summary,
+                        }
                         suite_summary, native_aggregation = native_suite_fold(
                             test_results=test_results,
                             session=session,

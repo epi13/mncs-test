@@ -13,11 +13,13 @@ native-first path.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -260,6 +262,196 @@ RUNNER_POLICY_CLASSIFICATIONS = frozenset({
     "invalid_invocation", "infrastructure_failure", "compile_failure",
     "timeout", "unsupported",
 })
+NATIVE_CLI_REQUEST_MAX_BYTES = 1_048_576
+NATIVE_CLI_RESULT_MAX_BYTES = 1_048_576
+
+EXECUTION_ADJUDICATION_REQUEST_SCHEMA = (
+    "mncs.test-execution-adjudication-request/1"
+)
+EXECUTION_ADJUDICATION_RESULT_SCHEMA = "mncs.test-execution-adjudication/1"
+EXECUTION_ADJUDICATION_MAX_CASES = 256
+EXECUTION_ADJUDICATION_DECISIONS = frozenset({
+    "unknown_status", "malformed_result", "suite_result", "success", "skip",
+    "unsupported_returned", "assertion_failure", "expectation_mismatch",
+    "expected_failure", "unsupported_execution", "timeout", "runtime_failure",
+    "invalid_request",
+})
+EXECUTION_ADJUDICATION_STATUSES = frozenset({
+    "passed", "returned", "skipped", "unsupported", "failed", "expected_failure",
+})
+EXECUTION_ADJUDICATION_VERDICTS = frozenset({"PASS", "FAIL", "UNKNOWN"})
+EXECUTION_STATUS_VALUES = frozenset({
+    "returned", "runtime_failure", "unsupported", "budget_exhausted", "invalid_request",
+})
+
+
+def _bounded_adjudication_text(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise NativeTransportError(f"execution adjudication {field} must be text")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise NativeTransportError(
+            f"execution adjudication {field} must be valid UTF-8"
+        ) from error
+    if size > 64:
+        raise NativeTransportError(
+            f"execution adjudication {field} exceeds the 64-byte native bound"
+        )
+    return value
+
+
+def run_execution_adjudication(
+    cases: list[dict],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> list[dict]:
+    """Ask the native Test application to interpret a bounded result batch."""
+    if not isinstance(cases, list) or len(cases) > EXECUTION_ADJUDICATION_MAX_CASES:
+        raise NativeTransportError(
+            "execution adjudication accepts at most "
+            f"{EXECUTION_ADJUDICATION_MAX_CASES} result cases"
+        )
+    normalized: list[dict[str, object]] = []
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            raise NativeTransportError("execution adjudication cases must be objects")
+        if set(case) != {
+            "execution_status", "expected_status", "suite",
+            "native_result_present", "native_verdict", "native_failure_class",
+        }:
+            raise NativeTransportError(
+                f"execution adjudication case {index} has an invalid field set"
+            )
+        execution_status = _bounded_adjudication_text(
+            case["execution_status"], "execution_status",
+        )
+        expected_status = _bounded_adjudication_text(
+            case["expected_status"], "expected_status",
+        )
+        native_verdict = _bounded_adjudication_text(
+            case["native_verdict"], "native_verdict",
+        )
+        native_failure_class = _bounded_adjudication_text(
+            case["native_failure_class"], "native_failure_class",
+        )
+        suite = case["suite"]
+        native_result_present = case["native_result_present"]
+        if type(suite) is not bool or type(native_result_present) is not bool:
+            raise NativeTransportError(
+                f"execution adjudication case {index} has invalid boolean fields"
+            )
+        if expected_status and expected_status not in EXECUTION_STATUS_VALUES:
+            raise NativeTransportError(
+                f"execution adjudication case {index} has an unknown expected status"
+            )
+        if native_result_present:
+            allowed_verdicts = {"PASS", "FAIL", "UNSUPPORTED"}
+            if not suite:
+                allowed_verdicts.add("SKIP")
+            if (execution_status != "returned"
+                    or native_verdict not in allowed_verdicts
+                    or (suite and native_failure_class)
+                    or (not suite and not native_failure_class)):
+                raise NativeTransportError(
+                    f"execution adjudication case {index} has an invalid native result"
+                )
+        elif native_verdict or native_failure_class:
+            raise NativeTransportError(
+                f"execution adjudication case {index} supplied fields without a native result"
+            )
+        normalized.append({
+            "execution_status": execution_status,
+            "expected_status": expected_status,
+            "suite": suite,
+            "native_result_present": native_result_present,
+            "native_verdict": native_verdict,
+            "native_failure_class": native_failure_class,
+        })
+    request = {
+        "schema_version": EXECUTION_ADJUDICATION_REQUEST_SCHEMA,
+        "case_count": len(normalized),
+        "cases": normalized,
+    }
+    result = run_native_app(
+        "test-execution-adjudication.json",
+        request,
+        request_schema=EXECUTION_ADJUDICATION_REQUEST_SCHEMA,
+        result_schema=EXECUTION_ADJUDICATION_RESULT_SCHEMA,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+    )
+    outcomes = result.get("outcomes")
+    if (type(result.get("outcome_count")) is not int
+            or result.get("outcome_count") != len(normalized)
+            or not isinstance(outcomes, list)
+            or len(outcomes) != len(normalized)):
+        raise NativeTransportError(
+            "native execution adjudication returned a mismatched result count"
+        )
+    for index, value in enumerate(outcomes):
+        if not isinstance(value, dict) or set(value) != {
+            "decision", "status", "verdict", "failure_class", "expected_failure",
+        }:
+            raise NativeTransportError(
+                f"native execution adjudication outcome {index} is malformed"
+            )
+        decision = value["decision"]
+        status = value["status"]
+        verdict = value["verdict"]
+        failure_class = value["failure_class"]
+        expected_failure = value["expected_failure"]
+        if (not isinstance(decision, str)
+                or decision not in EXECUTION_ADJUDICATION_DECISIONS
+                or not isinstance(status, str)
+                or status not in EXECUTION_ADJUDICATION_STATUSES
+                or not isinstance(verdict, str)
+                or verdict not in EXECUTION_ADJUDICATION_VERDICTS
+                or not isinstance(failure_class, str)
+                or type(expected_failure) is not bool):
+            raise NativeTransportError(
+                f"native execution adjudication outcome {index} has invalid values"
+            )
+        try:
+            failure_size = len(failure_class.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise NativeTransportError(
+                f"native execution adjudication outcome {index} has invalid UTF-8 text"
+            ) from error
+        if failure_size > 64:
+            raise NativeTransportError(
+                f"native execution adjudication outcome {index} exceeds the failure-class bound"
+            )
+        if decision == "assertion_failure":
+            valid_failure = bool(failure_class)
+        elif decision == "suite_result":
+            valid_failure = not failure_class and not expected_failure
+        elif decision == "expected_failure":
+            valid_failure = failure_class in EXECUTION_STATUS_VALUES and expected_failure
+        else:
+            expected_class = {
+                "unknown_status": "infrastructure_failure",
+                "malformed_result": "malformed_test_result",
+                "success": "",
+                "skip": "",
+                "unsupported_returned": "unsupported",
+                "expectation_mismatch": "expectation_mismatch",
+                "unsupported_execution": "unsupported",
+                "timeout": "timeout",
+                "runtime_failure": "runtime_failure",
+                "invalid_request": "malformed_test_declaration",
+            }.get(decision)
+            valid_failure = failure_class == expected_class and not expected_failure
+        if not valid_failure:
+            raise NativeTransportError(
+                f"native execution adjudication outcome {index} violates its decision contract"
+            )
+    return outcomes
 
 
 def run_runner_policy(
@@ -311,3 +503,108 @@ def run_runner_policy(
     if classification is not None and resolved != classification:
         raise NativeTransportError("native runner policy changed an explicit classification")
     return resolved, exit_code
+
+
+def _native_cli_path(value: str, field: str, cwd: Path) -> Path:
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in value or not path.name:
+        raise NativeTransportError(
+            f"native application {field} path must be relative and remain in the current directory"
+        )
+    candidate = cwd / path
+    cursor = cwd
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise NativeTransportError(
+                f"native application {field} path cannot traverse a symbolic link"
+            )
+    return candidate
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one declared native application through the shared transport."""
+    parser = argparse.ArgumentParser(description="Run one bounded MNCS native application")
+    parser.add_argument("--descriptor", required=True)
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--result", required=True)
+    parser.add_argument("--request-schema", required=True)
+    parser.add_argument("--result-schema", required=True)
+    parser.add_argument("--step-budget", type=int, default=1048576)
+    parser.add_argument("--timeout", type=float, default=120.0)
+    args = parser.parse_args(argv)
+    descriptor_name = Path(args.descriptor).name
+    if descriptor_name != args.descriptor or not descriptor_name.endswith(".json"):
+        print("error: descriptor must be a JSON filename", file=sys.stderr)
+        return 2
+    try:
+        if args.step_budget <= 0 or args.timeout <= 0:
+            raise NativeTransportError("step budget and timeout must be positive")
+        cwd = Path.cwd().resolve()
+        request_path = _native_cli_path(args.request, "request", cwd)
+        result_path = _native_cli_path(args.result, "result", cwd)
+        if request_path == result_path:
+            raise NativeTransportError("request and result paths must be different")
+        resolved_request = request_path.resolve(strict=True)
+        try:
+            resolved_request.relative_to(cwd)
+        except ValueError as error:
+            raise NativeTransportError("request path resolves outside the current directory") from error
+        if not resolved_request.is_file():
+            raise NativeTransportError("request path is not a regular file")
+        if resolved_request.stat().st_size > NATIVE_CLI_REQUEST_MAX_BYTES:
+            raise NativeTransportError(
+                f"native application request exceeds {NATIVE_CLI_REQUEST_MAX_BYTES} bytes"
+            )
+        request = json.loads(resolved_request.read_text(encoding="utf-8"))
+        result = run_native_app(
+            descriptor_name,
+            request,
+            request_schema=args.request_schema,
+            result_schema=args.result_schema,
+            mncs=os.environ.get("MNCS", "mncs"),
+            cwd=cwd,
+            environment=dict(os.environ),
+            step_budget=args.step_budget,
+            timeout_seconds=args.timeout,
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_parent = result_path.parent.resolve(strict=True)
+        try:
+            resolved_parent.relative_to(cwd)
+        except ValueError as error:
+            raise NativeTransportError("result path resolves outside the current directory") from error
+        if result_path.is_symlink():
+            raise NativeTransportError("result path cannot replace a symbolic link")
+        encoded_result = (
+            json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+        if len(encoded_result) > NATIVE_CLI_RESULT_MAX_BYTES:
+            raise NativeTransportError(
+                f"native application result exceeds {NATIVE_CLI_RESULT_MAX_BYTES} bytes"
+            )
+        descriptor_fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{result_path.name}.",
+            suffix=".tmp",
+            dir=resolved_parent,
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor_fd, "wb") as stream:
+                stream.write(encoded_result)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary_path.replace(result_path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+        return 0
+    except (NativeTransportError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

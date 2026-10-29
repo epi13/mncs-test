@@ -1,0 +1,438 @@
+mncs 0.18;
+
+// Native Test runner decision policy for decoded execution outcomes.
+//
+// The Python adapter owns process transport, type projection, and diagnostic
+// payloads. This module owns the interpretation of execution status,
+// expected-failure contracts, native verdicts, and suite-result semantics.
+module mncs.test.execution_adjudication_v1;
+
+use mncs.std.application.v1;
+
+record ExecutionCaseV1 {
+    execution_status: [byte; up_to 64],
+    expected_status: [byte; up_to 64],
+    suite: bool,
+    native_result_present: bool,
+    native_verdict: [byte; up_to 64],
+    native_failure_class: [byte; up_to 64]
+}
+
+record ExecutionAdjudicationRequestV1 {
+    schema_version: [byte; up_to 64],
+    case_count: u64,
+    cases: [ExecutionCaseV1; up_to 256]
+}
+
+record ExecutionOutcomeV1 {
+    decision: [byte; up_to 64],
+    status: [byte; up_to 64],
+    verdict: [byte; up_to 64],
+    failure_class: [byte; up_to 64],
+    expected_failure: bool
+}
+
+record ExecutionAdjudicationResultV1 {
+    schema_version: [byte; up_to 64],
+    outcome_count: u64,
+    outcomes: [ExecutionOutcomeV1; up_to 256]
+}
+
+record OutcomeBuilderV1 {
+    values: [ExecutionOutcomeV1; 256],
+    length: u64
+}
+
+fn text_schema_request() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 101, 120, 101, 99, 117, 116, 105, 111, 110, 45, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn text_schema_result() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 101, 120, 101, 99, 117, 116, 105, 111, 110, 45, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 47, 49];
+}
+
+fn text_returned() -> (result: [byte; up_to 64]) {
+    return [114, 101, 116, 117, 114, 110, 101, 100];
+}
+
+fn text_runtime_failure() -> (result: [byte; up_to 64]) {
+    return [114, 117, 110, 116, 105, 109, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn text_unsupported() -> (result: [byte; up_to 64]) {
+    return [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100];
+}
+
+fn text_unsupported_verdict() -> (result: [byte; up_to 64]) {
+    return [85, 78, 83, 85, 80, 80, 79, 82, 84, 69, 68];
+}
+
+fn text_budget_exhausted() -> (result: [byte; up_to 64]) {
+    return [98, 117, 100, 103, 101, 116, 95, 101, 120, 104, 97, 117, 115, 116, 101, 100];
+}
+
+fn text_invalid_request() -> (result: [byte; up_to 64]) {
+    return [105, 110, 118, 97, 108, 105, 100, 95, 114, 101, 113, 117, 101, 115, 116];
+}
+
+fn text_pass() -> (result: [byte; up_to 64]) {
+    return [80, 65, 83, 83];
+}
+
+fn text_fail() -> (result: [byte; up_to 64]) {
+    return [70, 65, 73, 76];
+}
+
+fn text_skip() -> (result: [byte; up_to 64]) {
+    return [83, 75, 73, 80];
+}
+
+fn text_unknown() -> (result: [byte; up_to 64]) {
+    return [85, 78, 75, 78, 79, 87, 78];
+}
+
+fn text_passed() -> (result: [byte; up_to 64]) {
+    return [112, 97, 115, 115, 101, 100];
+}
+
+fn text_skipped() -> (result: [byte; up_to 64]) {
+    return [115, 107, 105, 112, 112, 101, 100];
+}
+
+fn text_failed() -> (result: [byte; up_to 64]) {
+    return [102, 97, 105, 108, 101, 100];
+}
+
+fn text_expected_failure() -> (result: [byte; up_to 64]) {
+    return [101, 120, 112, 101, 99, 116, 101, 100, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn text_infrastructure_failure() -> (result: [byte; up_to 64]) {
+    return [105, 110, 102, 114, 97, 115, 116, 114, 117, 99, 116, 117, 114, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn text_malformed_test_result() -> (result: [byte; up_to 64]) {
+    return [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 116, 101, 115, 116, 95, 114, 101, 115, 117, 108, 116];
+}
+
+fn text_assertion() -> (result: [byte; up_to 64]) {
+    return [97, 115, 115, 101, 114, 116, 105, 111, 110];
+}
+
+fn text_expectation_mismatch() -> (result: [byte; up_to 64]) {
+    return [101, 120, 112, 101, 99, 116, 97, 116, 105, 111, 110, 95, 109, 105, 115, 109, 97, 116, 99, 104];
+}
+
+fn text_timeout() -> (result: [byte; up_to 64]) {
+    return [116, 105, 109, 101, 111, 117, 116];
+}
+
+fn text_malformed_test_declaration() -> (result: [byte; up_to 64]) {
+    return [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 116, 101, 115, 116, 95, 100, 101, 99, 108, 97, 114, 97, 116, 105, 111, 110];
+}
+
+fn text_unknown_status() -> (result: [byte; up_to 64]) {
+    return [117, 110, 107, 110, 111, 119, 110, 95, 115, 116, 97, 116, 117, 115];
+}
+
+fn text_malformed_result() -> (result: [byte; up_to 64]) {
+    return [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 114, 101, 115, 117, 108, 116];
+}
+
+fn text_suite_result() -> (result: [byte; up_to 64]) {
+    return [115, 117, 105, 116, 101, 95, 114, 101, 115, 117, 108, 116];
+}
+
+fn text_success() -> (result: [byte; up_to 64]) {
+    return [115, 117, 99, 99, 101, 115, 115];
+}
+
+fn text_skip_decision() -> (result: [byte; up_to 64]) {
+    return [115, 107, 105, 112];
+}
+
+fn text_unsupported_returned() -> (result: [byte; up_to 64]) {
+    return [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100, 95, 114, 101, 116, 117, 114, 110, 101, 100];
+}
+
+fn text_assertion_failure() -> (result: [byte; up_to 64]) {
+    return [97, 115, 115, 101, 114, 116, 105, 111, 110, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn text_expected_failure_decision() -> (result: [byte; up_to 64]) {
+    return [101, 120, 112, 101, 99, 116, 101, 100, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn text_unsupported_execution() -> (result: [byte; up_to 64]) {
+    return [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100, 95, 101, 120, 101, 99, 117, 116, 105, 111, 110];
+}
+
+fn text_timeout_decision() -> (result: [byte; up_to 64]) {
+    return [116, 105, 109, 101, 111, 117, 116];
+}
+
+fn text_runtime_failure_decision() -> (result: [byte; up_to 64]) {
+    return [114, 117, 110, 116, 105, 109, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+}
+
+fn text_invalid_request_decision() -> (result: [byte; up_to 64]) {
+    return [105, 110, 118, 97, 108, 105, 100, 95, 114, 101, 113, 117, 101, 115, 116];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn known_execution_status(value: [byte; up_to 64]) -> (result: bool) {
+    return same_bytes(value, text_returned())
+        || same_bytes(value, text_runtime_failure())
+        || same_bytes(value, text_unsupported())
+        || same_bytes(value, text_budget_exhausted())
+        || same_bytes(value, text_invalid_request());
+}
+
+fn valid_native_verdict(value: [byte; up_to 64], suite: bool) -> (result: bool) {
+    let ordinary: bool = same_bytes(value, text_pass())
+        || same_bytes(value, text_fail())
+        || same_bytes(value, text_skip())
+        || same_bytes(value, text_unsupported_verdict());
+    let suite_verdict: bool = same_bytes(value, text_pass())
+        || same_bytes(value, text_fail())
+        || same_bytes(value, text_unsupported_verdict());
+    if suite { return suite_verdict; }
+    return ordinary;
+}
+
+fn valid_case(value: ExecutionCaseV1) -> (result: bool) {
+    if value.expected_status.len > 0 && !known_execution_status(value.expected_status) {
+        return false;
+    }
+    if value.native_result_present {
+        if value.suite {
+            return same_bytes(value.execution_status, text_returned())
+                && valid_native_verdict(value.native_verdict, true)
+                && value.native_failure_class.len == 0;
+        }
+        return same_bytes(value.execution_status, text_returned())
+            && valid_native_verdict(value.native_verdict, false)
+            && value.native_failure_class.len > 0;
+    }
+    return value.native_verdict.len == 0
+        && value.native_failure_class.len == 0;
+}
+
+fn valid_request(value: ExecutionAdjudicationRequestV1) -> (result: bool) {
+    if !same_bytes(value.schema_version, text_schema_request())
+        || value.case_count != value.cases.len
+        || value.case_count > 256 {
+        return false;
+    }
+    iterate i over value.cases carrying valid: bool = true {
+        next valid = valid && valid_case(value.cases[i]);
+    }
+    return valid;
+}
+
+fn outcome(
+    decision: [byte; up_to 64],
+    status: [byte; up_to 64],
+    verdict: [byte; up_to 64],
+    failure_class: [byte; up_to 64],
+    expected_failure: bool
+) -> (result: ExecutionOutcomeV1) {
+    return ExecutionOutcomeV1 {
+        decision: decision,
+        status: status,
+        verdict: verdict,
+        failure_class: failure_class,
+        expected_failure: expected_failure
+    };
+}
+
+fn fails_expectation_after_return(value: ExecutionCaseV1) -> (result: bool) {
+    return value.expected_status.len > 0
+        && !same_bytes(value.expected_status, text_returned());
+}
+
+fn expectation_failure(value: ExecutionCaseV1) -> (result: ExecutionOutcomeV1) {
+    return outcome(
+        text_expectation_mismatch(),
+        text_failed(),
+        text_fail(),
+        text_expectation_mismatch(),
+        false
+    );
+}
+
+fn unsupported_outcome(decision: [byte; up_to 64]) -> (result: ExecutionOutcomeV1) {
+    return outcome(
+        decision,
+        text_unsupported(),
+        text_unknown(),
+        text_unsupported(),
+        false
+    );
+}
+
+fn adjudicate_case(value: ExecutionCaseV1) -> (result: ExecutionOutcomeV1) {
+    if !known_execution_status(value.execution_status) {
+        return outcome(
+            text_unknown_status(),
+            text_failed(),
+            text_fail(),
+            text_infrastructure_failure(),
+            false
+        );
+    }
+    if same_bytes(value.execution_status, text_returned()) {
+        if !value.native_result_present {
+            return outcome(
+                text_malformed_result(),
+                text_failed(),
+                text_fail(),
+                text_malformed_test_result(),
+                false
+            );
+        }
+        if value.suite {
+            if same_bytes(value.native_verdict, text_pass()) {
+                return outcome(text_suite_result(), text_passed(), text_pass(), [0; 0], false);
+            }
+            if same_bytes(value.native_verdict, text_unsupported_verdict()) {
+                return outcome(text_suite_result(), text_returned(), text_unknown(), [0; 0], false);
+            }
+            return outcome(text_suite_result(), text_returned(), text_fail(), [0; 0], false);
+        }
+        if same_bytes(value.native_verdict, text_pass()) {
+            if fails_expectation_after_return(value) {
+                return expectation_failure(value);
+            }
+            return outcome(text_success(), text_passed(), text_pass(), [0; 0], false);
+        }
+        if same_bytes(value.native_verdict, text_skip()) {
+            if fails_expectation_after_return(value) {
+                return expectation_failure(value);
+            }
+            return outcome(text_skip_decision(), text_skipped(), text_pass(), [0; 0], false);
+        }
+        if same_bytes(value.native_verdict, text_unsupported_verdict()) {
+            if fails_expectation_after_return(value) {
+                return expectation_failure(value);
+            }
+            return unsupported_outcome(text_unsupported_returned());
+        }
+        return outcome(
+            text_assertion_failure(),
+            text_failed(),
+            text_fail(),
+            value.native_failure_class,
+            false
+        );
+    }
+    if value.expected_status.len > 0
+        && same_bytes(value.expected_status, value.execution_status) {
+        return outcome(
+            text_expected_failure_decision(),
+            text_expected_failure(),
+            text_pass(),
+            value.execution_status,
+            true
+        );
+    }
+    if same_bytes(value.execution_status, text_unsupported()) {
+        return unsupported_outcome(text_unsupported_execution());
+    }
+    if same_bytes(value.execution_status, text_budget_exhausted()) {
+        return outcome(
+            text_timeout_decision(),
+            text_failed(),
+            text_fail(),
+            text_timeout(),
+            false
+        );
+    }
+    if same_bytes(value.execution_status, text_runtime_failure()) {
+        return outcome(
+            text_runtime_failure_decision(),
+            text_failed(),
+            text_fail(),
+            text_runtime_failure(),
+            false
+        );
+    }
+    return outcome(
+        text_invalid_request_decision(),
+        text_failed(),
+        text_fail(),
+        text_malformed_test_declaration(),
+        false
+    );
+}
+
+fn empty_outcome() -> (result: ExecutionOutcomeV1) {
+    return ExecutionOutcomeV1 {
+        decision: [0; 0],
+        status: [0; 0],
+        verdict: [0; 0],
+        failure_class: [0; 0],
+        expected_failure: false
+    };
+}
+
+fn empty_builder() -> (result: OutcomeBuilderV1) {
+    return OutcomeBuilderV1 {
+        values: [empty_outcome(); 256],
+        length: 0
+    };
+}
+
+fn push_outcome(builder: OutcomeBuilderV1, value: ExecutionOutcomeV1) -> (result: OutcomeBuilderV1) {
+    if builder.length >= 256 {
+        return builder;
+    }
+    return OutcomeBuilderV1 {
+        values: replace(builder.values, builder.length, value),
+        length: builder.length +% 1
+    };
+}
+
+fn finish_outcomes(builder: OutcomeBuilderV1) -> (result: [ExecutionOutcomeV1; up_to 256]) {
+    return builder.values[0..builder.length];
+}
+
+fn adjudicate_request(value: ExecutionAdjudicationRequestV1) -> (result: ExecutionAdjudicationResultV1) {
+    let seed: OutcomeBuilderV1 = empty_builder();
+    iterate i over value.cases carrying builder: OutcomeBuilderV1 = seed {
+        next builder = push_outcome(builder, adjudicate_case(value.cases[i]));
+    }
+    let results: [ExecutionOutcomeV1; up_to 256] = finish_outcomes(builder);
+    return ExecutionAdjudicationResultV1 {
+        schema_version: text_schema_result(),
+        outcome_count: results.len,
+        outcomes: results
+    };
+}
+
+fn execution_adjudication_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 101, 120, 101, 99, 117, 116, 105, 111, 110, 32, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ExecutionAdjudicationRequestV1 = structured_read(context.argv[0], text_schema_request());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 101, 120, 101, 99, 117, 116, 105, 111, 110, 32, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let response: ExecutionAdjudicationResultV1 = adjudicate_request(request);
+    let published: u64 = structured_write(context.argv[1], text_schema_result(), response);
+    if published == 0 {
+        return failure([101, 120, 101, 99, 117, 116, 105, 111, 110, 32, 97, 100, 106, 117, 100, 105, 99, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

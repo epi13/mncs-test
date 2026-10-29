@@ -251,12 +251,30 @@ def run() -> dict[str, object]:
                     "artifact_identity": artifact_identity,
                     "batch_size": len(tests),
                 }
+                workspace_root = next(
+                    (
+                        candidate
+                        for candidate in (ROOT.parent, *ROOT.parents)
+                        if (candidate / "mncs-stdlib" / "stdlib-manifest.json").is_file()
+                    ),
+                    ROOT.parent,
+                )
+                selected_environment = mncs_test.command_environment(
+                    [workspace_root / "mncs-stdlib" / "library", ROOT / "native"],
+                    dict(os.environ),
+                )
                 results = mncs_test.execute_batch(
                     tests=tests,
                     source_path=source_path,
                     source_text=source_text,
                     module=APP_MODULE,
                     session=session,
+                    mncs=mncs_test.resolve_run_mncs(
+                        os.environ.get("MNCS") or os.environ.get("MNCS_BINARY"),
+                        "stage0-reference", ROOT,
+                    ),
+                    cwd=ROOT,
+                    environment=selected_environment,
                     default_step_budget=200000,
                     artifacts=artifacts,
                     transport=transport,

@@ -254,6 +254,15 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(document["execution"]["mode"], "retained-embed-batch")
             self.assertEqual(
+                document["execution"]["native_adjudication"],
+                {
+                    "authority": "mncs.test.execution_adjudication_v1",
+                    "status": "returned",
+                    "calls": 1,
+                    "case_count": 7,
+                },
+            )
+            self.assertEqual(
                 document["execution"]["native_aggregation"]["authority"],
                 "mncs.test.suite",
             )
