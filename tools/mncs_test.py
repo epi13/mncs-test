@@ -82,6 +82,12 @@ TEST_LINEAGE_IDENTITY_RESULT_SCHEMA = "mncs.test.lineage-identity/1"
 TEST_LINEAGE_IDENTITY_MAX_ROWS = 16
 TEST_LINEAGE_IDENTITY_MAX_BYTES = 16384
 TEST_LINEAGE_IDENTITY_MAX_STEP_BUDGET = 8_000_000
+TEST_RUN_IDENTITY_REQUEST_SCHEMA = "mncs.test.run-identity-request/1"
+TEST_RUN_IDENTITY_RESULT_SCHEMA = "mncs.test.run-identity/1"
+TEST_RUN_IDENTITY_MAX_TESTS = 64
+TEST_RUN_IDENTITY_MAX_TEXT_BYTES = 1024
+TEST_RUN_IDENTITY_MAX_BYTES = 8192
+TEST_RUN_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 COMPILE_VERDICT_EXPECTED_BATCH = 16
 COMPILE_VERDICT_ACTUAL_BATCH = 32
 MAX_DIAGNOSTIC_CODE_BYTES = 512
@@ -826,6 +832,246 @@ def result_identity_sha256_many(
             batch, mncs=mncs, cwd=cwd, environment=environment
         ))
     return digests
+
+
+def _native_run_text(value: Any, *, nullable: bool = False) -> dict[str, Any] | None:
+    """Project one ordinary JSON string into the bounded MNCS text record."""
+    if value is None and nullable:
+        return {"value": [], "length": 0, "is_null": True}
+    if not isinstance(value, str):
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > TEST_RUN_IDENTITY_MAX_TEXT_BYTES:
+        return None
+    return {"value": list(encoded), "length": len(encoded), "is_null": False}
+
+
+def _native_run_identity_request(
+    *,
+    provenance: dict[str, Any],
+    profile: Any,
+    test_results: list[dict[str, Any]],
+    test_inventory: dict[str, Any] | None,
+    verification_plan: dict[str, Any] | None,
+    obligation_plan: dict[str, Any] | None,
+    execution: dict[str, Any] | None,
+) -> tuple[dict[str, Any], int] | None:
+    """Build typed app inputs; return None when compatibility handling is needed."""
+    if not isinstance(provenance, dict) or not isinstance(test_results, list):
+        return None
+    compiler = provenance.get("compiler")
+    manifest = provenance.get("manifest")
+    source = provenance.get("source")
+    if (
+        not isinstance(compiler, dict)
+        or set(compiler) != {"requested", "path", "sha256", "version"}
+        or not isinstance(manifest, dict)
+        or set(manifest) != {"path", "sha256"}
+        or not isinstance(source, dict)
+        or set(source) != {"path", "sha256"}
+    ):
+        return None
+
+    compiler_wire = {
+        "path": _native_run_text(compiler["path"]),
+        "requested": _native_run_text(compiler["requested"]),
+        "sha256": _native_run_text(compiler["sha256"], nullable=True),
+        "version": _native_run_text(compiler["version"]),
+    }
+    manifest_wire = {
+        "path": _native_run_text(manifest["path"]),
+        "sha256": _native_run_text(manifest["sha256"]),
+    }
+    source_wire = {
+        "path": _native_run_text(source["path"]),
+        "sha256": _native_run_text(source["sha256"]),
+    }
+    inventory = test_inventory or {}
+    verification = verification_plan or {}
+    obligations = obligation_plan or {}
+    execution_values = {
+        key: (execution or {}).get(key)
+        for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
+    }
+    execution_wire = {
+        "artifact_identity": _native_run_text(
+            execution_values["artifact_identity"], nullable=True
+        ),
+        "artifact_sha256": _native_run_text(
+            execution_values["artifact_sha256"], nullable=True
+        ),
+        "batch_size": 0,
+        "batch_size_is_null": execution_values["batch_size"] is None,
+        "mode": _native_run_text(execution_values["mode"], nullable=True),
+    }
+    batch_size = execution_values["batch_size"]
+    if batch_size is not None:
+        if type(batch_size) is not int or not 0 <= batch_size <= (1 << 64) - 1:
+            return None
+        execution_wire["batch_size"] = batch_size
+
+    if len(test_results) > TEST_RUN_IDENTITY_MAX_TESTS:
+        return None
+    test_ids: list[dict[str, Any]] = []
+    for item in test_results:
+        if not isinstance(item, dict) or "id" not in item:
+            return None
+        projected = _native_run_text(item["id"])
+        if projected is None:
+            return None
+        test_ids.append(projected)
+
+    profile_wire = _native_run_text(profile)
+    obligation_wire = _native_run_text(
+        obligations.get("obligation_plan_id"), nullable=True
+    )
+    subject_identity_wire = _native_run_text(
+        inventory.get("subject_identity"), nullable=True
+    )
+    subject_fingerprint_wire = _native_run_text(
+        inventory.get("subject_fingerprint"), nullable=True
+    )
+    verification_wire = _native_run_text(
+        verification.get("plan_id"), nullable=True
+    )
+    all_text = [
+        *compiler_wire.values(),
+        *manifest_wire.values(),
+        *source_wire.values(),
+        *execution_wire.values(),
+        profile_wire,
+        obligation_wire,
+        subject_identity_wire,
+        subject_fingerprint_wire,
+        verification_wire,
+        *test_ids,
+    ]
+    if (
+        profile_wire is None
+        or any(value is None for value in all_text)
+    ):
+        return None
+    text_records = [value for value in all_text if isinstance(value, dict)]
+    total_bytes = sum(value["length"] for value in text_records)
+    if total_bytes > TEST_RUN_IDENTITY_MAX_BYTES:
+        return None
+
+    escaped_bytes_bound = sum(
+        value["length"] * 6 + 2 for value in text_records if not value["is_null"]
+    ) + 512 + len(test_ids) * 16
+    blocks = (escaped_bytes_bound + 63) // 64 + 64
+    step_budget = max(2_097_152, 100_000 + blocks * 32_768)
+    if step_budget > TEST_RUN_IDENTITY_MAX_STEP_BUDGET:
+        return None
+
+    return (
+        {
+            "schema_version": TEST_RUN_IDENTITY_REQUEST_SCHEMA,
+            "compiler": compiler_wire,
+            "execution": execution_wire,
+            "manifest": manifest_wire,
+            "obligation_plan": obligation_wire,
+            "profile": profile_wire,
+            "source": source_wire,
+            "subject_fingerprint": subject_fingerprint_wire,
+            "subject_identity": subject_identity_wire,
+            "test_count": len(test_ids),
+            "tests": test_ids,
+            "verification_plan": verification_wire,
+        },
+        step_budget,
+    )
+
+
+def _compatibility_run_identity_material(
+    *,
+    provenance: dict[str, Any],
+    profile: Any,
+    test_results: list[dict[str, Any]],
+    test_inventory: dict[str, Any] | None,
+    verification_plan: dict[str, Any] | None,
+    obligation_plan: dict[str, Any] | None,
+    execution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Retain the previous JSON projection for unrepresentable values only."""
+    return {
+        "manifest": provenance["manifest"],
+        "source": provenance["source"],
+        "compiler": provenance["compiler"],
+        "profile": profile,
+        "tests": [item["id"] for item in test_results],
+        "subject_identity": (test_inventory or {}).get("subject_identity"),
+        "subject_fingerprint": (test_inventory or {}).get("subject_fingerprint"),
+        "verification_plan": (verification_plan or {}).get("plan_id"),
+        "obligation_plan": (obligation_plan or {}).get("obligation_plan_id"),
+        "execution": {
+            key: (execution or {}).get(key)
+            for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
+        },
+    }
+
+
+def build_run_identity_sha256(
+    *,
+    provenance: dict[str, Any],
+    profile: Any,
+    test_results: list[dict[str, Any]],
+    test_inventory: dict[str, Any] | None,
+    verification_plan: dict[str, Any] | None,
+    obligation_plan: dict[str, Any] | None,
+    execution: dict[str, Any] | None,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str:
+    """Build ordinary run identities in MNCS, preserving bounded host fallback."""
+    prepared = _native_run_identity_request(
+        provenance=provenance,
+        profile=profile,
+        test_results=test_results,
+        test_inventory=test_inventory,
+        verification_plan=verification_plan,
+        obligation_plan=obligation_plan,
+        execution=execution,
+    )
+    if prepared is not None:
+        request, step_budget = prepared
+        try:
+            result = run_native_app(
+                "test-run-identity.json",
+                request,
+                request_schema=TEST_RUN_IDENTITY_REQUEST_SCHEMA,
+                result_schema=TEST_RUN_IDENTITY_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=step_budget,
+            )
+        except NativeTransportError as error:
+            raise AdapterError(f"native Test run identity failed: {error}") from error
+        digest = result.get("digest")
+        if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
+            raise AdapterError("MNCS run-identity app returned a malformed SHA-256 digest")
+        return digest
+
+    material = _compatibility_run_identity_material(
+        provenance=provenance,
+        profile=profile,
+        test_results=test_results,
+        test_inventory=test_inventory,
+        verification_plan=verification_plan,
+        obligation_plan=obligation_plan,
+        execution=execution,
+    )
+    return result_identity_sha256(
+        compact_json(material).encode("utf-8"),
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
 
 
 def _native_lineage_identity_row(
@@ -4121,23 +4367,14 @@ def make_result(
     else:
         verdict = "FAIL"
     provenance = manifest_provenance(manifest, source_text, mncs, library_paths)
-    identity_material = {
-        "manifest": provenance["manifest"],
-        "source": provenance["source"],
-        "compiler": provenance["compiler"],
-        "profile": manifest["profile"],
-        "tests": [item["id"] for item in test_results],
-        "subject_identity": (test_inventory or {}).get("subject_identity"),
-        "subject_fingerprint": (test_inventory or {}).get("subject_fingerprint"),
-        "verification_plan": (verification_plan or {}).get("plan_id"),
-        "obligation_plan": (obligation_plan or {}).get("obligation_plan_id"),
-        "execution": {
-            key: (execution or {}).get(key)
-            for key in ("mode", "artifact_identity", "artifact_sha256", "batch_size")
-        },
-    }
-    run_id = result_identity_sha256(
-        compact_json(identity_material).encode("utf-8"),
+    run_id = build_run_identity_sha256(
+        provenance=provenance,
+        profile=manifest["profile"],
+        test_results=test_results,
+        test_inventory=test_inventory,
+        verification_plan=verification_plan,
+        obligation_plan=obligation_plan,
+        execution=execution,
         mncs=mncs,
         cwd=cwd,
         environment=environment,

@@ -1,0 +1,393 @@
+mncs 0.18;
+
+// mncs.test.run_identity_v1 — construct and hash the canonical Test run id.
+// The application owns the Python-compatible compact JSON byte sequence;
+// the host adapter supplies only bounded typed provenance fields.
+module mncs.test.run_identity_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json_emit.v1 as json;
+use mncs.std.sha256.v1 as sha256;
+
+record RunTextV1 {
+    value: [byte; up_to 1024],
+    length: u64,
+    is_null: bool
+}
+
+record RunFileIdentityV1 {
+    path: RunTextV1,
+    sha256: RunTextV1
+}
+
+record RunCompilerV1 {
+    path: RunTextV1,
+    requested: RunTextV1,
+    sha256: RunTextV1,
+    version: RunTextV1
+}
+
+record RunExecutionV1 {
+    artifact_identity: RunTextV1,
+    artifact_sha256: RunTextV1,
+    batch_size: u64,
+    batch_size_is_null: bool,
+    mode: RunTextV1
+}
+
+record RunIdentityRequestV1 {
+    schema_version: [byte; up_to 64],
+    compiler: RunCompilerV1,
+    execution: RunExecutionV1,
+    manifest: RunFileIdentityV1,
+    obligation_plan: RunTextV1,
+    profile: RunTextV1,
+    source: RunFileIdentityV1,
+    subject_fingerprint: RunTextV1,
+    subject_identity: RunTextV1,
+    test_count: u64,
+    tests: [RunTextV1; up_to 64],
+    verification_plan: RunTextV1
+}
+
+record RunIdentityResultV1 {
+    schema_version: [byte; up_to 64],
+    digest: [byte; 32]
+}
+
+record HashWriterV1 {
+    state: sha256.DigestState,
+    buffer: [byte; 64],
+    length: u64
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 117, 110, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 117, 110, 45, 105, 100, 101, 110, 116, 105, 116, 121, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn valid_text(value: RunTextV1) -> (result: bool) {
+    return value.length == value.value.len
+        && value.length <= 1024
+        && (!value.is_null || value.length == 0);
+}
+
+fn required_text(value: RunTextV1) -> (result: bool) {
+    return valid_text(value) && !value.is_null;
+}
+
+fn valid_file(value: RunFileIdentityV1) -> (result: bool) {
+    return required_text(value.path) && required_text(value.sha256);
+}
+
+fn valid_compiler(value: RunCompilerV1) -> (result: bool) {
+    return required_text(value.path)
+        && required_text(value.requested)
+        && valid_text(value.sha256)
+        && required_text(value.version);
+}
+
+fn valid_execution(value: RunExecutionV1) -> (result: bool) {
+    let batch_valid: bool = !value.batch_size_is_null || value.batch_size == 0;
+    return valid_text(value.artifact_identity)
+        && valid_text(value.artifact_sha256)
+        && valid_text(value.mode)
+        && batch_valid;
+}
+
+fn valid_tests(request: RunIdentityRequestV1) -> (result: bool) {
+    if request.test_count != request.tests.len || request.test_count > 64 {
+        return false;
+    }
+    iterate i over request.tests carrying valid: bool = true {
+        let test_id: RunTextV1 = request.tests[i];
+        next valid = valid && required_text(test_id);
+    }
+    return valid;
+}
+
+fn total_text_bytes(request: RunIdentityRequestV1) -> (result: u64) {
+    let fixed: u64 = request.compiler.path.length
+        +% request.compiler.requested.length
+        +% request.compiler.sha256.length
+        +% request.compiler.version.length
+        +% request.execution.artifact_identity.length
+        +% request.execution.artifact_sha256.length
+        +% request.execution.mode.length
+        +% request.manifest.path.length
+        +% request.manifest.sha256.length
+        +% request.obligation_plan.length
+        +% request.profile.length
+        +% request.source.path.length
+        +% request.source.sha256.length
+        +% request.subject_fingerprint.length
+        +% request.subject_identity.length
+        +% request.verification_plan.length;
+    iterate i over request.tests carrying total: u64 = fixed {
+        next total = total +% request.tests[i].length;
+    }
+    return total;
+}
+
+fn valid_request(request: RunIdentityRequestV1) -> (result: bool) {
+    return same_bytes(request.schema_version, request_schema())
+        && valid_compiler(request.compiler)
+        && valid_execution(request.execution)
+        && valid_file(request.manifest)
+        && valid_text(request.obligation_plan)
+        && required_text(request.profile)
+        && valid_file(request.source)
+        && valid_text(request.subject_fingerprint)
+        && valid_text(request.subject_identity)
+        && valid_tests(request)
+        && valid_text(request.verification_plan)
+        && total_text_bytes(request) <= 8192;
+}
+
+fn writer_open() -> (result: HashWriterV1) {
+    return HashWriterV1 { state: sha256.init(), buffer: [0; 64], length: 0 };
+}
+
+fn append_byte(writer: HashWriterV1, value: byte) -> (result: HashWriterV1) {
+    if writer.length < 64 {
+        return HashWriterV1 {
+            ..writer,
+            buffer: replace(writer.buffer, writer.length, value),
+            length: writer.length +% 1
+        };
+    }
+    let flushed: sha256.DigestState = sha256.update_standard(writer.state, writer.buffer, 64);
+    let empty: [byte; 64] = [0; 64];
+    return HashWriterV1 { state: flushed, buffer: replace(empty, 0, value), length: 1 };
+}
+
+fn append_live_byte(writer: HashWriterV1, live: bool, value: byte) -> (result: HashWriterV1) {
+    if live {
+        return append_byte(writer, value);
+    }
+    return writer;
+}
+
+fn append_literal<N: Nat>(writer: HashWriterV1, value: [byte; N]) -> (result: HashWriterV1) {
+    iterate i over value carrying result: HashWriterV1 = writer {
+        next result = append_byte(result, value[i]);
+    }
+    return result;
+}
+
+fn append_json_byte(writer: HashWriterV1, value: byte) -> (result: HashWriterV1) {
+    // Match Python json.dumps(..., ensure_ascii=False) short control escapes.
+    if value == 8 {
+        return append_byte(append_byte(writer, 92), 98);
+    }
+    if value == 9 {
+        return append_byte(append_byte(writer, 92), 116);
+    }
+    if value == 10 {
+        return append_byte(append_byte(writer, 92), 110);
+    }
+    if value == 12 {
+        return append_byte(append_byte(writer, 92), 102);
+    }
+    if value == 13 {
+        return append_byte(append_byte(writer, 92), 114);
+    }
+    let encoded: json.Writer = json.put_quoted_byte(json.open(), value);
+    iterate i over encoded.buf carrying result: HashWriterV1 = writer {
+        next result = append_live_byte(result, i < encoded.len, encoded.buf[i]);
+    }
+    return result;
+}
+
+fn append_json_byte_if_live(writer: HashWriterV1, live: bool, value: byte) -> (result: HashWriterV1) {
+    if live {
+        return append_json_byte(writer, value);
+    }
+    return writer;
+}
+
+fn append_quoted(
+    writer: HashWriterV1,
+    value: [byte; up_to 1024],
+    length: u64
+) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 34);
+    iterate i over value carrying result: HashWriterV1 = opened {
+        next result = append_json_byte_if_live(result, i < length, value[i]);
+    }
+    return append_byte(result, 34);
+}
+
+fn append_text(writer: HashWriterV1, value: RunTextV1) -> (result: HashWriterV1) {
+    if value.is_null {
+        return append_literal<4>(writer, [110, 117, 108, 108]);
+    }
+    return append_quoted(writer, value.value, value.length);
+}
+
+fn append_key(writer: HashWriterV1, key: [byte; up_to 32]) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 34);
+    iterate i over key carrying result: HashWriterV1 = opened {
+        // Bounded-view parameters may carry zero padding after the literal.
+        // Object keys are ASCII and contain no zero bytes.
+        next result = append_live_byte(result, key[i] != 0, key[i]);
+    }
+    return append_byte(append_byte(result, 34), 58);
+}
+
+fn append_member_prefix(
+    writer: HashWriterV1,
+    first: bool,
+    key: [byte; up_to 32]
+) -> (result: HashWriterV1) {
+    if first {
+        return append_key(writer, key);
+    }
+    return append_key(append_byte(writer, 44), key);
+}
+
+fn append_member_text(
+    writer: HashWriterV1,
+    first: bool,
+    key: [byte; up_to 32],
+    value: RunTextV1
+) -> (result: HashWriterV1) {
+    return append_text(append_member_prefix(writer, first, key), value);
+}
+
+fn append_u64(writer: HashWriterV1, value: u64) -> (result: HashWriterV1) {
+    let decimal: json.Writer = json.put_u64(json.open(), value);
+    iterate i over decimal.buf carrying result: HashWriterV1 = writer {
+        next result = append_live_byte(result, i < decimal.len, decimal.buf[i]);
+    }
+    return result;
+}
+
+fn append_member_u64(
+    writer: HashWriterV1,
+    first: bool,
+    key: [byte; up_to 32],
+    value: u64,
+    is_null: bool
+) -> (result: HashWriterV1) {
+    let prefix: HashWriterV1 = append_member_prefix(writer, first, key);
+    if is_null {
+        return append_literal<4>(prefix, [110, 117, 108, 108]);
+    }
+    return append_u64(prefix, value);
+}
+
+fn append_compiler(writer: HashWriterV1, value: RunCompilerV1) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 123);
+    let path: HashWriterV1 = append_member_text(opened, true, [112, 97, 116, 104], value.path);
+    let requested: HashWriterV1 = append_member_text(path, false, [114, 101, 113, 117, 101, 115, 116, 101, 100], value.requested);
+    let hash: HashWriterV1 = append_member_text(requested, false, [115, 104, 97, 50, 53, 54], value.sha256);
+    let version: HashWriterV1 = append_member_text(hash, false, [118, 101, 114, 115, 105, 111, 110], value.version);
+    return append_byte(version, 125);
+}
+
+fn append_execution(writer: HashWriterV1, value: RunExecutionV1) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 123);
+    let identity: HashWriterV1 = append_member_text(opened, true, [97, 114, 116, 105, 102, 97, 99, 116, 95, 105, 100, 101, 110, 116, 105, 116, 121], value.artifact_identity);
+    let hash: HashWriterV1 = append_member_text(identity, false, [97, 114, 116, 105, 102, 97, 99, 116, 95, 115, 104, 97, 50, 53, 54], value.artifact_sha256);
+    let batch: HashWriterV1 = append_member_u64(hash, false, [98, 97, 116, 99, 104, 95, 115, 105, 122, 101], value.batch_size, value.batch_size_is_null);
+    let mode: HashWriterV1 = append_member_text(batch, false, [109, 111, 100, 101], value.mode);
+    return append_byte(mode, 125);
+}
+
+fn append_file(writer: HashWriterV1, value: RunFileIdentityV1) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 123);
+    let path: HashWriterV1 = append_member_text(opened, true, [112, 97, 116, 104], value.path);
+    let hash: HashWriterV1 = append_member_text(path, false, [115, 104, 97, 50, 53, 54], value.sha256);
+    return append_byte(hash, 125);
+}
+
+fn append_test_row(writer: HashWriterV1, index: u64, value: RunTextV1) -> (result: HashWriterV1) {
+    if index == 0 {
+        return append_quoted(writer, value.value, value.length);
+    }
+    return append_quoted(append_byte(writer, 44), value.value, value.length);
+}
+
+fn append_tests(writer: HashWriterV1, request: RunIdentityRequestV1) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 91);
+    iterate i over request.tests carrying result: HashWriterV1 = opened {
+        next result = append_test_row(result, i, request.tests[i]);
+    }
+    return append_byte(result, 93);
+}
+
+fn append_request(request: RunIdentityRequestV1) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer_open(), 123);
+    let compiler: HashWriterV1 = append_compiler(
+        append_member_prefix(opened, true, [99, 111, 109, 112, 105, 108, 101, 114]),
+        request.compiler
+    );
+    let execution: HashWriterV1 = append_execution(
+        append_member_prefix(compiler, false, [101, 120, 101, 99, 117, 116, 105, 111, 110]),
+        request.execution
+    );
+    let manifest: HashWriterV1 = append_file(
+        append_member_prefix(execution, false, [109, 97, 110, 105, 102, 101, 115, 116]),
+        request.manifest
+    );
+    let obligation: HashWriterV1 = append_member_text(manifest, false, [111, 98, 108, 105, 103, 97, 116, 105, 111, 110, 95, 112, 108, 97, 110], request.obligation_plan);
+    let profile: HashWriterV1 = append_member_text(obligation, false, [112, 114, 111, 102, 105, 108, 101], request.profile);
+    let source: HashWriterV1 = append_file(
+        append_member_prefix(profile, false, [115, 111, 117, 114, 99, 101]),
+        request.source
+    );
+    let fingerprint: HashWriterV1 = append_member_text(source, false, [115, 117, 98, 106, 101, 99, 116, 95, 102, 105, 110, 103, 101, 114, 112, 114, 105, 110, 116], request.subject_fingerprint);
+    let identity: HashWriterV1 = append_member_text(fingerprint, false, [115, 117, 98, 106, 101, 99, 116, 95, 105, 100, 101, 110, 116, 105, 116, 121], request.subject_identity);
+    let tests: HashWriterV1 = append_tests(
+        append_member_prefix(identity, false, [116, 101, 115, 116, 115]),
+        request
+    );
+    let verification: HashWriterV1 = append_member_text(tests, false, [118, 101, 114, 105, 102, 105, 99, 97, 116, 105, 111, 110, 95, 112, 108, 97, 110], request.verification_plan);
+    return append_byte(verification, 125);
+}
+
+fn finish_hash(writer: HashWriterV1) -> (result: [byte; 32]) {
+    let state: sha256.DigestState = sha256.update_standard(writer.state, writer.buffer[0..writer.length], writer.length);
+    return sha256.finalize_standard(state);
+}
+
+fn run_identity_digest(request: RunIdentityRequestV1) -> (result: [byte; 32]) {
+    return finish_hash(append_request(request));
+}
+
+fn run_identity_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 114, 117, 110, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: RunIdentityRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 114, 117, 110, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let result: RunIdentityResultV1 = RunIdentityResultV1 {
+        schema_version: result_schema(),
+        digest: run_identity_digest(request)
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([114, 117, 110, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

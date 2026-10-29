@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.run-identity",
+  "source": "../native/mncs/test/run_identity_v1.mncs",
+  "module": "mncs.test.run_identity_v1",
+  "entry_function": "run_identity_app_v1",
+  "profile": "0.18",
+  "interface_identity": "67e59fe8d0ac5378e31a87e3fe874dd9c70c7ca76c05c7ba5b4baab3969ad8d2",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}
