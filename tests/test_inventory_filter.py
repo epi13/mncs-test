@@ -19,6 +19,7 @@ MNCS = Path(os.environ.get("MNCS_BINARY", os.environ.get("MNCS", str(_default_mn
 
 sys.path.insert(0, str(ROOT / "tools"))
 import mncs_test  # noqa: E402
+import mncs_test_native  # noqa: E402
 from mncs_test_native import NativeTransportError, run_test_inventory_filter  # noqa: E402
 
 
@@ -126,10 +127,64 @@ def test_native_filter_rejects_text_outside_its_declared_bound(tmp_path: Path) -
 
 
 def test_native_filter_refuses_adversarial_scan_cost_before_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mncs_test_native,
+        "run_native_app",
+        lambda *args, **kwargs: pytest.fail("over-budget filtering must be rejected before execution"),
+    )
+    with pytest.raises(NativeTransportError, match="step-budget work estimate"):
+        _select(
+            tmp_path,
+            ["a" * 1024] * 16,
+            [("a" * 449) + "b" + ("a" * 450)] * 16,
+        )
+
+
+def test_runner_uses_adaptive_native_batches_for_endpoint_mismatches(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(NativeTransportError, match="step-budget work estimate"):
-        _select(tmp_path, ["a" * 1024] * 16, ["a" * 900 + "b"] * 16)
+    tests = [{"id": "a" * 1000, "entry": ""} for _ in range(16)]
+    filters = ["a" * 900 + "b"] * 16
+    summary: dict[str, object] = {}
+
+    selected = mncs_test.select_tests(
+        tests,
+        filters,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        timeout_seconds=120,
+        selection_summary=summary,
+    )
+
+    assert selected == []
+    assert summary["authority"] == "mncs.test.inventory_filter_v1"
+    assert summary["status"] == "returned"
+    assert summary["calls"] == 2
+
+
+def test_runner_reports_host_fallback_when_native_call_limit_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    tests = [{"id": "record"}]
+    filters = ["absent"] * 1025
+    summary: dict[str, object] = {}
+
+    selected = mncs_test.select_tests(
+        tests,
+        filters,
+        mncs="not-invoked-for-native-call-limit",
+        cwd=tmp_path,
+        environment={},
+        timeout_seconds=1,
+        selection_summary=summary,
+    )
+
+    assert selected == []
+    assert summary["status"] == "host_fallback_call_limit"
+    assert summary["fallback_reason"] == "native_batch_call_limit_exceeded"
 
 
 def test_runner_preserves_overbound_filter_behavior_with_explicit_host_fallback(
@@ -154,8 +209,8 @@ def test_runner_preserves_overbound_filter_behavior_with_explicit_host_fallback(
 
 
 def test_runner_reports_host_fallback_for_native_work_estimate(tmp_path: Path) -> None:
-    tests = [{"id": ("a" * 400) + str(index), "entry": "entry"} for index in range(16)]
-    filters = [("a" * 200) + "b"] * 16
+    tests = [{"id": "a" * 800, "entry": ""}]
+    filters = [("a" * 350) + "b" + ("a" * 349)]
     summary: dict[str, object] = {}
 
     selected = mncs_test.select_tests(

@@ -4322,6 +4322,8 @@ def select_tests(
             "status": (
                 "host_fallback_input_bound"
                 if error.reason == "input_exceeds_native_1024_byte_bound"
+                else "host_fallback_call_limit"
+                if error.reason == "native_batch_call_limit_exceeded"
                 else "host_fallback_work_estimate"
             ),
             "fallback_reason": error.reason,

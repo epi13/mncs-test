@@ -297,6 +297,7 @@ INVENTORY_FILTER_RESULT_SCHEMA = "mncs.test-inventory-filter/1"
 INVENTORY_FILTER_BATCH_SIZE = 16
 INVENTORY_FILTER_TEXT_MAX_BYTES = 1024
 INVENTORY_FILTER_ESTIMATED_WORK_MAX = 65_536
+INVENTORY_FILTER_MAX_NATIVE_CALLS = 64
 EXACT_IDENTITY_SELECTION_REQUEST_SCHEMA = "mncs.test-exact-identity-selection-request/1"
 EXACT_IDENTITY_SELECTION_RESULT_SCHEMA = "mncs.test-exact-identity-selection/1"
 EXACT_IDENTITY_SELECTION_BATCH_SIZE = 16
@@ -356,65 +357,141 @@ def run_test_inventory_filter(
 
     normalized_texts = [bounded_text(value, "search text") for value in search_texts]
     normalized_filters = [bounded_text(value, "filter") for value in filters]
+    if not normalized_texts:
+        return {
+            "selected_indices": [],
+            "calls": 0,
+            "case_count": 0,
+            "filter_count": len(normalized_filters),
+            "selected_count": 0,
+        }
+    candidate_batch_count = (
+        len(normalized_texts) + INVENTORY_FILTER_BATCH_SIZE - 1
+    ) // INVENTORY_FILTER_BATCH_SIZE
+    filter_batch_count = max(
+        1,
+        (len(normalized_filters) + INVENTORY_FILTER_BATCH_SIZE - 1)
+        // INVENTORY_FILTER_BATCH_SIZE,
+    )
+    if candidate_batch_count * filter_batch_count > INVENTORY_FILTER_MAX_NATIVE_CALLS:
+        raise NativeInputBoundError(
+            "Test inventory selection would exceed its bounded native call count",
+            reason="native_batch_call_limit_exceeded",
+        )
+    encoded_texts = [value.encode("utf-8") for value in normalized_texts]
+    encoded_filters = [value.encode("utf-8") for value in normalized_filters]
     selected_indices: set[int] = set()
-    calls = 0
-    for candidate_offset in range(0, len(normalized_texts), INVENTORY_FILTER_BATCH_SIZE):
-        candidate_batch = normalized_texts[
-            candidate_offset:candidate_offset + INVENTORY_FILTER_BATCH_SIZE
-        ]
-        filter_batches = [
-            normalized_filters[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
-            for offset in range(0, len(normalized_filters), INVENTORY_FILTER_BATCH_SIZE)
-        ] or [[]]
-        for filter_batch in filter_batches:
-            estimated_work = sum(
-                len(value.encode("utf-8")) * len(pattern.encode("utf-8"))
-                for value in candidate_batch
-                for pattern in filter_batch
+    candidate_entries = list(zip(
+        range(len(normalized_texts)), normalized_texts, encoded_texts, strict=True,
+    ))
+    filter_entries = list(zip(normalized_filters, encoded_filters, strict=True))
+    planned_calls: list[tuple[list[tuple[int, str, bytes]], list[tuple[str, bytes]]]] = []
+    estimated_pair_work: dict[tuple[bytes, bytes], int] = {}
+
+    def estimate_pair_work(haystack: bytes, needle: bytes) -> int:
+        cache_key = (haystack, needle)
+        cached = estimated_pair_work.get(cache_key)
+        if cached is not None:
+            return cached
+        if not needle or len(needle) > len(haystack):
+            work = 1
+        else:
+            starts = len(haystack) - len(needle) + 1
+            endpoint_hits = sum(
+                haystack[start] == needle[0]
+                and haystack[start + len(needle) - 1] == needle[-1]
+                for start in range(starts)
             )
+            # Each valid start pays for the range iteration and endpoint checks.
+            # Only endpoint matches enter the full needle comparison loop.
+            work = 4 * starts + endpoint_hits * len(needle)
+        estimated_pair_work[cache_key] = work
+        return work
+
+    def plan_batch(
+        candidates: list[tuple[int, str, bytes]],
+        patterns: list[tuple[str, bytes]],
+    ) -> None:
+        estimated_work = 0
+        for _, _, haystack in candidates:
+            for _, needle in patterns:
+                estimated_work += estimate_pair_work(haystack, needle)
+                if estimated_work > INVENTORY_FILTER_ESTIMATED_WORK_MAX:
+                    break
             if estimated_work > INVENTORY_FILTER_ESTIMATED_WORK_MAX:
+                break
+        if estimated_work <= INVENTORY_FILTER_ESTIMATED_WORK_MAX:
+            if len(planned_calls) >= INVENTORY_FILTER_MAX_NATIVE_CALLS:
                 raise NativeInputBoundError(
-                    "Test inventory substring request exceeds the native step-budget work estimate",
-                    reason="estimated_work_exceeds_native_step_budget",
+                    "Test inventory selection would exceed its bounded native call count",
+                    reason="native_batch_call_limit_exceeded",
                 )
-            request = {
-                "schema_version": INVENTORY_FILTER_REQUEST_SCHEMA,
-                "candidate_count": len(candidate_batch),
-                "candidates": [
-                    {"test_index": candidate_offset + index, "search_text": value}
-                    for index, value in enumerate(candidate_batch)
-                ],
-                "filter_count": len(filter_batch),
-                "filters": filter_batch,
-            }
-            result = run_native_app(
-                "test-inventory-filter.json",
-                request,
-                request_schema=INVENTORY_FILTER_REQUEST_SCHEMA,
-                result_schema=INVENTORY_FILTER_RESULT_SCHEMA,
-                mncs=mncs,
-                cwd=cwd,
-                environment=environment,
-                timeout_seconds=timeout_seconds,
+            planned_calls.append((candidates, patterns))
+            return
+        if len(candidates) == 1 and len(patterns) == 1:
+            raise NativeInputBoundError(
+                "Test inventory substring request exceeds the native step-budget work estimate",
+                reason="estimated_work_exceeds_native_step_budget",
             )
-            indices = result.get("selected_indices")
-            count = result.get("selected_count")
-            if (not isinstance(indices, list) or type(count) is not int
-                    or count != len(indices)):
+        if len(candidates) > 1 and len(candidates) >= len(patterns):
+            midpoint = len(candidates) // 2
+            plan_batch(candidates[:midpoint], patterns)
+            plan_batch(candidates[midpoint:], patterns)
+            return
+        midpoint = len(patterns) // 2
+        plan_batch(candidates, patterns[:midpoint])
+        plan_batch(candidates, patterns[midpoint:])
+
+    candidate_batches = [
+        candidate_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
+        for offset in range(0, len(candidate_entries), INVENTORY_FILTER_BATCH_SIZE)
+    ]
+    filter_batches = [
+        filter_entries[offset:offset + INVENTORY_FILTER_BATCH_SIZE]
+        for offset in range(0, len(filter_entries), INVENTORY_FILTER_BATCH_SIZE)
+    ] or [[]]
+    for candidate_batch in candidate_batches:
+        for filter_batch in filter_batches:
+            plan_batch(candidate_batch, filter_batch)
+
+    for candidate_batch, filter_batch in planned_calls:
+        request = {
+            "schema_version": INVENTORY_FILTER_REQUEST_SCHEMA,
+            "candidate_count": len(candidate_batch),
+            "candidates": [
+                {"test_index": index, "search_text": value}
+                for index, value, _ in candidate_batch
+            ],
+            "filter_count": len(filter_batch),
+            "filters": [pattern for pattern, _ in filter_batch],
+        }
+        result = run_native_app(
+            "test-inventory-filter.json",
+            request,
+            request_schema=INVENTORY_FILTER_REQUEST_SCHEMA,
+            result_schema=INVENTORY_FILTER_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+        )
+        indices = result.get("selected_indices")
+        count = result.get("selected_count")
+        if (not isinstance(indices, list) or type(count) is not int
+                or count != len(indices)):
+            raise NativeTransportError(
+                "native Test inventory filter returned a mismatched result count"
+            )
+        allowed_indices = {index for index, _, _ in candidate_batch}
+        for index in indices:
+            if type(index) is not int or index not in allowed_indices:
                 raise NativeTransportError(
-                    "native Test inventory filter returned a mismatched result count"
+                    "native Test inventory filter returned an out-of-range index"
                 )
-            for index in indices:
-                if (type(index) is not int or index < candidate_offset
-                        or index >= candidate_offset + len(candidate_batch)):
-                    raise NativeTransportError(
-                        "native Test inventory filter returned an out-of-range index"
-                    )
-                selected_indices.add(index)
-            calls += 1
+            selected_indices.add(index)
     return {
         "selected_indices": sorted(selected_indices),
-        "calls": calls,
+        "calls": len(planned_calls),
         "case_count": len(normalized_texts),
         "filter_count": len(normalized_filters),
         "selected_count": len(selected_indices),

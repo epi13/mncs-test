@@ -60,6 +60,13 @@ fn substring_at(
     if needle.len > haystack.len - start {
         return false;
     }
+    if haystack[start] != needle[0] {
+        return false;
+    }
+    let last_index: u64 = needle.len - 1;
+    if haystack[start + last_index] != needle[last_index] {
+        return false;
+    }
     iterate i over needle carrying same: bool = true {
         next same = same && haystack[start + i] == needle[i];
     }
@@ -76,7 +83,8 @@ fn contains_substring(
     if needle.len > haystack.len {
         return false;
     }
-    iterate i over haystack carrying found: bool = false {
+    let possible_starts: [byte; up_to 1024] = haystack[0..haystack.len - needle.len +% 1];
+    iterate i over possible_starts carrying found: bool = false {
         next found = found || substring_at(haystack, needle, i);
     }
     return found;
