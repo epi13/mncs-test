@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.lineage-identity",
+  "source": "../native/mncs/test/lineage_identity_v1.mncs",
+  "module": "mncs.test.lineage_identity_v1",
+  "entry_function": "lineage_identity_app_v1",
+  "profile": "0.18",
+  "interface_identity": "5d717a1946f380a840bb26706cb3ca37a77b82da26b12cb25bc42a4262930e34",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

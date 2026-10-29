@@ -77,6 +77,11 @@ TEST_RESULT_IDENTITY_MAX_BYTES = 65536
 TEST_RESULT_IDENTITY_MAX_PAYLOADS = 16
 TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
 TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
+TEST_LINEAGE_IDENTITY_REQUEST_SCHEMA = "mncs.test.lineage-identity-request/1"
+TEST_LINEAGE_IDENTITY_RESULT_SCHEMA = "mncs.test.lineage-identity/1"
+TEST_LINEAGE_IDENTITY_MAX_ROWS = 16
+TEST_LINEAGE_IDENTITY_MAX_BYTES = 16384
+TEST_LINEAGE_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 COMPILE_VERDICT_EXPECTED_BATCH = 16
 COMPILE_VERDICT_ACTUAL_BATCH = 32
 MAX_DIAGNOSTIC_CODE_BYTES = 512
@@ -821,6 +826,244 @@ def result_identity_sha256_many(
             batch, mncs=mncs, cwd=cwd, environment=environment
         ))
     return digests
+
+
+def _native_lineage_identity_row(
+    index: int,
+    run_identity: Any,
+    test_case_identity: Any,
+    status: Any,
+    verdict: Any,
+) -> dict[str, Any] | None:
+    """Project ordinary lineage fields into the bounded MNCS request shape."""
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or not isinstance(run_identity, str)
+        or not isinstance(test_case_identity, str)
+        or (status is not None and not isinstance(status, str))
+        or (verdict is not None and not isinstance(verdict, str))
+    ):
+        return None
+
+    run_bytes = run_identity.encode("utf-8")
+    case_bytes = test_case_identity.encode("utf-8")
+    status_bytes = status.encode("utf-8") if status is not None else b""
+    verdict_bytes = verdict.encode("utf-8") if verdict is not None else b""
+    if (
+        len(run_bytes) > 256
+        or len(case_bytes) > 512
+        or len(status_bytes) > 64
+        or len(verdict_bytes) > 32
+    ):
+        return None
+
+    return {
+        "run_identity": list(run_bytes),
+        "run_identity_length": len(run_bytes),
+        "index": index,
+        "test_case_identity": list(case_bytes),
+        "test_case_identity_length": len(case_bytes),
+        "status": list(status_bytes),
+        "status_length": len(status_bytes),
+        "status_is_null": status is None,
+        "verdict": list(verdict_bytes),
+        "verdict_length": len(verdict_bytes),
+        "verdict_is_null": verdict is None,
+    }
+
+
+def lineage_identity_step_budget(rows: list[dict[str, Any]]) -> int:
+    """Conservatively bound streamed JSON and SHA work for native rows."""
+    escaped_bytes = sum(
+        6 * (
+            row["run_identity_length"]
+            + row["test_case_identity_length"]
+            + row["status_length"]
+            + row["verdict_length"]
+        )
+        + 192
+        for row in rows
+    )
+    blocks = (escaped_bytes + 63) // 64 + len(rows) * 4 + 2
+    return max(2_097_152, 100_000 + blocks * 32_768)
+
+
+def lineage_identity_sha256_batch(
+    rows: list[dict[str, Any]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> list[tuple[str, str]]:
+    """Hash one bounded set of typed per-test lineage rows in MNCS."""
+    if not isinstance(rows, list) or len(rows) > TEST_LINEAGE_IDENTITY_MAX_ROWS:
+        raise NativeInputBoundError(
+            "lineage identity batch exceeds its 16-row native bound",
+            reason="lineage_identity_row_count",
+        )
+    if any(not isinstance(row, dict) for row in rows):
+        raise AdapterError("Test lineage identity rows must be objects")
+    total_bytes = sum(
+        row.get("run_identity_length", 0)
+        + row.get("test_case_identity_length", 0)
+        + row.get("status_length", 0)
+        + row.get("verdict_length", 0)
+        for row in rows
+    )
+    if total_bytes > TEST_LINEAGE_IDENTITY_MAX_BYTES:
+        raise NativeInputBoundError(
+            "lineage identity batch exceeds its 16,384-byte native bound",
+            reason="lineage_identity_bytes",
+        )
+
+    step_budget = lineage_identity_step_budget(rows)
+    if step_budget > TEST_LINEAGE_IDENTITY_MAX_STEP_BUDGET:
+        raise NativeInputBoundError(
+            "lineage identity batch exceeds the 8,000,000-step native bound",
+            reason="lineage_identity_step_budget",
+        )
+    request = {
+        "schema_version": TEST_LINEAGE_IDENTITY_REQUEST_SCHEMA,
+        "row_count": len(rows),
+        "rows": rows,
+    }
+    try:
+        result = run_native_app(
+            "test-lineage-identity.json",
+            request,
+            request_schema=TEST_LINEAGE_IDENTITY_REQUEST_SCHEMA,
+            result_schema=TEST_LINEAGE_IDENTITY_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=step_budget,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test lineage identity failed: {error}") from error
+
+    digests = result.get("digests")
+    if (
+        result.get("row_count") != len(rows)
+        or not isinstance(digests, list)
+        or len(digests) != len(rows)
+    ):
+        raise AdapterError("MNCS lineage-identity app returned malformed digest rows")
+    output: list[tuple[str, str]] = []
+    for item in digests:
+        if not isinstance(item, dict):
+            raise AdapterError("MNCS lineage-identity app returned a malformed row")
+        row_digests: list[str] = []
+        for field in ("execution", "observation"):
+            digest_record = item.get(field)
+            digest = digest_record.get("digest") if isinstance(digest_record, dict) else None
+            if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
+                raise AdapterError("MNCS lineage-identity app returned a malformed digest")
+            row_digests.append(digest)
+        output.append((row_digests[0], row_digests[1]))
+    return output
+
+
+def lineage_identity_sha256_many(
+    rows: list[tuple[int, str, str, Any, Any]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> list[tuple[str, str]]:
+    """Hash ordinary per-test identities in MNCS with bounded compatibility fallbacks.
+
+    The application constructs and hashes the canonical execution and
+    observation JSON for ordinary string/null fields. Values outside its
+    fixed field bounds or vocabulary keep the previous compact-JSON path.
+    """
+    if not isinstance(rows, list):
+        raise AdapterError("Test lineage identity inputs must be a list")
+    results: list[tuple[str, str] | None] = [None] * len(rows)
+    native_batches: list[list[tuple[int, dict[str, Any]]]] = []
+    pending: list[tuple[int, dict[str, Any]]] = []
+    fallback: list[tuple[int, int, str, str, Any, Any]] = []
+
+    def batch_too_large(candidate: list[tuple[int, dict[str, Any]]]) -> bool:
+        wire_rows = [wire for _, wire in candidate]
+        return (
+            len(wire_rows) > TEST_LINEAGE_IDENTITY_MAX_ROWS
+            or sum(
+                wire["run_identity_length"]
+                + wire["test_case_identity_length"]
+                + wire["status_length"]
+                + wire["verdict_length"]
+                for wire in wire_rows
+            ) > TEST_LINEAGE_IDENTITY_MAX_BYTES
+            or lineage_identity_step_budget(wire_rows)
+            > TEST_LINEAGE_IDENTITY_MAX_STEP_BUDGET
+        )
+
+    for position, (index, run_identity, case_identity, status, verdict) in enumerate(rows):
+        wire = _native_lineage_identity_row(
+            index, run_identity, case_identity, status, verdict
+        )
+        if wire is None:
+            fallback.append((position, index, run_identity, case_identity, status, verdict))
+            continue
+        candidate = [*pending, (position, wire)]
+        if pending and batch_too_large(candidate):
+            native_batches.append(pending)
+            pending = []
+            candidate = [(position, wire)]
+        if batch_too_large(candidate):
+            fallback.append((position, index, run_identity, case_identity, status, verdict))
+        else:
+            pending = candidate
+    if pending:
+        native_batches.append(pending)
+
+    for batch in native_batches:
+        digests = lineage_identity_sha256_batch(
+            [wire for _, wire in batch],
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+        for (position, _), digest_pair in zip(batch, digests):
+            results[position] = digest_pair
+
+    fallback_payloads: list[bytes] = []
+    for _, index, run_identity, case_identity, _, _ in fallback:
+        execution = {
+            "index": index,
+            "run": run_identity,
+            "test_case": case_identity,
+        }
+        fallback_payloads.append(compact_json(execution).encode("utf-8"))
+
+    if fallback_payloads:
+        # The observation payload depends on the execution digest. Hash the
+        # execution rows first, then construct and hash the exact old JSON.
+        execution_digests = result_identity_sha256_many(
+            fallback_payloads, mncs=mncs, cwd=cwd, environment=environment
+        )
+        observation_payloads: list[bytes] = []
+        for fallback_row, execution_digest in zip(fallback, execution_digests):
+            _, _, _, _, status, verdict = fallback_row
+            observation_payloads.append(compact_json({
+                "execution": execution_digest,
+                "status": status,
+                "verdict": verdict,
+            }).encode("utf-8"))
+        observation_digests = result_identity_sha256_many(
+            observation_payloads, mncs=mncs, cwd=cwd, environment=environment
+        )
+        for fallback_row, execution_digest, observation_digest in zip(
+            fallback, execution_digests, observation_digests
+        ):
+            position = fallback_row[0]
+            results[position] = (execution_digest, observation_digest)
+
+    if any(result is None for result in results):
+        raise AdapterError("MNCS lineage-identity batching left an unbound row")
+    return [result for result in results if result is not None]
 
 
 def result_identity_step_budget(payloads: list[bytes]) -> int:
@@ -3902,43 +4145,29 @@ def make_result(
     experiment_identity = f"mncs:language:experiment:test:{run_id}"
     experiment_run_identity = f"mncs:language:experiment-run:{run_id}"
     lineage_rows: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
-    execution_payloads: list[bytes] = []
+    lineage_identity_inputs: list[tuple[int, str, str, Any, Any]] = []
     for index, item in enumerate(test_results):
         semantic = item.get("semantic")
         if not isinstance(semantic, dict) or not semantic.get("test_case_identity"):
             continue
-        execution_payloads.append(
-            compact_json({
-                "run": experiment_run_identity,
-                "index": index,
-                "test_case": semantic["test_case_identity"],
-            }).encode("utf-8")
-        )
+        lineage_identity_inputs.append((
+            index,
+            experiment_run_identity,
+            semantic["test_case_identity"],
+            item.get("execution_status", item.get("status")),
+            item.get("verdict"),
+        ))
         lineage_rows.append((index, item, semantic))
 
-    execution_digests = result_identity_sha256_many(
-        execution_payloads,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )
-    observation_payloads = [
-        compact_json({
-            "execution": execution_digest,
-            "status": item.get("execution_status", item.get("status")),
-            "verdict": item.get("verdict"),
-        }).encode("utf-8")
-        for (_, item, _), execution_digest in zip(lineage_rows, execution_digests)
-    ]
-    observation_digests = result_identity_sha256_many(
-        observation_payloads,
+    lineage_digests = lineage_identity_sha256_many(
+        lineage_identity_inputs,
         mncs=mncs,
         cwd=cwd,
         environment=environment,
     )
 
-    for (index, item, semantic), execution_digest, observation_digest in zip(
-        lineage_rows, execution_digests, observation_digests
+    for (index, item, semantic), (execution_digest, observation_digest) in zip(
+        lineage_rows, lineage_digests
     ):
         item["execution_identity"] = f"{experiment_run_identity}:execution:{execution_digest}"
         item["observation_identity"] = f"{experiment_run_identity}:observation:{observation_digest}"

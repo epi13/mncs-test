@@ -1,0 +1,300 @@
+mncs 0.18;
+
+// mncs.test.lineage_identity_v1 — canonical per-test lineage identities.
+// The host adapter supplies typed lineage fields; canonical JSON byte
+// construction and SHA-256 remain inside MNCS. Emission is streamed through
+// bounded 64-byte pages so ordinary identities are not limited to one JSON
+// writer view.
+module mncs.test.lineage_identity_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json_emit.v1 as json;
+use mncs.std.sha256.v1 as sha256;
+
+record LineageIdentityRowV1 {
+    run_identity: [byte; up_to 256],
+    run_identity_length: u64,
+    index: u64,
+    test_case_identity: [byte; up_to 512],
+    test_case_identity_length: u64,
+    status: [byte; up_to 64],
+    status_length: u64,
+    status_is_null: bool,
+    verdict: [byte; up_to 32],
+    verdict_length: u64,
+    verdict_is_null: bool
+}
+
+record LineageIdentityRequestV1 {
+    schema_version: [byte; up_to 64],
+    row_count: u64,
+    rows: [LineageIdentityRowV1; up_to 16]
+}
+
+record IdentityHashV1 {
+    digest: [byte; 32]
+}
+
+record LineageIdentityDigestsV1 {
+    execution: IdentityHashV1,
+    observation: IdentityHashV1
+}
+
+record LineageIdentityResultV1 {
+    schema_version: [byte; up_to 64],
+    row_count: u64,
+    digests: [LineageIdentityDigestsV1; up_to 16]
+}
+
+record HashWriterV1 {
+    state: sha256.DigestState,
+    buffer: [byte; 64],
+    length: u64
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 108, 105, 110, 101, 97, 103, 101, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 108, 105, 110, 101, 97, 103, 101, 45, 105, 100, 101, 110, 116, 105, 116, 121, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn valid_row(row: LineageIdentityRowV1) -> (result: bool) {
+    let run_valid: bool = row.run_identity_length == row.run_identity.len
+        && row.run_identity_length <= 256;
+    let case_valid: bool = row.test_case_identity_length == row.test_case_identity.len
+        && row.test_case_identity_length <= 512;
+    let status_valid: bool = row.status_length == row.status.len
+        && row.status_length <= 64
+        && (!row.status_is_null || row.status_length == 0);
+    let verdict_valid: bool = row.verdict_length == row.verdict.len
+        && row.verdict_length <= 32
+        && (!row.verdict_is_null || row.verdict_length == 0);
+    return run_valid && case_valid && status_valid && verdict_valid;
+}
+
+fn total_input_bytes(request: LineageIdentityRequestV1) -> (result: u64) {
+    iterate i over request.rows carrying total: u64 = 0 {
+        let row: LineageIdentityRowV1 = request.rows[i];
+        next total = total +% row.run_identity_length
+            +% row.test_case_identity_length
+            +% row.status_length
+            +% row.verdict_length;
+    }
+    return total;
+}
+
+fn valid_rows(request: LineageIdentityRequestV1) -> (result: bool) {
+    iterate i over request.rows carrying valid: bool = true {
+        next valid = valid && valid_row(request.rows[i]);
+    }
+    return valid && total_input_bytes(request) <= 16384;
+}
+
+fn valid_request(request: LineageIdentityRequestV1) -> (result: bool) {
+    return same_bytes(request.schema_version, request_schema())
+        && request.row_count == request.rows.len
+        && request.row_count <= 16
+        && valid_rows(request);
+}
+
+fn writer_open() -> (result: HashWriterV1) {
+    return HashWriterV1 { state: sha256.init(), buffer: [0; 64], length: 0 };
+}
+
+fn append_byte(writer: HashWriterV1, value: byte) -> (result: HashWriterV1) {
+    if writer.length < 64 {
+        return HashWriterV1 {
+            ..writer,
+            buffer: replace(writer.buffer, writer.length, value),
+            length: writer.length +% 1
+        };
+    }
+    let flushed: sha256.DigestState = sha256.update_standard(writer.state, writer.buffer, 64);
+    let empty: [byte; 64] = [0; 64];
+    return HashWriterV1 { state: flushed, buffer: replace(empty, 0, value), length: 1 };
+}
+
+fn append_live_byte(writer: HashWriterV1, live: bool, value: byte) -> (result: HashWriterV1) {
+    if live {
+        return append_byte(writer, value);
+    }
+    return writer;
+}
+
+fn append_json_byte(writer: HashWriterV1, value: byte) -> (result: HashWriterV1) {
+    // Python json.dumps(..., ensure_ascii=False) uses short escapes for these
+    // five controls. The shared emitter handles quotes, backslashes, and all
+    // remaining controls with the same lowercase \\u00XX spelling.
+    if value == 8 {
+        return append_byte(append_byte(writer, 92), 98);
+    }
+    if value == 9 {
+        return append_byte(append_byte(writer, 92), 116);
+    }
+    if value == 10 {
+        return append_byte(append_byte(writer, 92), 110);
+    }
+    if value == 12 {
+        return append_byte(append_byte(writer, 92), 102);
+    }
+    if value == 13 {
+        return append_byte(append_byte(writer, 92), 114);
+    }
+    let encoded: json.Writer = json.put_quoted_byte(json.open(), value);
+    iterate i over encoded.buf carrying result: HashWriterV1 = writer {
+        next result = append_live_byte(result, i < encoded.len, encoded.buf[i]);
+    }
+    return result;
+}
+
+fn append_json_byte_if_live(writer: HashWriterV1, live: bool, value: byte) -> (result: HashWriterV1) {
+    if live {
+        return append_json_byte(writer, value);
+    }
+    return writer;
+}
+
+fn append_quoted(writer: HashWriterV1, text: [byte; up_to 512], text_length: u64) -> (result: HashWriterV1) {
+    let opened: HashWriterV1 = append_byte(writer, 34);
+    iterate i over text carrying result: HashWriterV1 = opened {
+        next result = append_json_byte_if_live(result, i < text_length, text[i]);
+    }
+    return append_byte(result, 34);
+}
+
+fn append_literal<N: Nat>(writer: HashWriterV1, bytes: [byte; N]) -> (result: HashWriterV1) {
+    iterate i over bytes carrying result: HashWriterV1 = writer {
+        next result = append_byte(result, bytes[i]);
+    }
+    return result;
+}
+
+fn append_json_bytes(writer: HashWriterV1, bytes: [byte; up_to 64]) -> (result: HashWriterV1) {
+    iterate i over bytes carrying result: HashWriterV1 = writer {
+        next result = append_byte(result, bytes[i]);
+    }
+    return result;
+}
+
+fn append_unsigned(writer: HashWriterV1, value: u64) -> (result: HashWriterV1) {
+    let decimal: json.Writer = json.put_u64(json.open(), value);
+    let bytes: [byte; up_to 64] = decimal.buf[0..decimal.len];
+    return append_json_bytes(writer, bytes);
+}
+
+fn append_nullable_quoted(
+    writer: HashWriterV1,
+    text: [byte; up_to 512],
+    text_length: u64,
+    is_null: bool
+) -> (result: HashWriterV1) {
+    if is_null {
+        return append_literal<4>(writer, [110, 117, 108, 108]);
+    }
+    return append_quoted(writer, text, text_length);
+}
+
+fn finish_hash(writer: HashWriterV1) -> (result: [byte; 32]) {
+    let state: sha256.DigestState = sha256.update_standard(writer.state, writer.buffer[0..writer.length], writer.length);
+    return sha256.finalize_standard(state);
+}
+
+fn hash_execution(row: LineageIdentityRowV1) -> (result: [byte; 32]) {
+    let a: HashWriterV1 = append_literal<9>(writer_open(), [123, 34, 105, 110, 100, 101, 120, 34, 58]);
+    let b: HashWriterV1 = append_unsigned(a, row.index);
+    let c: HashWriterV1 = append_literal<7>(b, [44, 34, 114, 117, 110, 34, 58]);
+    let d: HashWriterV1 = append_quoted(c, row.run_identity, row.run_identity_length);
+    let e: HashWriterV1 = append_literal<13>(d, [44, 34, 116, 101, 115, 116, 95, 99, 97, 115, 101, 34, 58]);
+    let f: HashWriterV1 = append_quoted(e, row.test_case_identity, row.test_case_identity_length);
+    let closed: HashWriterV1 = append_byte(f, 125);
+    return finish_hash(closed);
+}
+
+fn hex_digit(value: u64) -> (result: byte) {
+    if value < 10 {
+        return (value +% 48) as byte;
+    }
+    return (value +% 87) as byte;
+}
+
+fn append_digest_hex(writer: HashWriterV1, digest: [byte; 32]) -> (result: HashWriterV1) {
+    iterate i over digest carrying result: HashWriterV1 = writer {
+        let value: u64 = digest[i] as u64;
+        let high: byte = hex_digit(value / 16);
+        let low: byte = hex_digit(value % 16);
+        next result = append_byte(append_byte(result, high), low);
+    }
+    return result;
+}
+
+fn hash_observation(row: LineageIdentityRowV1, execution: [byte; 32]) -> (result: [byte; 32]) {
+    let a: HashWriterV1 = append_literal<14>(writer_open(), [123, 34, 101, 120, 101, 99, 117, 116, 105, 111, 110, 34, 58, 34]);
+    let b: HashWriterV1 = append_digest_hex(a, execution);
+    let c: HashWriterV1 = append_literal<10>(b, [34, 44, 34, 115, 116, 97, 116, 117, 115, 34]);
+    let d: HashWriterV1 = append_byte(c, 58);
+    let e: HashWriterV1 = append_nullable_quoted(d, row.status, row.status_length, row.status_is_null);
+    let f: HashWriterV1 = append_literal<11>(e, [44, 34, 118, 101, 114, 100, 105, 99, 116, 34, 58]);
+    let g: HashWriterV1 = append_nullable_quoted(f, row.verdict, row.verdict_length, row.verdict_is_null);
+    let closed: HashWriterV1 = append_byte(g, 125);
+    return finish_hash(closed);
+}
+
+fn empty_hash() -> (result: IdentityHashV1) {
+    return IdentityHashV1 { digest: [0; 32] };
+}
+
+fn empty_row_digests() -> (result: LineageIdentityDigestsV1) {
+    return LineageIdentityDigestsV1 { execution: empty_hash(), observation: empty_hash() };
+}
+
+fn hash_rows(request: LineageIdentityRequestV1) -> (result: [LineageIdentityDigestsV1; up_to 16]) {
+    let seed: [LineageIdentityDigestsV1; 16] = [empty_row_digests(); 16];
+    iterate i over request.rows carrying digests: [LineageIdentityDigestsV1; 16] = seed {
+        let row: LineageIdentityRowV1 = request.rows[i];
+        let execution: [byte; 32] = hash_execution(row);
+        let observation: [byte; 32] = hash_observation(row, execution);
+        let value: LineageIdentityDigestsV1 = LineageIdentityDigestsV1 {
+            execution: IdentityHashV1 { digest: execution },
+            observation: IdentityHashV1 { digest: observation }
+        };
+        next digests = replace(digests, i, value);
+    }
+    return digests[0..request.row_count];
+}
+
+fn lineage_identity_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 108, 105, 110, 101, 97, 103, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: LineageIdentityRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 108, 105, 110, 101, 97, 103, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let digests: [LineageIdentityDigestsV1; up_to 16] = hash_rows(request);
+    let result: LineageIdentityResultV1 = LineageIdentityResultV1 {
+        schema_version: result_schema(),
+        row_count: digests.len,
+        digests: digests
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([108, 105, 110, 101, 97, 103, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

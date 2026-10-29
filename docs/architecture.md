@@ -107,10 +107,9 @@ adapter rejoins those chunks when it writes the public JSON document.
 The compact count text reuses `mncs.std.json_emit.v1::put_u64`; the application
 returns a typed record and leaves full JSON serialization to the host boundary.
 
-`mncs.test.result_identity_v1` sends canonical run-identity and per-test
-execution/observation lineage JSON bytes through `mncs.std.sha256.v1`, so all
-common result and lineage digests are computed in MNCS. Python still constructs
-the canonical JSON inputs and formats the final result envelope. The adapter
+`mncs.test.result_identity_v1` hashes canonical run-identity JSON bytes and
+bounded artifact content through `mncs.std.sha256.v1`. Python still constructs
+the canonical `run_id` JSON and formats the final result envelope. The adapter
 batches up to 16 payloads, 64 chunks, 65,536 bytes, and the toolchain's
 8,000,000-step application ceiling per request; larger payload lists split into
 bounded calls. An individual identity payload whose byte or step estimate
@@ -119,6 +118,18 @@ uses this application for bounded artifact payloads and small compiler-created
 files, including execution-request digests. Filesystem reads and writes remain
 host operations; an artifact file whose native byte, chunk, or step estimate
 exceeds the application bound is hashed by the streaming host fallback.
+
+`mncs.test.lineage_identity_v1` now constructs and hashes per-test execution
+and observation identity JSON from typed index, run, test-case, status, and
+verdict fields. It uses the shared `mncs.std.json_emit.v1` quoting and integer
+operations with Python-compatible short escapes, then streams bytes through
+`mncs.std.sha256.v1` in 64-byte pages. Each request accepts at most 16 rows and
+16,384 aggregate input bytes; run, test-case, status, and verdict strings are
+bounded to 256, 512, 64, and 32 UTF-8 bytes. The adapter batches within these
+limits and retains the prior compact-JSON hash path for other value types or
+over-bound fields. Differential tests compare both digests to Python's
+independent `json.dumps` and `hashlib` behavior, and the runner self-suite
+verifies the integrated lineage values.
 
 `mncs.test.inventory_filter_v2` owns substring filtering over the Test
 inventory. The adapter prepares the runner's existing searchable fields and

@@ -5,16 +5,48 @@
   "commons_pressure_id": "MNCS-TOOLING-146FB6F4BBC6",
   "target_layer": "stdlib/tooling",
   "observed_need": "Expose a stable result document to mncs-actions and future Forge without losing typed native values or structured diagnostics.",
-  "current_language_behavior": "Native assertions, suite verdicts, retained execution values, process-outcome classification, subprocess-fallback execution adjudication, the family-check path's CheckResult policy projection, bounded run_id plus per-test execution/observation lineage SHA-256, and bounded ArtifactStore payload/file digests are MNCS-owned. Python still supervises processes, projects typed values and raw diagnostics, constructs canonical identity JSON, serializes TestResult/CheckResult JSON, and performs filesystem access; the Rust bootstrap CLI retains its JSON and artifact boundaries.",
-  "why_insufficient": "The CheckResult and result-identity applications use shared MNCS JSON and SHA-256 capabilities, but the complete cross-repository evidence protocol and canonical JSON encoding are not yet an application-level MNCS surface. Native result-identity hashing is bounded by 65,536 bytes, 64 chunks, and the toolchain's 8,000,000-step application ceiling; an individual over-budget identity or artifact payload retains the host digest. Large file/provenance hashes remain streamed through the host boundary. Python reassembles UTF-8-safe chunks where native byte fields are bounded to 1,024 bytes.",
-  "minimal_reproducer": "tools/mncs_test.py::make_result builds canonical identity JSON and batches run_id plus per-test execution/observation payloads through test-result-identity; ArtifactStore.write, ArtifactStore.record_existing, and execute_entry use that app for bounded artifact content; tools/mncs_test.py::check_result calls test-check-result-projection for the family check envelope, then serializes the typed native result as mncs.check-result/1 JSON.",
+  "current_language_behavior": "Native assertions, suite verdicts, retained execution values, process-outcome classification, subprocess-fallback execution adjudication, the family-check path's CheckResult policy projection, bounded run_id plus per-test lineage digests, per-test canonical execution/observation JSON construction for ordinary bounded string/null fields, and bounded ArtifactStore payload/file digests are MNCS-owned. Python still supervises processes, projects typed values and raw diagnostics, constructs canonical run_id JSON, serializes TestResult/CheckResult JSON, and performs filesystem access; the Rust bootstrap CLI retains its JSON and artifact boundaries.",
+  "why_insufficient": "The CheckResult, lineage-identity, and result-identity applications use shared MNCS JSON and SHA-256 capabilities, but the complete cross-repository evidence protocol, run_id JSON construction, and public result serialization are not yet application-level MNCS surfaces. Per-test lineage construction accepts up to 16 rows with 16,384 aggregate input bytes and fixed UTF-8 field limits; unusual value types or over-bound fields keep the compatibility path. Native digest work remains bounded by the toolchain's 8,000,000-step application ceiling. Large file/provenance hashes remain streamed through the host boundary. Python reassembles UTF-8-safe chunks where native byte fields are bounded to 1,024 bytes.",
+  "minimal_reproducer": "tools/mncs_test.py::make_result keeps canonical run_id JSON in Python and hashes it through test-result-identity; it sends ordinary per-test index/run/test-case/status/verdict fields to test-lineage-identity, which constructs and hashes canonical execution/observation JSON. Out-of-contract lineage values use the previous compact-JSON hash path. ArtifactStore.write, ArtifactStore.record_existing, and execute_entry use test-result-identity for bounded artifact content; tools/mncs_test.py::check_result calls test-check-result-projection, then serializes the typed native result as mncs.check-result/1 JSON.",
   "desired_direction": "A versioned native serialization/protocol library for bounded structured results, with explicit text/bytes policy and lossless adapter projections.",
   "severity": "major",
   "disposition": "worked_around",
-  "workaround": "The MNCS test-check-result-projection application owns CheckResult policy and reference construction, and test-result-identity computes bounded run, per-test lineage, and ArtifactStore digests with mncs.std.sha256.v1. The adapter respects the native payload, chunk, byte, and step limits; an individual over-budget payload falls back to host hashing, and larger files are hashed as a stream. Python reassembles unresolved-message chunks, builds canonical identity JSON, performs filesystem access, and serializes public JSON/artifacts. Python also retains process supervision, typed-value projection, raw diagnostic transport, and explicit Actions/compatibility transport; it no longer classifies subprocess transport or decoded execution outcomes.",
+  "workaround": "The MNCS test-check-result-projection application owns CheckResult policy and reference construction; test-lineage-identity constructs and hashes ordinary per-test execution/observation JSON; and test-result-identity computes bounded run_id and ArtifactStore digests with mncs.std.sha256.v1. The adapter respects native row, field, payload, chunk, byte, and step limits; unusual or over-bound lineage values retain the exact compact-JSON compatibility path, individual over-budget content hashes retain the host fallback, and larger files are hashed as a stream. Python still constructs canonical run_id JSON, reassembles unresolved-message chunks, performs filesystem access, and serializes public JSON/artifacts. Python also retains process supervision, typed-value projection, raw diagnostic transport, and explicit Actions/compatibility transport; it no longer classifies subprocess transport or decoded execution outcomes.",
   "status": "open",
-  "relevant_files": ["tools/mncs_test.py", "native/mncs/test/process_transport_adjudication_v1.mncs", "native-applications/test-process-transport-adjudication.json", "native/mncs/test/check_result_projection_v1.mncs", "native-applications/test-check-result-projection.json", "native/mncs/test/result_identity_v1.mncs", "native-applications/test-result-identity.json", "schemas/test-result.schema.json", "docs/architecture.md"],
-  "relevant_tests": ["tests/test_process_transport_adjudication.py", "tests/test_check_result_projection.py", "tests/test_result_identity.py", "tests/test_artifact_hashing.py", "tests/test_runner.py::test_self_suite", "tests/test_runner.py::test_expected_compile_failure", "tests/test_runner.py::test_expected_runtime_failure"],
-  "relevant_commits": ["mncs-test:81f279c", "mncs-test:b170470", "mncs-actions:95df975", "mncs-test:e396217", "mncs-language:ea5e594", "mncs-actions:7701127"],
-  "commons_observations": ["MNCS-TOOLING-146FB6F4BBC6--OBS-4F19097B5A90", "MNCS-TOOLING-146FB6F4BBC6--OBS-8EE189B6A49E"]
+  "relevant_files": [
+    "tools/mncs_test.py",
+    "native/mncs/test/process_transport_adjudication_v1.mncs",
+    "native-applications/test-process-transport-adjudication.json",
+    "native/mncs/test/check_result_projection_v1.mncs",
+    "native-applications/test-check-result-projection.json",
+    "native/mncs/test/lineage_identity_v1.mncs",
+    "native-applications/test-lineage-identity.json",
+    "native/mncs/test/result_identity_v1.mncs",
+    "native-applications/test-result-identity.json",
+    "schemas/test-result.schema.json",
+    "docs/architecture.md"
+  ],
+  "relevant_tests": [
+    "tests/test_process_transport_adjudication.py",
+    "tests/test_check_result_projection.py",
+    "tests/test_result_identity.py::test_native_lineage_identity_matches_python_canonical_json",
+    "tests/test_result_identity.py::test_native_lineage_identity_batches_rows_by_application_bounds",
+    "tests/test_result_identity.py::test_lineage_identity_uses_exact_fallback_for_out_of_contract_fields",
+    "tests/test_artifact_hashing.py",
+    "tests/test_runner.py::RunnerTests::test_self_suite",
+    "tests/test_runner.py::RunnerTests::test_expected_compile_failure",
+    "tests/test_runner.py::RunnerTests::test_expected_runtime_failure"
+  ],
+  "relevant_commits": [
+    "mncs-test:81f279c",
+    "mncs-test:b170470",
+    "mncs-actions:95df975",
+    "mncs-test:e396217",
+    "mncs-language:ea5e594",
+    "mncs-actions:7701127"
+  ],
+  "commons_observations": [
+    "MNCS-TOOLING-146FB6F4BBC6--OBS-4F19097B5A90",
+    "MNCS-TOOLING-146FB6F4BBC6--OBS-8EE189B6A49E"
+  ]
 }
