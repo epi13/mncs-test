@@ -12,8 +12,17 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "tools" / "mncs_test.py"
-LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", REPO.parent / "mncs-language"))
-COMMONS = Path(os.environ.get("MNCS_COMMONS_REPO", REPO.parent / "MNCS-Commons"))
+WORKSPACE_ROOT = next(
+    (
+        candidate
+        for candidate in (REPO.parent, *REPO.parents)
+        if (candidate / "mncs-language").is_dir()
+    ),
+    REPO.parent,
+)
+LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", WORKSPACE_ROOT / "mncs-language"))
+COMMONS = Path(os.environ.get("MNCS_COMMONS_REPO", WORKSPACE_ROOT / "MNCS-Commons"))
+os.environ.setdefault("MNCS_COMMONS_ROOT", str(COMMONS))
 MNCS = Path(os.environ.get("MNCS", LANGUAGE / "target" / "debug" / "mncs"))
 EMBED_LIBRARY = Path(
     os.environ.get("MNCS_EMBED_LIBRARY", LANGUAGE / "target" / "debug" / "libmncs_embed.so")
@@ -26,7 +35,7 @@ def _stdlib_library() -> Path:
     explicit = os.environ.get("MNCS_STDLIB_ROOT")
     if explicit:
         return Path(explicit) / "library"
-    sibling = REPO.parent / "mncs-stdlib"
+    sibling = WORKSPACE_ROOT / "mncs-stdlib"
     if (sibling / "stdlib-manifest.json").is_file():
         return sibling / "library"
     return LANGUAGE / "library"
@@ -41,9 +50,20 @@ from family_contract import verification_plan_contract  # noqa: E402
 
 class RunnerTests(unittest.TestCase):
     def invoke(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        selected_roots = [
+            str(STDLIB_LIBRARY),
+            str(REPO / "native"),
+            str(COMMONS / "src" / "mncs_commons" / "mesh" / "mncs"),
+        ]
+        inherited_roots = environment.get("MNCS_LIBRARY_PATH", "").split(os.pathsep)
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
+            dict.fromkeys(root for root in [*selected_roots, *inherited_roots] if root)
+        )
         return subprocess.run(
             [sys.executable, str(SCRIPT), *arguments],
             cwd=REPO,
+            env=environment,
             capture_output=True,
             text=True,
             check=False,
@@ -672,6 +692,10 @@ class RunnerTests(unittest.TestCase):
             item = document["tests"][0]
             self.assertEqual(item["compile_verdict"], "compile_failure")
             self.assertEqual(item["failure"]["class"], "compile_failure")
+            self.assertEqual(document["summary"]["authority"], "mncs.test.result_summary")
+            self.assertEqual(document["summary"]["total"], 1)
+            self.assertEqual(document["summary"]["failed"], 1)
+            self.assertEqual(document["summary"]["compile_failures"], 1)
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_expected_runtime_failure(self):

@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.result-summary",
+  "source": "../native/mncs/test/result_summary_v1.mncs",
+  "module": "mncs.test.result_summary_v1",
+  "entry_function": "test_result_summary_app_v1",
+  "profile": "0.18",
+  "interface_identity": "69015f61640ee5f362612ada378bb25fdcf79623a59f2391dc7c643ad6ee6dec",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

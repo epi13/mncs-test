@@ -79,6 +79,14 @@ compile-pass, compile-fail, and diagnostic entries. The host adapter carries
 the raw process exit code and bounded structured compiler fields, then maps the
 native verdict into the established result envelope.
 
+When a result has no native suite fold, the MNCS application
+`mncs.test.result_summary_v1` owns its aggregate counters. The adapter sends
+bounded verdict, status, native assertion-count, and failure-class fields;
+the application folds core totals through `mncs.test.suite` and applies the
+result-envelope failure-class projection, including expected failures. The
+Python runner validates the returned counters and records
+`mncs.test.result_summary` as their authority.
+
 The result has two layers:
 
 - `mncs.test-result/1` carries detailed test outcomes, native results,

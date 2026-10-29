@@ -42,7 +42,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.3"
+RUNNER_VERSION = "0.2.4"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -55,6 +55,8 @@ VERIFICATION_COHERENCE_MAX_IDENTITIES = 64
 VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
+TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
+TEST_RESULT_SUMMARY_RESULT_SCHEMA = "mncs.test-result-summary/1"
 COMPILE_VERDICT_EXPECTED_BATCH = 16
 COMPILE_VERDICT_ACTUAL_BATCH = 32
 MAX_DIAGNOSTIC_CODE_BYTES = 512
@@ -540,6 +542,112 @@ def native_suite_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
         "verdict_code": integer_value(fields.get("verdict_code")),
         **values,
     }
+
+
+def native_result_summary(
+    test_results: list[dict[str, Any]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, int]:
+    """Transport result-row facts to MNCS and return its bounded summary."""
+    if len(test_results) > 256:
+        raise AdapterError("test result summary exceeds the 256-row native bound")
+
+    def bounded_text(value: str, field: str) -> str:
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise AdapterError(f"test result {field} must be valid UTF-8") from error
+        if size > 64:
+            raise AdapterError(f"test result {field} exceeds the 64-byte native bound")
+        return value
+
+    entries: list[dict[str, Any]] = []
+    maximum_count = (1 << 64) - 1
+    for item in test_results:
+        if not isinstance(item, dict):
+            raise AdapterError("test result summary rows must be objects")
+        verdict = item.get("verdict")
+        if not isinstance(verdict, str) or verdict not in {"PASS", "FAIL", "UNKNOWN"}:
+            raise AdapterError("test result summary row has an unknown verdict")
+        status = item.get("status", "")
+        if not isinstance(status, str):
+            raise AdapterError("test result summary row status must be text")
+        failure = item.get("failure")
+        failure_class = (
+            str(failure.get("class", "")) if isinstance(failure, dict) else ""
+        )
+        native = item.get("native_result")
+        counts: dict[str, int] = {}
+        if isinstance(native, dict):
+            for field in ("assertions", "failures"):
+                try:
+                    value = int(native.get(field) or 0)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise AdapterError(
+                        f"native test result {field} count is not an integer"
+                    ) from error
+                if not 0 <= value <= maximum_count:
+                    raise AdapterError(
+                        f"native test result {field} count is outside the u64 range"
+                    )
+                counts[field] = value
+        else:
+            counts = {"assertions": 0, "failures": 0}
+        entries.append(
+            {
+                "verdict": bounded_text(verdict, "verdict"),
+                "status": bounded_text(status, "status"),
+                "failure_class": bounded_text(failure_class, "failure class"),
+                **counts,
+            }
+        )
+
+    request = {
+        "schema_version": TEST_RESULT_SUMMARY_REQUEST_SCHEMA,
+        "test_count": len(entries),
+        "tests": entries,
+    }
+    try:
+        result = run_native_app(
+            "test-result-summary.json",
+            request,
+            request_schema=TEST_RESULT_SUMMARY_REQUEST_SCHEMA,
+            result_schema=TEST_RESULT_SUMMARY_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test result summary failed: {error}") from error
+
+    returned = result.get("summary")
+    fields = (
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "unsupported",
+        "assertion_failures",
+        "setup_failures",
+        "compile_failures",
+        "runtime_failures",
+        "timeout_failures",
+        "infrastructure_failures",
+        "assertion_count",
+        "failure_count",
+    )
+    if not isinstance(returned, dict):
+        raise AdapterError("MNCS result-summary app returned no summary record")
+    summary = {field: returned.get(field) for field in fields}
+    if any(
+        type(value) is not int or not 0 <= value <= maximum_count
+        for value in summary.values()
+    ):
+        raise AdapterError("MNCS result-summary app returned malformed counters")
+    return {field: int(value) for field, value in summary.items()}
 
 
 def external_verdict(variant: str) -> str:
@@ -2048,45 +2156,6 @@ def bootstrap_exit_code_for(classification: str, *, allow_unsupported: bool = Fa
     return EXIT_INFRASTRUCTURE_FAILURE
 
 
-def summarize_tests(test_results: list[dict[str, Any]]) -> dict[str, int]:
-    summary = {
-        "total": len(test_results),
-        "passed": sum(item.get("verdict") == "PASS" and item.get("status") not in {"skipped"} for item in test_results),
-        "failed": sum(item.get("verdict") == "FAIL" for item in test_results),
-        "skipped": sum(item.get("status") == "skipped" for item in test_results),
-        "unsupported": sum(item.get("verdict") == "UNKNOWN" for item in test_results),
-        "assertion_failures": 0,
-        "setup_failures": 0,
-        "compile_failures": 0,
-        "runtime_failures": 0,
-        "timeout_failures": 0,
-        "infrastructure_failures": 0,
-        "assertion_count": 0,
-        "failure_count": 0,
-    }
-    for item in test_results:
-        native = item.get("native_result")
-        if isinstance(native, dict):
-            summary["assertion_count"] += int(native.get("assertions") or 0)
-            summary["failure_count"] += int(native.get("failures") or 0)
-        failure = item.get("failure")
-        if isinstance(failure, dict):
-            failure_class = str(failure.get("class", ""))
-            if failure_class == "assertion":
-                summary["assertion_failures"] += 1
-            elif failure_class == "setup":
-                summary["setup_failures"] += 1
-            elif failure_class in {"compile_failure", "compile_expectation_mismatch", "diagnostic_mismatch"}:
-                summary["compile_failures"] += 1
-            elif failure_class == "runtime_failure":
-                summary["runtime_failures"] += 1
-            elif failure_class == "timeout":
-                summary["timeout_failures"] += 1
-            elif failure_class in {"infrastructure_failure", "malformed_test_declaration", "malformed_test_result"}:
-                summary["infrastructure_failures"] += 1
-    return {key: int(value) for key, value in summary.items()}
-
-
 def manifest_provenance(manifest: dict[str, Any], source_text: str, mncs: str, library_paths: list[Path]) -> dict[str, Any]:
     manifest_path = Path(manifest["manifest_path"])
     source_path = Path(manifest["source_path"])
@@ -3576,12 +3645,13 @@ def make_result(
         }
         summary["authority"] = "native_suite"
     else:
-        summary = summarize_tests(test_results)
-        summary["authority"] = (
-            "compiler_inventory_native_observation_projection"
-            if test_inventory is not None
-            else "manifest_compile_or_adapter_projection"
+        summary = native_result_summary(
+            test_results,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
         )
+        summary["authority"] = "mncs.test.result_summary"
     if classification == "success":
         verdict = "PASS"
     elif classification == "unsupported":

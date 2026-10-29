@@ -1,0 +1,299 @@
+mncs 0.18;
+
+// mncs.test.result_summary_v1 — native aggregation for runner result rows.
+//
+// This application owns the summary projection used when a test result did
+// not already come from a native suite fold. The common suite reducer owns
+// verdict totals and assertion totals; this module owns the result-envelope
+// failure-class counters, including expected failures.
+module mncs.test.result_summary_v1;
+
+use mncs.std.application.v1;
+use mncs.test.assertions;
+use mncs.test.suite as test_suite;
+
+record TestSummaryEntryV1 {
+    verdict: [byte; up_to 64],
+    status: [byte; up_to 64],
+    failure_class: [byte; up_to 64],
+    assertions: u64,
+    failures: u64
+}
+
+record TestSummaryRequestV1 {
+    schema_version: [byte; up_to 64],
+    test_count: u64,
+    tests: [TestSummaryEntryV1; up_to 256]
+}
+
+record TestSummaryTotalsV1 {
+    total: u64,
+    passed: u64,
+    failed: u64,
+    skipped: u64,
+    unsupported: u64,
+    assertion_failures: u64,
+    setup_failures: u64,
+    compile_failures: u64,
+    runtime_failures: u64,
+    timeout_failures: u64,
+    infrastructure_failures: u64,
+    assertion_count: u64,
+    failure_count: u64
+}
+
+record TestSummaryResultV1 {
+    schema_version: [byte; up_to 64],
+    summary: TestSummaryTotalsV1
+}
+
+record FailureClassTotalsV1 {
+    assertion_failures: u64,
+    setup_failures: u64,
+    compile_failures: u64,
+    runtime_failures: u64,
+    timeout_failures: u64,
+    infrastructure_failures: u64
+}
+
+record TestSummaryAccumulatorV1 {
+    suite: test_suite.SuiteSummary,
+    failures: FailureClassTotalsV1
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 115, 117, 109, 109, 97, 114, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 115, 117, 109, 109, 97, 114, 121, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn is_pass(value: [byte; up_to 64]) -> (result: bool) {
+    return same_bytes(value, [80, 65, 83, 83]);
+}
+
+fn is_fail(value: [byte; up_to 64]) -> (result: bool) {
+    return same_bytes(value, [70, 65, 73, 76]);
+}
+
+fn is_unknown(value: [byte; up_to 64]) -> (result: bool) {
+    return same_bytes(value, [85, 78, 75, 78, 79, 87, 78]);
+}
+
+fn is_skipped(value: [byte; up_to 64]) -> (result: bool) {
+    return same_bytes(value, [115, 107, 105, 112, 112, 101, 100]);
+}
+
+fn valid_entry(entry: TestSummaryEntryV1) -> (result: bool) {
+    return is_pass(entry.verdict) || is_fail(entry.verdict) || is_unknown(entry.verdict);
+}
+
+fn valid_request(request: TestSummaryRequestV1) -> (result: bool) {
+    if !same_bytes(request.schema_version, request_schema())
+        || request.test_count != request.tests.len
+        || request.test_count > 256 {
+        return false;
+    }
+    iterate i over request.tests carrying valid: bool = true {
+        next valid = valid && valid_entry(request.tests[i]);
+    }
+    return valid;
+}
+
+fn test_verdict(entry: TestSummaryEntryV1) -> (result: Verdict) {
+    if is_pass(entry.verdict) {
+        if is_skipped(entry.status) {
+            return Verdict.SKIP;
+        }
+        return Verdict.PASS;
+    }
+    if is_fail(entry.verdict) {
+        return Verdict.FAIL;
+    }
+    return Verdict.UNSUPPORTED;
+}
+
+fn test_verdict_code(verdict: Verdict) -> (result: u64) {
+    return match verdict {
+        Verdict.PASS => 0,
+        Verdict.FAIL => 1,
+        Verdict.SKIP => 2,
+        Verdict.UNSUPPORTED => 3
+    };
+}
+
+fn to_test_result(entry: TestSummaryEntryV1) -> (result: TestResult) {
+    let verdict: Verdict = test_verdict(entry);
+    return TestResult {
+        verdict: verdict,
+        verdict_code: test_verdict_code(verdict),
+        failure_kind: FailureKind.NoFailure,
+        failure_code: 0,
+        assertions: entry.assertions,
+        failures: entry.failures,
+        expected: 0,
+        actual: 0,
+        assertion_code: 0
+    };
+}
+
+fn empty_summary() -> (result: TestSummaryAccumulatorV1) {
+    return TestSummaryAccumulatorV1 {
+        suite: test_suite.empty(),
+        failures: FailureClassTotalsV1 {
+            assertion_failures: 0,
+            setup_failures: 0,
+            compile_failures: 0,
+            runtime_failures: 0,
+            timeout_failures: 0,
+            infrastructure_failures: 0
+        }
+    };
+}
+
+fn add_failure_class(
+    summary: TestSummaryAccumulatorV1,
+    failure_class: [byte; up_to 64]
+) -> (result: TestSummaryAccumulatorV1) {
+    if same_bytes(failure_class, [97, 115, 115, 101, 114, 116, 105, 111, 110]) {
+        return TestSummaryAccumulatorV1 {
+            ..summary,
+            failures: FailureClassTotalsV1 {
+                ..summary.failures,
+                assertion_failures: summary.failures.assertion_failures +% 1
+            }
+        };
+    }
+    if same_bytes(failure_class, [115, 101, 116, 117, 112]) {
+        return TestSummaryAccumulatorV1 {
+            ..summary,
+            failures: FailureClassTotalsV1 {
+                ..summary.failures,
+                setup_failures: summary.failures.setup_failures +% 1
+            }
+        };
+    }
+    if same_bytes(failure_class, [99, 111, 109, 112, 105, 108, 101, 95, 102, 97, 105, 108, 117, 114, 101])
+        || same_bytes(failure_class, [99, 111, 109, 112, 105, 108, 101, 95, 101, 120, 112, 101, 99, 116, 97, 116, 105, 111, 110, 95, 109, 105, 115, 109, 97, 116, 99, 104])
+        || same_bytes(failure_class, [100, 105, 97, 103, 110, 111, 115, 116, 105, 99, 95, 109, 105, 115, 109, 97, 116, 99, 104]) {
+        return TestSummaryAccumulatorV1 {
+            ..summary,
+            failures: FailureClassTotalsV1 {
+                ..summary.failures,
+                compile_failures: summary.failures.compile_failures +% 1
+            }
+        };
+    }
+    if same_bytes(failure_class, [114, 117, 110, 116, 105, 109, 101, 95, 102, 97, 105, 108, 117, 114, 101]) {
+        return TestSummaryAccumulatorV1 {
+            ..summary,
+            failures: FailureClassTotalsV1 {
+                ..summary.failures,
+                runtime_failures: summary.failures.runtime_failures +% 1
+            }
+        };
+    }
+    if same_bytes(failure_class, [116, 105, 109, 101, 111, 117, 116]) {
+        return TestSummaryAccumulatorV1 {
+            ..summary,
+            failures: FailureClassTotalsV1 {
+                ..summary.failures,
+                timeout_failures: summary.failures.timeout_failures +% 1
+            }
+        };
+    }
+    if same_bytes(failure_class, [105, 110, 102, 114, 97, 115, 116, 114, 117, 99, 116, 117, 114, 101, 95, 102, 97, 105, 108, 117, 114, 101])
+        || same_bytes(failure_class, [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 116, 101, 115, 116, 95, 100, 101, 99, 108, 97, 114, 97, 116, 105, 111, 110])
+        || same_bytes(failure_class, [109, 97, 108, 102, 111, 114, 109, 101, 100, 95, 116, 101, 115, 116, 95, 114, 101, 115, 117, 108, 116]) {
+        return TestSummaryAccumulatorV1 {
+            ..summary,
+            failures: FailureClassTotalsV1 {
+                ..summary.failures,
+                infrastructure_failures: summary.failures.infrastructure_failures +% 1
+            }
+        };
+    }
+    return summary;
+}
+
+fn observe_entry(
+    summary: TestSummaryAccumulatorV1,
+    entry: TestSummaryEntryV1
+) -> (result: TestSummaryAccumulatorV1) {
+    let folded: SuiteSummary = test_suite.observe(summary.suite, to_test_result(entry));
+    if is_skipped(entry.status) && !is_pass(entry.verdict) {
+        let with_skip: SuiteSummary = SuiteSummary {
+            ..folded,
+            skipped: folded.skipped +% 1
+        };
+        return add_failure_class(
+            TestSummaryAccumulatorV1 { ..summary, suite: with_skip },
+            entry.failure_class
+        );
+    }
+    return add_failure_class(
+        TestSummaryAccumulatorV1 { ..summary, suite: folded },
+        entry.failure_class
+    );
+}
+
+fn build_summary(request: TestSummaryRequestV1) -> (result: TestSummaryAccumulatorV1) {
+    iterate i over request.tests carrying summary: TestSummaryAccumulatorV1 = empty_summary() {
+        next summary = observe_entry(summary, request.tests[i]);
+    }
+    return summary;
+}
+
+fn result_for(summary: TestSummaryAccumulatorV1) -> (result: TestSummaryResultV1) {
+    let suite: SuiteSummary = summary.suite;
+    return TestSummaryResultV1 {
+        schema_version: result_schema(),
+        summary: TestSummaryTotalsV1 {
+            total: suite.total,
+            passed: suite.passed,
+            failed: suite.failed,
+            skipped: suite.skipped,
+            unsupported: suite.unsupported,
+            assertion_failures: summary.failures.assertion_failures,
+            setup_failures: summary.failures.setup_failures,
+            compile_failures: summary.failures.compile_failures,
+            runtime_failures: summary.failures.runtime_failures,
+            timeout_failures: summary.failures.timeout_failures,
+            infrastructure_failures: summary.failures.infrastructure_failures,
+            assertion_count: suite.assertion_count,
+            failure_count: suite.failure_count
+        }
+    };
+}
+
+fn test_result_summary_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 114, 101, 115, 117, 108, 116, 32, 115, 117, 109, 109, 97, 114, 121, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: TestSummaryRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 114, 101, 115, 117, 108, 116, 32, 115, 117, 109, 109, 97, 114, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let summary: TestSummaryAccumulatorV1 = build_summary(request);
+    let result: TestSummaryResultV1 = result_for(summary);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([114, 101, 115, 117, 108, 116, 32, 115, 117, 109, 109, 97, 114, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
