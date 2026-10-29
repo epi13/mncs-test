@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.check-result-projection",
+  "source": "../native/mncs/test/check_result_projection_v1.mncs",
+  "module": "mncs.test.check_result_projection_v1",
+  "entry_function": "check_result_projection_app_v1",
+  "profile": "0.18",
+  "interface_identity": "e8cba043423ba6651ddf1589f77c9c69828f3863f840bda734c61f77cb28de71",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

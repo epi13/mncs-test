@@ -13,10 +13,11 @@ mncs-actions transports mncs.check-result/1
 ```
 
 The native layer owns assertion meaning, failure categories, deterministic
-aggregation, bounded generation, replay inputs, and snapshot witnesses. It is
-deliberately made from ordinary MNCS enums, records, functions, sequences,
-bounded iteration, and arithmetic. There is no hidden registration table in
-Python and no host-side assertion callback.
+aggregation, bounded generation, replay inputs, snapshot witnesses, and the
+family-facing CheckResult policy projection. It is deliberately made from
+ordinary MNCS enums, records, functions, sequences, bounded iteration, and
+arithmetic. There is no hidden registration table in Python and no host-side
+assertion callback.
 
 The native command owns compiler/toolchain transport and four platform
 boundaries that are not test semantics:
@@ -24,7 +25,8 @@ boundaries that are not test semantics:
 1. source loading and explicit library resolution;
 2. compiler admission, backend artifact verification, and the retained
    `mncs-embed` session;
-3. JSON projection into the family `check-result/1` contract; and
+3. JSON serialization of typed Test and CheckResult values plus artifact paths;
+   `mncs.check-result/1` policy projection is owned by an MNCS application; and
 4. bounded artifact publication.
 
 The adapter receives a native result, validates its shape, and carries it
@@ -96,6 +98,15 @@ CLI, share `tools/mncs_test_native.py` for bounded request transport and
 selected-workspace library resolution, so linked worktrees do not depend on
 the original repository path depth.
 
+`mncs.test.check_result_projection_v1` owns the family-facing CheckResult
+policy: fallback claim/scope text, first failing identity selection, compact
+summary text, unresolved evidence, and digest-bound references. The adapter
+supplies bounded fields and preserves the opaque `selection` object. Failure
+messages cross the 1,024-byte native field bound as UTF-8-safe chunks; the
+adapter rejoins those chunks when it writes the public JSON document.
+The compact count text reuses `mncs.std.json_emit.v1::put_u64`; the application
+returns a typed record and leaves full JSON serialization to the host boundary.
+
 `mncs.test.inventory_filter_v2` owns substring filtering over the Test
 inventory. The adapter prepares the runner's existing searchable fields and
 projects native-selected indices back to their records. Candidate and filter
@@ -139,11 +150,13 @@ The result has two layers:
   classifications, diagnostics, declaration/test-case/subject/execution/
   observation identities, artifacts, and reproduction;
 - `mncs.check-result/1` is a small action/Forge-facing envelope with the
-  top-level verdict, claim, digest, unresolved list, compact `selection`
-  summary, and a digest-bound reference to the detailed result. Detailed test
+  top-level verdict, claim, digest, unresolved list, `selection` field, and a
+  digest-bound reference to the detailed result. Detailed test
   records are not nested into the check, so Actions and Forge can reason from
   a small machine-readable witness and retrieve the raw result only when
-  needed.
+  needed. The native check-result projection application assembles this policy
+  envelope; the host adapter still serializes it as JSON and publishes its
+  artifact.
 
 ## Minimum-sufficient verification
 

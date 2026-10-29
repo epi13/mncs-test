@@ -1,0 +1,390 @@
+mncs 0.18;
+
+// Native projection for the family-facing mncs.check-result/1 envelope.
+//
+// The Test adapter supplies bounded fields that already belong to the
+// detailed TestResult and its retained artifact. This module owns the
+// consumer-facing policy: fallback text, unresolved evidence, first failure
+// identity, compact summary, and digest-bound references.
+module mncs.test.check_result_projection_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json_emit.v1 as json_emit;
+
+record CheckTestV1 {
+    id: [byte; up_to 512],
+    verdict: [byte; up_to 16]
+}
+
+record CheckSummaryV1 {
+    passed: u64,
+    failed: u64,
+    skipped: u64
+}
+
+record CheckResultProjectionRequestV1 {
+    schema_version: [byte; up_to 64],
+    id: [byte; up_to 1024],
+    provider: [byte; up_to 256],
+    verdict: [byte; up_to 16],
+    scope_manifest: [byte; up_to 1024],
+    scope_manifest_present: bool,
+    claim: [byte; up_to 1024],
+    classification: [byte; up_to 128],
+    failure_class: [byte; up_to 128],
+    result_digest: [byte; up_to 64],
+    source_sha256: [byte; up_to 64],
+    summary: CheckSummaryV1,
+    failure_message_present: bool,
+    failure_message_count: u64,
+    failure_message_chunks: [[byte; up_to 1024]; up_to 256],
+    run_id: [byte; up_to 512],
+    test_count: u64,
+    tests: [CheckTestV1; up_to 256]
+}
+
+record CheckReferenceV1 {
+    kind: [byte; up_to 1024],
+    uri: [byte; up_to 1024],
+    digest: [byte; up_to 1024]
+}
+
+record CheckResultReferenceV1 {
+    kind: [byte; up_to 1024],
+    uri: [byte; up_to 1024],
+    digest: [byte; up_to 1024],
+    detail: [byte; up_to 1024]
+}
+
+record CheckResultProjectionV1 {
+    schema_version: [byte; up_to 64],
+    result_schema_version: [byte; up_to 64],
+    id: [byte; up_to 1024],
+    provider: [byte; up_to 256],
+    verdict: [byte; up_to 16],
+    scope: [byte; up_to 1024],
+    claim: [byte; up_to 1024],
+    summary: [byte; up_to 1024],
+    contract_revision: [byte; up_to 64],
+    producer_revision: [byte; up_to 1024],
+    digest: [byte; up_to 1024],
+    unresolved_present: bool,
+    unresolved_chunks: [[byte; up_to 1024]; up_to 256],
+    references: [CheckReferenceV1; up_to 1],
+    result_ref: CheckResultReferenceV1,
+    classification: [byte; up_to 128],
+    failure_class: [byte; up_to 128]
+}
+
+record TextBufferV1 {
+    bytes: [byte; 1024],
+    length: u64,
+    ok: bool
+}
+
+record FailureSelectionV1 {
+    found: bool,
+    id: [byte; up_to 512]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 47, 49];
+}
+
+fn public_schema_version() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 47, 49];
+}
+
+fn same_bytes64(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        let live: bool = i < left.len;
+        if live && left[i] != right[i] {
+            return false;
+        }
+        next same = true;
+    }
+    return true;
+}
+
+fn same_bytes16(left: [byte; up_to 16], right: [byte; up_to 16]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        let live: bool = i < left.len;
+        if live && left[i] != right[i] {
+            return false;
+        }
+        next same = true;
+    }
+    return true;
+}
+
+fn is_lower_hex_byte(value: byte) -> (result: bool) {
+    return (value >= 48 && value <= 57) || (value >= 97 && value <= 102);
+}
+
+fn is_sha256(value: [byte; up_to 64]) -> (result: bool) {
+    if value.len != 64 {
+        return false;
+    }
+    iterate i over value carrying valid: bool = true {
+        let live: bool = i < value.len;
+        next valid = valid && (!live || is_lower_hex_byte(value[i]));
+    }
+    return valid;
+}
+
+fn is_optional_sha256(value: [byte; up_to 64]) -> (result: bool) {
+    if value.len == 0 {
+        return true;
+    }
+    return is_sha256(value);
+}
+
+fn is_pass(value: [byte; up_to 16]) -> (result: bool) {
+    return same_bytes16(value, [80, 65, 83, 83]);
+}
+
+fn is_fail(value: [byte; up_to 16]) -> (result: bool) {
+    return same_bytes16(value, [70, 65, 73, 76]);
+}
+
+fn is_unknown(value: [byte; up_to 16]) -> (result: bool) {
+    return same_bytes16(value, [85, 78, 75, 78, 79, 87, 78]);
+}
+
+fn verdict_is_valid(value: [byte; up_to 16]) -> (result: bool) {
+    return is_pass(value) || is_fail(value) || is_unknown(value);
+}
+
+fn valid_request(request: CheckResultProjectionRequestV1) -> (result: bool) {
+    if !same_bytes64(request.schema_version, request_schema())
+        || !verdict_is_valid(request.verdict)
+        || request.test_count != request.tests.len
+        || request.test_count > 256
+        || request.failure_message_count != request.failure_message_chunks.len
+        || request.failure_message_count > 256
+        || (!request.failure_message_present && request.failure_message_count != 0)
+        || !is_sha256(request.result_digest)
+        || !is_optional_sha256(request.source_sha256) {
+        return false;
+    }
+    return true;
+}
+
+fn text_empty() -> (result: TextBufferV1) {
+    return TextBufferV1 { bytes: [0; 1024], length: 0, ok: true };
+}
+
+fn text_put(buffer: TextBufferV1, value: byte) -> (result: TextBufferV1) {
+    if !buffer.ok || buffer.length >= 1024 {
+        return TextBufferV1 { ..buffer, ok: false };
+    }
+    return TextBufferV1 {
+        ..buffer,
+        bytes: replace(buffer.bytes, buffer.length, value),
+        length: buffer.length +% 1
+    };
+}
+
+fn text_put_live(buffer: TextBufferV1, live: bool, value: byte) -> (result: TextBufferV1) {
+    if live {
+        return text_put(buffer, value);
+    }
+    return buffer;
+}
+
+fn text_append<N: Nat>(buffer: TextBufferV1, value: [byte; up_to N]) -> (result: TextBufferV1) {
+    iterate i over value carrying output: TextBufferV1 = buffer {
+        next output = text_put_live(output, i < value.len, value[i]);
+    }
+    return output;
+}
+
+fn text_append_literal(buffer: TextBufferV1, value: [byte; up_to 64]) -> (result: TextBufferV1) {
+    iterate i over value carrying output: TextBufferV1 = buffer {
+        next output = text_put_live(output, i < value.len, value[i]);
+    }
+    return output;
+}
+
+fn text_append_u64(buffer: TextBufferV1, value: u64) -> (result: TextBufferV1) {
+    let digits: json_emit.Writer = json_emit.put_u64(json_emit.open(), value);
+    return text_append_literal(buffer, digits.buf[0..digits.len]);
+}
+
+fn text_digest(value: [byte; up_to 64]) -> (result: [byte; up_to 1024]) {
+    let prefix_bytes: [byte; up_to 64] = [115, 104, 97, 50, 53, 54, 58];
+    let prefix: TextBufferV1 = text_append_literal(text_empty(), prefix_bytes);
+    let complete: TextBufferV1 = text_append(prefix, value);
+    return complete.bytes[0..complete.length];
+}
+
+fn reference_uri(value: [byte; up_to 512]) -> (result: [byte; up_to 1024]) {
+    let prefix_bytes: [byte; up_to 64] = [117, 114, 110, 58, 109, 110, 99, 115, 45, 116, 101, 115, 116, 58];
+    let prefix: TextBufferV1 = text_append_literal(text_empty(), prefix_bytes);
+    let complete: TextBufferV1 = text_append(prefix, value);
+    return complete.bytes[0..complete.length];
+}
+
+fn compact_summary(request: CheckResultProjectionRequestV1, failed: FailureSelectionV1) -> (result: [byte; up_to 1024]) {
+    let start: TextBufferV1 = text_append(text_empty(), request.classification);
+    let spaced_bytes: [byte; up_to 64] = [58, 32];
+    let spaced: TextBufferV1 = text_append_literal(start, spaced_bytes);
+    let passed: TextBufferV1 = text_append_u64(spaced, request.summary.passed);
+    let passed_bytes: [byte; up_to 64] = [32, 112, 97, 115, 115, 101, 100, 44, 32];
+    let passed_text: TextBufferV1 = text_append_literal(passed, passed_bytes);
+    let failed_count: TextBufferV1 = text_append_u64(passed_text, request.summary.failed);
+    let failed_bytes: [byte; up_to 64] = [32, 102, 97, 105, 108, 101, 100, 44, 32];
+    let failed_text: TextBufferV1 = text_append_literal(failed_count, failed_bytes);
+    let skipped_count: TextBufferV1 = text_append_u64(failed_text, request.summary.skipped);
+    let skipped_bytes: [byte; up_to 64] = [32, 115, 107, 105, 112, 112, 101, 100];
+    let skipped_text: TextBufferV1 = text_append_literal(skipped_count, skipped_bytes);
+    if failed.found && failed.id.len > 0 {
+        let separator_bytes: [byte; up_to 64] = [59, 32, 102, 97, 105, 108, 105, 110, 103, 95, 105, 100, 101, 110, 116, 105, 116, 121, 61];
+        let separator: TextBufferV1 = text_append_literal(skipped_text, separator_bytes);
+        let with_identity: TextBufferV1 = text_append(separator, failed.id);
+        return with_identity.bytes[0..with_identity.length];
+    }
+    return skipped_text.bytes[0..skipped_text.length];
+}
+
+fn empty_failure_selection() -> (result: FailureSelectionV1) {
+    return FailureSelectionV1 { found: false, id: [0; 0] };
+}
+
+fn choose_failed_test(
+    selected: FailureSelectionV1,
+    test: CheckTestV1,
+    live: bool
+) -> (result: FailureSelectionV1) {
+    if !live || selected.found || !is_fail(test.verdict) {
+        return selected;
+    }
+    return FailureSelectionV1 { found: true, id: test.id };
+}
+
+fn first_failed_test(request: CheckResultProjectionRequestV1) -> (result: FailureSelectionV1) {
+    iterate i over request.tests carrying selected: FailureSelectionV1 = empty_failure_selection() {
+        next selected = choose_failed_test(selected, request.tests[i], i < request.test_count);
+    }
+    return selected;
+}
+
+fn unsupported_message() -> (result: [byte; up_to 1024]) {
+    return [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100, 32, 99, 97, 112, 97, 98, 105, 108, 105, 116, 121];
+}
+
+fn unresolved_chunks(request: CheckResultProjectionRequestV1) -> (result: [[byte; up_to 1024]; up_to 256]) {
+    let rows: [[byte; up_to 1024]; 256] = [[0; 0]; 256];
+    if is_unknown(request.verdict) {
+        if request.failure_message_present {
+            return request.failure_message_chunks[0..request.failure_message_count];
+        }
+        let default: [[byte; up_to 1024]; 1] = [unsupported_message()];
+        let with_default: [[byte; up_to 1024]; 256] = replace(rows, 0, default[0]);
+        return with_default[0..1];
+    }
+    return rows[0..0];
+}
+
+fn output_reference(
+    uri: [byte; up_to 1024],
+    digest: [byte; up_to 1024]
+) -> (result: CheckReferenceV1) {
+    return CheckReferenceV1 {
+        kind: [109, 110, 99, 115, 45, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116],
+        uri: uri,
+        digest: digest
+    };
+}
+
+fn output_references(uri: [byte; up_to 1024], digest: [byte; up_to 1024]) -> (result: [CheckReferenceV1; up_to 1]) {
+    let references: [CheckReferenceV1; 1] = [output_reference(uri, digest)];
+    return references[0..1];
+}
+
+fn output_result_ref(uri: [byte; up_to 1024], digest: [byte; up_to 1024]) -> (result: CheckResultReferenceV1) {
+    return CheckResultReferenceV1 {
+        kind: [109, 110, 99, 115, 45, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116],
+        uri: uri,
+        digest: digest,
+        detail: [114, 101, 116, 114, 105, 101, 118, 101, 32, 116, 104, 101, 32, 114, 101, 116, 97, 105, 110, 101, 100, 32, 114, 101, 115, 117, 108, 116, 32, 97, 114, 116, 105, 102, 97, 99, 116, 32, 119, 104, 101, 110, 32, 112, 101, 114, 45, 116, 101, 115, 116, 32, 100, 101, 116, 97, 105, 108, 32, 105, 115, 32, 114, 101, 113, 117, 105, 114, 101, 100]
+    };
+}
+
+fn output_id(value: [byte; up_to 1024]) -> (result: [byte; up_to 1024]) {
+    return value;
+}
+
+fn output_claim(value: [byte; up_to 1024]) -> (result: [byte; up_to 1024]) {
+    if value.len > 0 {
+        return value;
+    }
+    return [77, 78, 67, 83, 45, 110, 97, 116, 105, 118, 101, 32, 116, 101, 115, 116, 115, 32, 119, 101, 114, 101, 32, 101, 120, 101, 99, 117, 116, 101, 100, 32, 117, 110, 100, 101, 114, 32, 116, 104, 101, 32, 99, 111, 109, 112, 105, 108, 101, 114, 45, 111, 119, 110, 101, 100, 32, 105, 110, 118, 101, 110, 116, 111, 114, 121, 32, 111, 114, 32, 100, 101, 99, 108, 97, 114, 101, 100, 32, 99, 111, 109, 112, 97, 116, 105, 98, 105, 108, 105, 116, 121, 32, 102, 105, 120, 116, 117, 114, 101];
+}
+
+fn output_scope(value: [byte; up_to 1024], present: bool) -> (result: [byte; up_to 1024]) {
+    if present {
+        return value;
+    }
+    return [109, 110, 99, 115, 45, 116, 101, 115, 116];
+}
+
+fn build_result(request: CheckResultProjectionRequestV1) -> (result: CheckResultProjectionV1) {
+    let failed: FailureSelectionV1 = first_failed_test(request);
+    let summary: [byte; up_to 1024] = compact_summary(request, failed);
+    let digest: [byte; up_to 1024] = text_digest(request.result_digest);
+    let uri: [byte; up_to 1024] = reference_uri(request.run_id);
+    let id: [byte; up_to 1024] = output_id(request.id);
+    let claim: [byte; up_to 1024] = output_claim(request.claim);
+    let scope: [byte; up_to 1024] = output_scope(request.scope_manifest, request.scope_manifest_present);
+    let source_digest: [byte; up_to 1024] = text_digest(request.source_sha256);
+    return CheckResultProjectionV1 {
+        schema_version: result_schema(),
+        result_schema_version: public_schema_version(),
+        id: id,
+        provider: request.provider,
+        verdict: request.verdict,
+        scope: scope,
+        claim: claim,
+        summary: summary,
+        contract_revision: [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 47, 49],
+        producer_revision: source_digest,
+        digest: digest,
+        unresolved_present: is_unknown(request.verdict),
+        unresolved_chunks: unresolved_chunks(request),
+        references: output_references(uri, digest),
+        result_ref: output_result_ref(uri, digest),
+        classification: request.classification,
+        failure_class: request.failure_class
+    };
+}
+
+fn check_result_projection_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: CheckResultProjectionRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let result: CheckResultProjectionV1 = build_result(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

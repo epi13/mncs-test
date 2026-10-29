@@ -46,6 +46,8 @@ from mncs_test_native import (
 
 RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
+CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
+CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
@@ -1033,6 +1035,25 @@ def command_environment(library_paths: list[Path], inherited: dict[str, str] | N
         roots.extend(root for root in environment.get("MNCS_LIBRARY_PATH", "").split(os.pathsep)
                      if root)
         environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(roots))
+    return environment
+
+
+def native_application_environment(cwd: Path) -> dict[str, str]:
+    """Resolve the sibling native libraries for direct application consumers."""
+    environment = dict(os.environ)
+    if environment.get("MNCS_LIBRARY_PATH"):
+        return environment
+    workspace_root = next(
+        (path for path in (cwd, *cwd.parents) if (path / "mncs-language").is_dir()),
+        cwd.parent,
+    )
+    explicit_stdlib = environment.get("MNCS_STDLIB_ROOT")
+    stdlib = Path(explicit_stdlib) / "library" if explicit_stdlib else workspace_root / "mncs-stdlib/library"
+    if not stdlib.is_dir():
+        stdlib = workspace_root / "mncs-language/library"
+    roots = [path for path in (stdlib, cwd / "native") if path.is_dir()]
+    if roots:
+        environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(str(path.resolve()) for path in roots)
     return environment
 
 
@@ -3923,51 +3944,168 @@ def check_result(
     result: dict[str, Any],
     result_digest: str,
     *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
     check_id: str | None = None,
     claim: str | None = None,
 ) -> dict[str, Any]:
-    unresolved = []
-    if result["verdict"] == "UNKNOWN":
-        unresolved.append(result.get("failure", {}).get("message", "unsupported capability"))
-    summary = result.get("summary", {})
-    failure_identity = next(
-        (
-            item.get("id")
-            for item in result.get("tests", [])
-            if isinstance(item, dict) and item.get("verdict") == "FAIL"
+    """Project a detailed TestResult through the native CheckResult policy."""
+    if not isinstance(result, dict):
+        raise AdapterError("Test result for CheckResult projection must be an object")
+
+    def bounded_text(value: Any, field: str, maximum: int) -> str:
+        if not isinstance(value, str):
+            raise AdapterError(f"Test result {field} must be text")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AdapterError(f"Test result {field} must be valid UTF-8") from error
+        if len(encoded) > maximum:
+            raise AdapterError(f"Test result {field} exceeds the {maximum}-byte native bound")
+        return value
+
+    maximum_u64 = (1 << 64) - 1
+
+    def summary_count(summary: dict[str, Any], field: str) -> int:
+        value = summary.get(field, 0)
+        if type(value) is not int or not 0 <= value <= maximum_u64:
+            raise AdapterError(f"Test result summary {field} is outside the u64 range")
+        return value
+
+    def bounded_chunks(value: str, field: str) -> list[str]:
+        chunks: list[str] = []
+        current: list[str] = []
+        current_bytes = 0
+        total_bytes = 0
+        for character in value:
+            character_bytes = len(character.encode("utf-8"))
+            total_bytes += character_bytes
+            if total_bytes > 256 * 1024:
+                raise AdapterError(f"Test result {field} exceeds the 262144-byte native bound")
+            if current and current_bytes + character_bytes > 1024:
+                chunks.append("".join(current))
+                current = []
+                current_bytes = 0
+            current.append(character)
+            current_bytes += character_bytes
+        if current:
+            chunks.append("".join(current))
+        return chunks
+
+    verdict = bounded_text(result.get("verdict"), "verdict", 16)
+    raw_scope = result.get("scope", {})
+    if not isinstance(raw_scope, dict):
+        raise AdapterError("Test result scope must be an object")
+    raw_scope_manifest = raw_scope.get("manifest")
+    scope_manifest_present = "manifest" in raw_scope and raw_scope_manifest is not None
+    scope_manifest = (
+        bounded_text(raw_scope_manifest, "scope manifest", 1024)
+        if raw_scope_manifest is not None
+        else "mncs-test"
+    )
+    raw_summary = result.get("summary", {})
+    if not isinstance(raw_summary, dict):
+        raise AdapterError("Test result summary must be an object")
+    raw_tests = result.get("tests", [])
+    if not isinstance(raw_tests, list):
+        raise AdapterError("Test result tests must be an array")
+    test_rows: list[dict[str, str]] = []
+    for item in raw_tests:
+        if not isinstance(item, dict):
+            continue
+        raw_identity = item.get("id")
+        # The former f-string omitted falsy identities and stringified other
+        # truthy values. Keep that projection at the adapter boundary.
+        identity = str(raw_identity) if raw_identity else ""
+        test_rows.append({
+            "id": bounded_text(identity, "test identity", 512),
+            "verdict": bounded_text(
+                item.get("verdict") if isinstance(item.get("verdict"), str) else "",
+                "test verdict",
+                16,
+            ),
+        })
+    if len(test_rows) > 256:
+        raise AdapterError("Test result CheckResult projection exceeds the 256-row native bound")
+
+    raw_failure = result.get("failure", {})
+    failure_message_present = isinstance(raw_failure, dict) and "message" in raw_failure
+    failure_message = raw_failure.get("message") if failure_message_present else ""
+    if failure_message_present:
+        failure_message = bounded_text(failure_message, "failure message", 256 * 1024)
+        failure_message_chunks = bounded_chunks(failure_message, "failure message")
+    else:
+        failure_message = ""
+        failure_message_chunks = []
+    raw_provenance = result.get("provenance", {})
+    if not isinstance(raw_provenance, dict):
+        raw_provenance = {}
+    raw_runner = raw_provenance.get("runner", {})
+    if not isinstance(raw_runner, dict):
+        raw_runner = {}
+
+    request = {
+        "schema_version": CHECK_RESULT_PROJECTION_REQUEST_SCHEMA,
+        "id": bounded_text(check_id or result["id"], "id", 1024),
+        "provider": bounded_text(result.get("provider"), "provider", 256),
+        "verdict": verdict,
+        "scope_manifest": scope_manifest,
+        "scope_manifest_present": scope_manifest_present,
+        "claim": bounded_text(
+            claim or "", "claim", 1024
         ),
-        None,
-    )
-    compact_summary = (
-        f"{result['classification']}: {summary.get('passed', 0)} passed, "
-        f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped"
-    )
-    if failure_identity:
-        compact_summary += f"; failing_identity={failure_identity}"
-    return {
-        "schema_version": CHECK_SCHEMA,
-        "id": check_id or result["id"],
-        "provider": result["provider"],
-        "verdict": result["verdict"],
-        "scope": result.get("scope", {}).get("manifest", "mncs-test"),
-        "claim": claim
-        or "MNCS-native tests were executed under the compiler-owned inventory or declared compatibility fixture",
-        "summary": compact_summary,
-        "contract_revision": RESULT_SCHEMA,
-        "producer_revision": f"sha256:{result.get('provenance', {}).get('runner', {}).get('source_sha256', '')}",
-        "digest": f"sha256:{result_digest}",
-        "unresolved": unresolved,
-        "references": [{"kind": "mncs-test-result", "uri": f"urn:mncs-test:{result.get('run_id', '')}", "digest": f"sha256:{result_digest}"}],
-        "selection": result.get("selection"),
-        "result_ref": {
-            "kind": "mncs-test-result",
-            "uri": f"urn:mncs-test:{result.get('run_id', '')}",
-            "digest": f"sha256:{result_digest}",
-            "detail": "retrieve the retained result artifact when per-test detail is required",
+        "classification": bounded_text(result.get("classification"), "classification", 128),
+        "failure_class": bounded_text(result.get("failure_class"), "failure class", 128),
+        "result_digest": bounded_text(result_digest, "result digest", 64),
+        "source_sha256": bounded_text(
+            raw_runner.get("source_sha256", ""), "runner source digest", 64
+        ),
+        "summary": {
+            "passed": summary_count(raw_summary, "passed"),
+            "failed": summary_count(raw_summary, "failed"),
+            "skipped": summary_count(raw_summary, "skipped"),
         },
-        "classification": result["classification"],
-        "failure_class": result["failure_class"],
+        "failure_message_present": failure_message_present,
+        "failure_message_count": len(failure_message_chunks),
+        "failure_message_chunks": failure_message_chunks,
+        "run_id": bounded_text(result.get("run_id", ""), "run id", 512),
+        "test_count": len(test_rows),
+        "tests": test_rows,
     }
+    try:
+        projected = run_native_app(
+            "test-check-result-projection.json",
+            request,
+            request_schema=CHECK_RESULT_PROJECTION_REQUEST_SCHEMA,
+            result_schema=CHECK_RESULT_PROJECTION_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test CheckResult projection failed: {error}") from error
+
+    # The application transports long unresolved text in UTF-8-safe bounded
+    # chunks. Reassembly and the external CheckResult field names belong to
+    # this adapter boundary; the native application chose the disposition.
+    if (
+        projected.get("result_schema_version") != CHECK_SCHEMA
+        or type(projected.get("unresolved_present")) is not bool
+        or not isinstance(projected.get("unresolved_chunks"), list)
+        or any(not isinstance(chunk, str) for chunk in projected["unresolved_chunks"])
+    ):
+        raise AdapterError("MNCS CheckResult projection returned malformed transport fields")
+    unresolved_present = projected.pop("unresolved_present")
+    unresolved_chunks = projected.pop("unresolved_chunks")
+    result_schema_version = projected.pop("result_schema_version")
+    projected["schema_version"] = result_schema_version
+    projected["unresolved"] = ["".join(unresolved_chunks)] if unresolved_present else []
+
+    # Selection is an opaque, potentially forward-compatible result field.
+    # The native policy does not interpret it; the adapter preserves it.
+    projected["selection"] = result.get("selection")
+    return projected
 
 
 FAMILY_CHECK_REQUEST_SCHEMA = "mncs.family-check-request/1"
@@ -4149,6 +4287,9 @@ def run_family_check(args: argparse.Namespace) -> int:
         check_result_document = check_result(
             result,
             result_digest,
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=native_application_environment(cwd),
             check_id=request["check_identity"],
             claim="The exact repository-owned behavioral family check was executed by mncs-test",
         )
@@ -5056,7 +5197,16 @@ def run_manifest(args: argparse.Namespace) -> int:
     else:
         result_digest = sha256_bytes(json_bytes(result))
     if check_path:
-        write_output(check_path, check_result(result, result_digest or sha256_bytes(json_bytes(result))))
+        write_output(
+            check_path,
+            check_result(
+                result,
+                result_digest or sha256_bytes(json_bytes(result)),
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            ),
+        )
     print_result(result, args.format)
     return int(result["exit_code"])
 
