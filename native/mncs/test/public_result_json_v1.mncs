@@ -598,18 +598,10 @@ fn writer_json_byte(writer: JsonWriterV1, value: byte) -> (result: JsonWriterV1)
         return writer_byte(writer_byte(writer, 92), 114);
     }
     let encoded: json.Writer = json.put_quoted_byte(json.open(), value);
-    iterate i over encoded.buf carrying output: JsonWriterV1 = writer {
-        let step: JsonWriterV1 = writer_encoded_byte(output, encoded, i);
-        next output = step;
+    iterate i over encoded.buf[0..encoded.len] carrying output: JsonWriterV1 = writer {
+        next output = writer_byte(output, encoded.buf[i]);
     }
     return output;
-}
-
-fn writer_encoded_byte(writer: JsonWriterV1, encoded: json.Writer, index: u64) -> (result: JsonWriterV1) {
-    if index < encoded.len {
-        return writer_byte(writer, encoded.buf[index]);
-    }
-    return writer;
 }
 
 fn writer_quoted(writer: JsonWriterV1, text: [byte; up_to 1024]) -> (result: JsonWriterV1) {
@@ -629,18 +621,10 @@ fn writer_indent(writer: JsonWriterV1, depth: u64) -> (result: JsonWriterV1) {
     return output;
 }
 
-fn writer_encoded_integer_byte(writer: JsonWriterV1, encoded: json.Writer, index: u64) -> (result: JsonWriterV1) {
-    if index < encoded.len {
-        return writer_byte(writer, encoded.buf[index]);
-    }
-    return writer;
-}
-
 fn writer_integer(writer: JsonWriterV1, value: i64) -> (result: JsonWriterV1) {
     let digits: json.Writer = json.int_value(json.open(), value);
-    iterate i over digits.buf carrying output: JsonWriterV1 = writer {
-        let step: JsonWriterV1 = writer_encoded_integer_byte(output, digits, i);
-        next output = step;
+    iterate i over digits.buf[0..digits.len] carrying output: JsonWriterV1 = writer {
+        next output = writer_byte(output, digits.buf[i]);
     }
     return output;
 }

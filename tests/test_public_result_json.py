@@ -225,3 +225,97 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
 
     assert [call.args[0] for call in native_app.call_args_list] == expected_applications
 
+
+def test_compile_failure_runner_keeps_medium_public_result_native(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if not MNCS.is_file() or not os.access(MNCS, os.X_OK):
+        pytest.skip("a built sibling mncs compiler is required")
+
+    commons = WORKSPACE_ROOT / "MNCS-Commons"
+    common_library = commons / "src/mncs_commons/mesh/mncs"
+    environment = _native_environment()
+    roots = environment["MNCS_LIBRARY_PATH"].split(os.pathsep)
+    if common_library.is_dir():
+        roots.append(str(common_library))
+    monkeypatch.setenv("MNCS_LIBRARY_PATH", os.pathsep.join(dict.fromkeys(roots)))
+    monkeypatch.setenv("MNCS_COMMONS_ROOT", str(commons))
+
+    app_calls: list[dict[str, object]] = []
+    compatibility_documents: list[str] = []
+    original_run_native_app = mncs_test.run_native_app
+    original_json_bytes = mncs_test.json_bytes
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        call: dict[str, object] = {"application": name, "status": "running"}
+        nodes = request.get("nodes")
+        if isinstance(nodes, list):
+            call["node_count"] = len(nodes)
+        app_calls.append(call)
+        try:
+            result = original_run_native_app(name, request, **kwargs)
+        except NativeBudgetExhaustedError:
+            call["status"] = "budget_exhausted"
+            raise
+        except Exception:
+            call["status"] = "failed"
+            raise
+        call["status"] = "success"
+        return result
+
+    def observe_compatibility_serializer(value: object) -> bytes:
+        if isinstance(value, dict) and value.get("schema_version") in {
+            mncs_test.RESULT_SCHEMA,
+            mncs_test.CHECK_SCHEMA,
+        }:
+            compatibility_documents.append(str(value["schema_version"]))
+        return original_json_bytes(value)
+
+    result_path = tmp_path / "result.json"
+    argv = [
+        "run",
+        "--manifest",
+        str(ROOT / "tests/fixtures/compile-fail.toml"),
+        "--mncs",
+        str(MNCS),
+        "--library",
+        str(Path(environment["MNCS_LIBRARY_PATH"].split(os.pathsep)[0])),
+        "--result",
+        str(result_path),
+        "--check-result",
+        str(tmp_path / "check.json"),
+        "--artifacts",
+        str(tmp_path / "artifacts"),
+        "--format",
+        "json",
+    ]
+    embed_library = MNCS.parent / "libmncs_embed.so"
+    if embed_library.is_file():
+        argv.extend(["--embed-library", str(embed_library)])
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", side_effect=observe_native_app
+    ), mock.patch.object(
+        mncs_test, "json_bytes", side_effect=observe_compatibility_serializer
+    ):
+        exit_code = mncs_test.main(argv)
+    capsys.readouterr()
+
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    public_calls = [
+        call
+        for call in app_calls
+        if str(call["application"]).startswith("test-public-result-json")
+    ]
+    assert exit_code == 0
+    assert document["verdict"] == "PASS"
+    assert document["tests"][0]["status"] == "expected_failure"
+    assert document["tests"][0]["diagnostics"]
+    assert result_path.read_bytes() == _python_result_bytes(document)
+    assert public_calls
+    assert all(call["status"] == "success" for call in public_calls)
+    assert any(call.get("node_count", 0) >= 128 for call in public_calls)
+    assert compatibility_documents == []
+
