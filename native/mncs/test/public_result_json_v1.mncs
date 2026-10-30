@@ -274,11 +274,20 @@ fn valid_node(request: JsonRequestV1, index: u64) -> (result: bool) {
     let container: bool = is_container(node.kind);
     let object_ok: bool = node.kind != 1 || node.child_count <= 64;
     let scalar_ok: bool = container || node.child_count == 0;
-    let float_ok: bool = node.kind != 5 || valid_number(node.text);
     let non_number_text_ok: bool = node.kind == 3 || node.kind == 5 || node.text.len == 0;
     let root_ok: bool = index != 0 || (node.parent == 0 && node.key.len == 0);
+    // MNCS boolean operators evaluate both operands. Keep the numeric scan
+    // inside a control-flow guard so string values that happen to contain a
+    // number never enter the number parser (a one-byte digit has an empty
+    // tail view, which is invalid to index even though it is not a number
+    // node).
+    if node.kind == 5 {
+        if !valid_number(node.text) {
+            return false;
+        }
+    }
     if !known_kind || !child_range_ok
-        || !object_ok || !scalar_ok || !float_ok || !non_number_text_ok || !root_ok {
+        || !object_ok || !scalar_ok || !non_number_text_ok || !root_ok {
         return false;
     }
     if index == 0 {

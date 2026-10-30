@@ -6399,7 +6399,13 @@ def run_family_check(args: argparse.Namespace) -> int:
                 )
             },
         }
-        print(json.dumps(response, indent=2, sort_keys=True, ensure_ascii=False))
+        response_payload, _ = _public_result_json_payload(
+            response,
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=check_result_environment,
+        )
+        sys.stdout.write(response_payload.decode("utf-8"))
         return int(result.get("exit_code", completed.returncode))
     except (ManifestError, AdapterError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print(
