@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.public-result-json-key-order",
+  "source": "../native/mncs/test/public_result_json_key_order_v1.mncs",
+  "module": "mncs.test.public_result_json_key_order_v1",
+  "entry_function": "public_result_json_key_order_app_v1",
+  "profile": "0.18",
+  "interface_identity": "dfd5e7b59e0c45689aa2e992a0499d5770cd39902b5f76230e42bfd08a53e021",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}
