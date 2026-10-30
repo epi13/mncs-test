@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -419,6 +422,37 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertEqual(response["check_result"]["schema_version"], "mncs.check-result/1")
         self.assertEqual(response["check_result"]["id"], request["check_identity"])
+
+        serializer_applications: list[str] = []
+        original_run_native_app = mncs_test.run_native_app
+
+        def observe_public_json_app(name, request, **kwargs):
+            result = original_run_native_app(name, request, **kwargs)
+            serializer_applications.append(name)
+            return result
+
+        with mock.patch.object(mncs_test, "run_native_app", side_effect=observe_public_json_app):
+            check_result_payload, check_result_digest = mncs_test._public_result_json_payload(
+                response["check_result"],
+                mncs=str(MNCS),
+                cwd=REPO,
+                environment=mncs_test.native_application_environment(REPO),
+            )
+        self.assertTrue(
+            serializer_applications
+            and set(serializer_applications)
+            <= {"test-public-result-json.json", "test-public-result-json-window.json"}
+        )
+        independent_check_result = mncs_test.json_bytes(response["check_result"])
+        self.assertEqual(check_result_payload, independent_check_result)
+        self.assertEqual(
+            check_result_digest,
+            hashlib.sha256(independent_check_result).hexdigest(),
+        )
+        self.assertEqual(
+            response["execution"]["check_result_sha256"],
+            check_result_digest,
+        )
         self.assertEqual(
             response["family_binding"]["source_change_sha256"],
             request["source_change_sha256"],
@@ -441,6 +475,103 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(
             response["execution"]["inventory_identity"],
             "368a2b43a34d82c85ad4a2a6f2ea102bbff386080e677bbc7e33c5fc32ca7cba",
+        )
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_family_check_digest_uses_native_public_result_serializer(self):
+        request = {
+            "schema_version": "mncs.family-check-request/1",
+            "check_identity": "mncs-test:verification-plan-contract",
+            "contract_identity": "mncs.verification-plan/1",
+            "contract_revision": "1",
+            "verification_plan_id": "a" * 64,
+            "family_graph_identity": "b" * 64,
+            "edge_fingerprint": "c" * 64,
+            "source_change_sha256": "d" * 64,
+        }
+        checks_path = REPO / "family-verification-checks-v1.json"
+        check = mncs_test.load_family_check(
+            checks_path,
+            check_identity=request["check_identity"],
+            contract_identity=request["contract_identity"],
+            repository_id="mncs-test",
+        )
+        selected_identities = check["selector"]["test_identities"]
+        result = {
+            "schema_version": mncs_test.RESULT_SCHEMA,
+            "id": "family-check-fixture",
+            "provider": "mncs-test",
+            "verdict": "PASS",
+            "classification": "supported",
+            "failure_class": "none",
+            "scope": {"manifest": "mncs-test.toml"},
+            "summary": {"passed": len(selected_identities), "failed": 0, "skipped": 0},
+            "tests": [{"id": identity, "verdict": "PASS"} for identity in selected_identities],
+            "run_id": "run-family-check-fixture",
+            "selection": {"selected_test_identities": selected_identities},
+            "test_inventory": {
+                "inventory_identity": check["selector"].get("inventory_identity"),
+            },
+            "experiment": {"run_identity": "run-family-check-fixture"},
+        }
+
+        with tempfile.TemporaryDirectory(prefix="mncs-test-family-digest-") as directory:
+            root = Path(directory)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            def fake_inner_run(command, *, cwd, capture_output, text, check, timeout):
+                result_path = Path(command[command.index("--result") + 1])
+                check_path = Path(command[command.index("--check-result") + 1])
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+                check_path.write_text(
+                    json.dumps({"schema_version": mncs_test.CHECK_SCHEMA, "verdict": "PASS"}),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            arguments = SimpleNamespace(
+                request=str(request_path),
+                checks=str(checks_path),
+                repository_id="mncs-test",
+                mncs=str(MNCS),
+                library=[],
+                embed_library=None,
+                timeout_seconds=120,
+            )
+            native_applications: list[str] = []
+            original_run_native_app = mncs_test.run_native_app
+
+            def observe_native_app(name, native_request, **kwargs):
+                response = original_run_native_app(name, native_request, **kwargs)
+                native_applications.append(name)
+                return response
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(
+                    mncs_test,
+                    "subprocess",
+                    SimpleNamespace(run=fake_inner_run, SubprocessError=subprocess.SubprocessError),
+                ),
+                mock.patch.object(
+                    mncs_test, "run_native_app", side_effect=observe_native_app
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = mncs_test.run_family_check(arguments)
+
+        self.assertEqual(exit_code, 0)
+        response = json.loads(output.getvalue())
+        self.assertIn("test-check-result-projection.json", native_applications)
+        self.assertTrue(
+            set(native_applications)
+            & {"test-public-result-json.json", "test-public-result-json-window.json"}
+        )
+        public_json = mncs_test.json_bytes(response["check_result"])
+        self.assertEqual(
+            response["execution"]["check_result_sha256"],
+            hashlib.sha256(public_json).hexdigest(),
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")

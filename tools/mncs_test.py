@@ -6354,16 +6354,22 @@ def run_family_check(args: argparse.Namespace) -> int:
         expected_inventory = selector.get("inventory_identity")
         if expected_inventory is not None and inventory_identity != expected_inventory:
             raise AdapterError("family check compiler inventory identity is stale")
+        check_result_environment = native_application_environment(cwd)
         check_result_document = check_result(
             result,
             result_digest,
             mncs=args.mncs,
             cwd=cwd,
-            environment=native_application_environment(cwd),
+            environment=check_result_environment,
             check_id=request["check_identity"],
             claim="The exact repository-owned behavioral family check was executed by mncs-test",
         )
-        check_result_digest = sha256_bytes(json_bytes(check_result_document))
+        _, check_result_digest = _public_result_json_payload(
+            check_result_document,
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=check_result_environment,
+        )
         check_definition_identity = sha256_bytes(compact_json(check).encode())
         response = {
             "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,

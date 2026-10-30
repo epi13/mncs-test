@@ -126,6 +126,12 @@ reassembles output pages, writes files, and keeps the compatibility serializer
 for values outside the native bounds or when a bounded MNCS serialization
 reports `budget_exhausted`.
 
+The family-check response records `execution.check_result_sha256` from the
+serialized `mncs.check-result/1` document produced by this same public-result
+path. The digest matches the public JSON bytes, including ordering,
+indentation, and the final newline. Values outside the native bounds or runs
+that exhaust the native step budget retain the compatibility serializer.
+
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
 fields into the request and formats the final result envelope; out-of-contract
