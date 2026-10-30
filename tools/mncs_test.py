@@ -72,13 +72,14 @@ MANIFEST_TEST_VALIDATION_MAX_REQUEST_BYTES = 65_536
 MANIFEST_HOST_GRANT_VALIDATION_MAX_SETS = 16
 MANIFEST_HOST_GRANT_VALIDATION_MAX_GRANTS_PER_SET = 32
 MANIFEST_HOST_GRANT_VALIDATION_MAX_FIELDS = 16
+MANIFEST_HOST_GRANT_VALIDATION_MAX_TOTAL_BYTE_VALUES = 1024
 MANIFEST_HOST_GRANT_VALIDATION_MAX_REQUEST_BYTES = 65_536
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.12"
+RUNNER_VERSION = "0.2.13"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -2290,6 +2291,7 @@ def _manifest_host_grant_validation_request(
         return None if any(field is None for field in fields) else fields
 
     rows: list[dict[str, Any]] = []
+    total_byte_values = 0
     for item in grant_sets:
         set_keys = field_names(item)
         if set_keys is None:
@@ -2316,15 +2318,21 @@ def _manifest_host_grant_validation_request(
             bytes_value = grant.get("bytes", []) if grant_is_table else None
             bytes_are_array = isinstance(bytes_value, list)
             byte_count = len(bytes_value) if bytes_are_array else 0
-            byte_values_are_valid = (
-                bytes_are_array
-                and byte_count <= 4096
-                and all(
-                    isinstance(value, int) and not isinstance(value, bool)
-                    and 0 <= value <= 255
-                    for value in bytes_value
-                )
-            )
+            byte_values: list[dict[str, int]] = []
+            if bytes_are_array and byte_count <= 4096:
+                if total_byte_values + byte_count > MANIFEST_HOST_GRANT_VALIDATION_MAX_TOTAL_BYTE_VALUES:
+                    return None
+                total_byte_values += byte_count
+                for value in bytes_value:
+                    if (
+                        isinstance(value, int) and not isinstance(value, bool)
+                        and -(1 << 63) <= value <= (1 << 63) - 1
+                    ):
+                        byte_values.append({"value": value})
+                    else:
+                        # Preserve invalid element types as an invalid numeric
+                        # sentinel; MNCS owns the actual byte-range decision.
+                        byte_values.append({"value": -1})
             grant_rows.append({
                 "is_table": grant_is_table,
                 "keys": grant_keys,
@@ -2332,7 +2340,7 @@ def _manifest_host_grant_validation_request(
                 "locator": locator,
                 "bytes_are_array": bytes_are_array,
                 "byte_count": byte_count,
-                "byte_values_are_valid": byte_values_are_valid,
+                "byte_values": byte_values,
             })
         rows.append({
             "is_table": is_table,

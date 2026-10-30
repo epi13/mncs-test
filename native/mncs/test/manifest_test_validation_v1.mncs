@@ -61,6 +61,10 @@ record ManifestTestValidationResultV1 {
     item_index: u64
 }
 
+record ManifestByteValueV1 {
+    value: i64
+}
+
 record HostGrantV1 {
     is_table: bool,
     keys: [TextValueV1; up_to 16],
@@ -68,7 +72,7 @@ record HostGrantV1 {
     locator: TextValueV1,
     bytes_are_array: bool,
     byte_count: u64,
-    byte_values_are_valid: bool
+    byte_values: [ManifestByteValueV1; up_to 1024]
 }
 
 record HostGrantSetV1 {
@@ -301,6 +305,15 @@ fn valid_host_grant_keys(keys: [TextValueV1; up_to 16]) -> (result: bool) {
     return true;
 }
 
+fn valid_host_grant_bytes(values: [ManifestByteValueV1; up_to 1024]) -> (result: bool) {
+    iterate i over values carrying valid: bool = true {
+        let byte_item: ManifestByteValueV1 = values[i];
+        let byte_value: i64 = byte_item.value;
+        next valid = valid && byte_value >= 0 && byte_value <= 255;
+    }
+    return valid;
+}
+
 fn has_duplicate_host_grant_set(
     request: ManifestHostGrantValidationRequestV1,
     row: HostGrantSetV1,
@@ -348,7 +361,10 @@ fn host_grant_issue(
         if !grant.capability_name.is_string || grant.capability_name.bytes.len == 0 || !grant.locator.is_string {
             return ManifestHostGrantIssueV1 { code: 5, set_index: set_index, grant_index: i };
         }
-        if !grant.bytes_are_array || grant.byte_count > 4096 || !grant.byte_values_are_valid {
+        if !grant.bytes_are_array || grant.byte_count > 4096 || grant.byte_count != grant.byte_values.len {
+            return ManifestHostGrantIssueV1 { code: 6, set_index: set_index, grant_index: i };
+        }
+        if !valid_host_grant_bytes(grant.byte_values) {
             return ManifestHostGrantIssueV1 { code: 6, set_index: set_index, grant_index: i };
         }
         if has_duplicate_host_grant(row, grant, i) {

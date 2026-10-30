@@ -182,7 +182,7 @@ class NativeManifestTestValidationTests(unittest.TestCase):
             "test_case_identity": "mncs:0.2:test-case:process::cancel",
             "grants": [{
                 "capability": "process_capability", "locator": "/usr/bin/sleep",
-                "bytes": [0, 1, 127, 255],
+                "bytes": [0, 1, 127, 255] + [255] * 1020,
             }],
         }]
         document = manifest_document(self.source, [], grants)
@@ -211,7 +211,11 @@ class NativeManifestTestValidationTests(unittest.TestCase):
              "host_grant_sets[0].grants[0] needs capability and locator strings"),
             ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [True]}]}],
              "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
+            ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [-1]}]}],
+             "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
             ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [256]}]}],
+             "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
+            ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [1.5]}]}],
              "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
             ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [0] * 4097}]}],
              "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
@@ -240,6 +244,22 @@ class NativeManifestTestValidationTests(unittest.TestCase):
         with mock.patch.object(mncs_test, "run_native_app") as native_app:
             native = self.native_validate_document(document)
         self.assertEqual(len(native["host_grant_sets"]), len(grants))
+        self.assertFalse(any(
+            call.args[0] == "test-manifest-host-grant-validation.json"
+            for call in native_app.call_args_list
+        ))
+
+        byte_values = [{
+            "test_case_identity": "case",
+            "grants": [
+                {"capability": "x", "bytes": [0] * 1024},
+                {"capability": "y", "bytes": [1]},
+            ],
+        }]
+        document = manifest_document(self.source, [], byte_values)
+        with mock.patch.object(mncs_test, "run_native_app") as native_app:
+            native = self.native_validate_document(document)
+        self.assertEqual(native["host_grant_sets"], mncs_test._validate_host_grant_sets_host(byte_values))
         self.assertFalse(any(
             call.args[0] == "test-manifest-host-grant-validation.json"
             for call in native_app.call_args_list
