@@ -55,6 +55,20 @@ def _sample_result() -> dict[str, object]:
     }
 
 
+def test_native_request_keeps_byte_fields_as_packed_utf8_strings() -> None:
+    prepared = mncs_test._native_public_result_request(
+        {"κλειδί": 'Lúna 東京\n"'}
+    )
+    assert prepared is not None
+    request, _output_bound = prepared
+
+    assert request["nodes"][0]["key"] == ""
+    assert request["nodes"][1]["key"] == "κλειδί"
+    assert request["nodes"][1]["text"] == 'Lúna 東京\n"'
+    assert isinstance(request["nodes"][1]["key"], str)
+    assert isinstance(request["nodes"][1]["text"], str)
+
+
 def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path) -> None:
     value = _sample_result()
     path = tmp_path / "artifacts" / "result.json"
@@ -163,7 +177,7 @@ def test_results_through_expanded_native_window_use_native_json(
     assert set(calls) == {"test-public-result-json-window.json"}
 
 
-def test_structured_input_node_bound_keeps_compatibility_json(
+def test_packed_text_keeps_large_public_result_on_native_windows(
     tmp_path: Path,
 ) -> None:
     value = ["x" * 600 for _ in range(55)]
@@ -183,8 +197,9 @@ def test_structured_input_node_bound_keeps_compatibility_json(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_count == 1
-    assert native_app.call_args.args[0] == "test-public-result-json-window.json"
+    calls = [call.args[0] for call in native_app.call_args_list]
+    assert 1 < len(calls) <= 32
+    assert set(calls) == {"test-public-result-json-window.json"}
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(
