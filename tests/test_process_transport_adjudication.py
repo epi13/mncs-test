@@ -262,3 +262,64 @@ def test_execute_entry_adjudicates_transport_and_execution_in_one_native_call(
 
     assert result["failure"]["class"] == "runtime_failure"
     assert result["execution_status"] == "runtime_failure"
+
+
+@pytest.mark.parametrize(
+    ("process", "expected_class", "expected_message"),
+    [
+        (
+            {
+                "transport_error": "missing MNCS executable",
+                "timed_out": False,
+                "returncode": None,
+                "stdout": b"",
+                "stderr": b"missing MNCS executable",
+                "stdout_artifact": "stdout/case.out",
+                "stderr_artifact": "stderr/case.err",
+                "command_artifact": "commands/case.json",
+            },
+            "infrastructure_failure",
+            "MNCS process could not be started",
+        ),
+        (
+            {
+                "timed_out": True,
+                "returncode": -15,
+                "stdout": b"",
+                "stderr": b"",
+                "stdout_artifact": "stdout/case.out",
+                "stderr_artifact": "stderr/case.err",
+                "command_artifact": "commands/case.json",
+            },
+            "timeout",
+            "MNCS execution exceeded 30s",
+        ),
+    ],
+)
+def test_execute_entry_preserves_platform_failure_if_native_classifier_cannot_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process: dict[str, object],
+    expected_class: str,
+    expected_message: str,
+) -> None:
+    monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
+    missing_mncs = tmp_path / "missing-mncs"
+    result = mncs_test.execute_entry(
+        test={"id": "unavailable-classifier", "entry": "exercise", "kind": "unit"},
+        source_path=tmp_path / "case.mncs",
+        source_text="",
+        module="mncs.test.transport_case",
+        mncs=str(missing_mncs),
+        cwd=tmp_path,
+        environment=_environment(),
+        default_step_budget=4096,
+        default_timeout=30,
+        artifacts=mncs_test.ArtifactStore(tmp_path / "artifacts"),
+        artifact_key="unavailable-classifier",
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert result["status"] == "failed"
+    assert result["failure"]["class"] == expected_class
+    assert result["failure"]["message"] == expected_message

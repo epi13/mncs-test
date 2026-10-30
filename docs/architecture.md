@@ -92,7 +92,10 @@ the process outcome and, for structured results, delegates to
 `execution_adjudication_v1` in the same native call. The Python adapter keeps
 process creation, typed-value projection, detailed diagnostics, and the public
 result envelope; it renders the native decision while retaining raw
-diagnostics and process artifacts. Native application calls, including the
+diagnostics and process artifacts. If the native classifier itself cannot
+launch after the host observed a process-start failure or timeout, the adapter
+preserves that direct platform outcome so the unavailable classifier does not
+erase the original failure. Native application calls, including the
 obligation-selection
 CLI, share `tools/mncs_test_native.py` for bounded request transport and
 selected-workspace library resolution, so linked worktrees do not depend on
@@ -107,8 +110,9 @@ adapter rejoins those chunks when it writes the public JSON document. The
 compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_v1` sorts object keys and emits the public JSON
 format, indentation, escaping, and final newline in MNCS. The original
-single-call application handles output through 16,300 bytes. Larger documents
-use up to 32 continuation calls, each carrying at most 8,192 JSON bytes plus a
+single-call application handles values with a conservative output bound of at
+most 8,192 bytes. Larger documents use up to 32 continuation calls, each
+carrying at most 8,192 JSON bytes plus a
 bounded traversal stack and SHA-256 state. A page can stop before a whole value
 when its conservative size bound would cross the page limit, so some page
 capacity may remain unused. The aggregate document limit is 32,684 bytes. The
@@ -119,7 +123,8 @@ depth 63,
 64 children per object, 256-byte keys, 1,024-byte scalar text, and 32,684 output
 bytes. Python still projects arbitrary runtime values into that request,
 reassembles output pages, writes files, and keeps the compatibility serializer
-for values outside the native bounds.
+for values outside the native bounds or when a bounded MNCS serialization
+reports `budget_exhausted`.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

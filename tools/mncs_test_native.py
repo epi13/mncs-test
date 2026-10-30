@@ -28,6 +28,10 @@ class NativeTransportError(ValueError):
     """Raised for unusable native transports (fail closed)."""
 
 
+class NativeBudgetExhaustedError(NativeTransportError):
+    """Raised when a native application reaches its declared execution budget."""
+
+
 class NativeInputBoundError(NativeTransportError):
     """Raised when a valid producer value exceeds a declared native record bound."""
 
@@ -242,6 +246,17 @@ def run_native_app(
             )
             if completed.returncode != 0:
                 detail = completed.stderr.strip() or completed.stdout.strip()
+                try:
+                    application_result = json.loads(completed.stdout)
+                except json.JSONDecodeError:
+                    application_result = None
+                if (
+                    isinstance(application_result, dict)
+                    and application_result.get("status") == "budget_exhausted"
+                ) or "native application returned budget_exhausted:" in detail:
+                    raise NativeBudgetExhaustedError(
+                        f"native application {descriptor_name} exhausted its execution budget: {detail}"
+                    )
                 raise NativeTransportError(
                     f"native application {descriptor_name} failed "
                     f"(exit {completed.returncode}): {detail}"

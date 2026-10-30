@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = next(
     (path for path in (ROOT.parent, *ROOT.parents) if (path / "mncs-language").is_dir()),
@@ -19,6 +21,7 @@ if not _default_mncs.is_file():
 MNCS = Path(os.environ.get("MNCS_BINARY", os.environ.get("MNCS", str(_default_mncs))))
 sys.path.insert(0, str(ROOT / "tools"))
 import mncs_test  # noqa: E402
+from mncs_test_native import NativeBudgetExhaustedError  # noqa: E402
 
 
 def _native_environment() -> dict[str, str]:
@@ -171,4 +174,54 @@ def test_out_of_bound_result_keeps_compatibility_json_without_native_call(
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     native_app.assert_not_called()
+
+
+def test_native_budget_exhaustion_is_classified_separately(tmp_path: Path) -> None:
+    value = {"a": [True, False, None]}
+    prepared = mncs_test._native_public_result_request(value)
+    assert prepared is not None
+    request, _output_bound = prepared
+
+    with pytest.raises(NativeBudgetExhaustedError, match="exhausted its execution budget"):
+        mncs_test.run_native_app(
+            "test-public-result-json.json",
+            request,
+            request_schema=mncs_test.PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
+            result_schema=mncs_test.PUBLIC_RESULT_JSON_RESULT_SCHEMA,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+            step_budget=1,
+        )
+
+
+def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_paths(
+    tmp_path: Path,
+) -> None:
+    values = [
+        {"small": [True, False, None]},
+        _large_result_splitting_utf8_at_native_chunk(),
+    ]
+    expected_applications = [
+        "test-public-result-json.json",
+        "test-public-result-json-window.json",
+    ]
+
+    with mock.patch.object(
+        mncs_test,
+        "run_native_app",
+        side_effect=NativeBudgetExhaustedError("native application exhausted its execution budget"),
+    ) as native_app:
+        for value in values:
+            expected = mncs_test.json_bytes(value)
+            actual, digest = mncs_test._public_result_json_payload(
+                value,
+                mncs=str(MNCS),
+                cwd=tmp_path,
+                environment=_native_environment(),
+            )
+            assert actual == expected
+            assert digest == hashlib.sha256(expected).hexdigest()
+
+    assert [call.args[0] for call in native_app.call_args_list] == expected_applications
 

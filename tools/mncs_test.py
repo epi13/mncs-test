@@ -35,6 +35,7 @@ from family_contract import (
 )
 from mncs_test_native import (
     EXECUTION_ADJUDICATION_MAX_CASES,
+    NativeBudgetExhaustedError,
     NativeInputBoundError,
     NativeTransportError,
     run_exact_test_identity_selection,
@@ -56,7 +57,7 @@ PUBLIC_RESULT_JSON_WINDOW_RESULT_SCHEMA = "mncs.test.public-json-window/2"
 PUBLIC_RESULT_JSON_MAX_NODES = 512
 PUBLIC_RESULT_JSON_MAX_DEPTH = 63
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
-PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 16300
+PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 8192
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 32684
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
@@ -354,6 +355,8 @@ def _native_public_result_payload(
                 environment=environment,
                 step_budget=8_000_000,
             )
+        except NativeBudgetExhaustedError:
+            return None
         except NativeTransportError as error:
             raise AdapterError(f"native Test public result JSON failed: {error}") from error
 
@@ -407,6 +410,8 @@ def _native_public_result_payload(
                 environment=environment,
                 step_budget=8_000_000,
             )
+        except NativeBudgetExhaustedError:
+            return None
         except NativeTransportError as error:
             raise AdapterError(f"native Test public result JSON window failed: {error}") from error
 
@@ -3495,7 +3500,24 @@ def execute_entry(
             cwd=cwd,
             environment=environment,
         )
-    except NativeTransportError as error:
+    except (NativeTransportError, OSError, subprocess.TimeoutExpired) as error:
+        # Start failures and deadlines are already observed at the host
+        # process boundary. Preserve those outcomes if the classifier cannot
+        # run, for example because the MNCS executable itself is unavailable.
+        if "transport_error" in process:
+            return result_failure(
+                test_result,
+                failure_class="infrastructure_failure",
+                message="MNCS process could not be started",
+                error=process["transport_error"],
+            )
+        if process.get("timed_out") is True:
+            return result_failure(
+                test_result,
+                failure_class="timeout",
+                message=f"MNCS execution exceeded {timeout_seconds}s",
+                timeout_seconds=timeout_seconds,
+            )
         raise AdapterError(f"native process transport adjudication failed: {error}") from error
 
     decision = process_decision["decision"]
