@@ -62,8 +62,8 @@ PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/2"
-MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-pretest-validation-request/1"
-MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-pretest-validation/2"
+MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-pretest-validation-request/2"
+MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-pretest-validation/3"
 MANIFEST_TEST_VALIDATION_MAX_TESTS = 16
 MANIFEST_TEST_VALIDATION_MAX_TEXT_BYTES = 512
 MANIFEST_TEST_VALIDATION_MAX_TAGS = 32
@@ -79,7 +79,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.15"
+RUNNER_VERSION = "0.2.16"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -2312,7 +2312,7 @@ def _manifest_pretest_validation_request(
         "source": _manifest_text_value(raw_manifest.get("source")),
         "module_name": _manifest_text_value(raw_manifest.get("module")),
         "suite": _manifest_text_value(raw_manifest.get("suite")),
-        "profile": _manifest_text_value(raw_manifest.get("profile", "0.17")),
+        "profile": _manifest_text_value(raw_manifest.get("profile")),
     }
     if any(value is None for value in header_strings.values()):
         return None
@@ -2336,6 +2336,7 @@ def _manifest_pretest_validation_request(
         **header_strings,
         "suite_present": "suite" in raw_manifest,
         "suite_is_null": raw_manifest.get("suite") is None,
+        "profile_present": "profile" in raw_manifest,
         "step_budget": step_budget,
         "timeout_seconds": timeout_seconds,
         "libraries_are_array": libraries_are_array,
@@ -2452,6 +2453,7 @@ def _native_manifest_pretest_validation(
         or any(type(result.get(field)) is not int for field in (
             "issue_code", "set_index", "grant_index", "normalized_set_count"))
         or not isinstance(result.get("normalized_sets"), list)
+        or not isinstance(result.get("normalized_header"), dict)
         or result["normalized_set_count"] != len(result["normalized_sets"])
     ):
         raise AdapterError("MNCS manifest pre-test validator returned malformed result metadata")
@@ -2459,6 +2461,24 @@ def _native_manifest_pretest_validation(
         raise AdapterError("MNCS manifest pre-test validator returned inconsistent validity metadata")
     if result["valid"] and result["normalized_set_count"] != len(grant_sets):
         raise AdapterError("MNCS manifest pre-test validator returned an incomplete normalized grant projection")
+    if result["valid"]:
+        header = result["normalized_header"]
+        libraries = header.get("libraries")
+        if (
+            not isinstance(libraries, list)
+            or type(header.get("library_count")) is not int
+            or header["library_count"] != len(libraries)
+            or len(libraries) > 16
+            or type(header.get("step_budget")) is not int
+            or header["step_budget"] <= 0
+            or type(header.get("timeout_seconds")) is not int
+            or header["timeout_seconds"] <= 0
+        ):
+            raise AdapterError("MNCS manifest pre-test validator returned malformed header normalization")
+        _manifest_native_text(header.get("profile"), "profile")
+        for library in libraries:
+            if not _manifest_native_text(library, "library"):
+                raise AdapterError("MNCS manifest pre-test validator returned an empty library path")
     if result["issue_code"] in (11, 12, 13, 14, 15, 16, 17) and not 0 <= result["set_index"] < len(grant_sets):
         raise AdapterError("MNCS manifest pre-test validator returned an out-of-range set index")
     if result["issue_code"] in (14, 15, 16, 17):
@@ -2524,6 +2544,23 @@ def _manifest_normalized_host_grant_sets(result: dict[str, Any]) -> list[dict[st
             normalized_grants.append({"capability": capability, "locator": locator, "bytes": decoded_bytes})
         normalized_sets.append({"test_case_identity": identity, "grants": normalized_grants})
     return normalized_sets
+
+
+def _manifest_normalized_pretest_header(result: dict[str, Any]) -> dict[str, Any]:
+    header = result.get("normalized_header")
+    if not isinstance(header, dict):
+        raise AdapterError("MNCS normalized manifest header is malformed")
+    libraries = header.get("libraries")
+    if not isinstance(libraries, list) or len(libraries) != header.get("library_count"):
+        raise AdapterError("MNCS normalized manifest libraries are malformed")
+    return {
+        "profile": _manifest_native_text(header.get("profile"), "profile"),
+        "step_budget": header.get("step_budget"),
+        "timeout_seconds": header.get("timeout_seconds"),
+        "libraries": [
+            _manifest_native_text(value, "library") for value in libraries
+        ],
+    }
 
 
 def _manifest_pretest_validation_error(result: dict[str, Any]) -> str:
@@ -2808,6 +2845,7 @@ def validate_manifest(
         raise ManifestError("manifest must be a TOML table")
     raw_grant_sets = raw.get("host_grant_sets", [])
     native_pretest_validation = None
+    native_header_defaults = None
     if isinstance(raw_grant_sets, list):
         native_pretest_validation = _native_manifest_pretest_validation(
             raw, raw_grant_sets, mncs=mncs, cwd=cwd, environment=environment,
@@ -2820,9 +2858,17 @@ def validate_manifest(
     elif not native_pretest_validation["valid"]:
         raise ManifestError(_manifest_pretest_validation_error(native_pretest_validation))
     else:
-        libraries = raw.get("libraries", [])
+        native_header_defaults = _manifest_normalized_pretest_header(native_pretest_validation)
+        libraries = native_header_defaults["libraries"]
         host_grant_sets = _manifest_normalized_host_grant_sets(native_pretest_validation)
-    profile = raw.get("profile", "0.17")
+    if native_header_defaults is None:
+        profile = raw.get("profile", "0.17")
+        step_budget = raw.get("step_budget", 100000)
+        timeout_seconds = raw.get("timeout_seconds", 60)
+    else:
+        profile = native_header_defaults["profile"]
+        step_budget = native_header_defaults["step_budget"]
+        timeout_seconds = native_header_defaults["timeout_seconds"]
     tests = raw.get("tests", [])
     if not isinstance(tests, list):
         raise ManifestError("tests must be an array when present")
@@ -2858,8 +2904,8 @@ def validate_manifest(
     result["tests"] = normalized_tests
     result["host_grant_sets"] = host_grant_sets
     result.setdefault("profile", profile)
-    result.setdefault("step_budget", 100000)
-    result.setdefault("timeout_seconds", 60)
+    result.setdefault("step_budget", step_budget)
+    result.setdefault("timeout_seconds", timeout_seconds)
     return result
 
 

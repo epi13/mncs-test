@@ -112,6 +112,35 @@ class NativeManifestTestValidationTests(unittest.TestCase):
         self.assertEqual(str(native_error.exception), str(host_error.exception))
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_native_header_projection_supplies_defaults_and_explicit_values(self) -> None:
+        defaults_document = manifest_document(self.source, [])
+        host_defaults = mncs_test.validate_manifest(defaults_document, self.path)
+        with mock.patch.object(
+            mncs_test, "_validate_manifest_header_host",
+            side_effect=AssertionError("bounded native header policy should not use the host oracle"),
+        ):
+            native_defaults = self.native_validate_document(defaults_document)
+        for field in ("profile", "step_budget", "timeout_seconds", "library_paths"):
+            self.assertEqual(native_defaults[field], host_defaults[field])
+        self.assertEqual(native_defaults["profile"], "0.17")
+        self.assertEqual(native_defaults["step_budget"], 100000)
+        self.assertEqual(native_defaults["timeout_seconds"], 60)
+
+        explicit_document = manifest_document(self.source, [])
+        explicit_document.update({
+            "profile": "0.18", "step_budget": 12345,
+            "timeout_seconds": 9, "libraries": ["."],
+        })
+        host_explicit = mncs_test.validate_manifest(explicit_document, self.path)
+        with mock.patch.object(
+            mncs_test, "_validate_manifest_header_host",
+            side_effect=AssertionError("bounded native header policy should not use the host oracle"),
+        ):
+            native_explicit = self.native_validate_document(explicit_document)
+        for field in ("profile", "step_budget", "timeout_seconds", "library_paths"):
+            self.assertEqual(native_explicit[field], host_explicit[field])
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_native_policy_accepts_and_normalizes_supported_rows(self) -> None:
         declarations = [
             {

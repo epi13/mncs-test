@@ -93,10 +93,19 @@ record ManifestHeaderV1 {
     suite_present: bool,
     suite_is_null: bool,
     suite: TextValueV1,
+    profile_present: bool,
     profile: TextValueV1,
     step_budget: ManifestHeaderIntegerV1,
     timeout_seconds: ManifestHeaderIntegerV1,
     libraries_are_array: bool,
+    libraries: [TextValueV1; up_to 16]
+}
+
+record ManifestHeaderNormalizationV1 {
+    profile: TextValueV1,
+    step_budget: u64,
+    timeout_seconds: u64,
+    library_count: u64,
     libraries: [TextValueV1; up_to 16]
 }
 
@@ -138,6 +147,7 @@ record ManifestHostGrantValidationResultV1 {
     issue_code: u64,
     set_index: u64,
     grant_index: u64,
+    normalized_header: ManifestHeaderNormalizationV1,
     normalized_set_count: u64,
     normalized_sets: [HostGrantSetV1; up_to 16]
 }
@@ -151,11 +161,11 @@ fn result_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn pretest_request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 112, 114, 101, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 112, 114, 101, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
 }
 
 fn pretest_result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 112, 114, 101, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 50];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 112, 114, 101, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 51];
 }
 
 fn same_schema(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -430,7 +440,7 @@ fn manifest_header_issue(header: ManifestHeaderV1) -> (result: ManifestHostGrant
     if header.suite_present && !header.suite_is_null && !header.suite.is_string {
         return ManifestHostGrantIssueV1 { code: 5, set_index: 0, grant_index: 0 };
     }
-    if !header.profile.is_string || header.profile.bytes.len == 0 {
+    if header.profile_present && (!header.profile.is_string || header.profile.bytes.len == 0) {
         return ManifestHostGrantIssueV1 { code: 6, set_index: 0, grant_index: 0 };
     }
     if header.step_budget.present && (!header.step_budget.is_integer || header.step_budget.is_boolean || header.step_budget.value <= 0) {
@@ -457,6 +467,25 @@ fn merge_host_grant_issue(current: ManifestHostGrantIssueV1, candidate: Manifest
     return candidate;
 }
 
+fn normalized_profile(header: ManifestHeaderV1) -> (result: TextValueV1) {
+    if header.profile_present { return header.profile; }
+    return TextValueV1 {
+        is_string: true,
+        blank: false,
+        bytes: [48, 46, 49, 55]
+    };
+}
+
+fn normalized_step_budget(header: ManifestHeaderV1) -> (result: u64) {
+    if header.step_budget.present { return header.step_budget.value as u64; }
+    return 100000;
+}
+
+fn normalized_timeout_seconds(header: ManifestHeaderV1) -> (result: u64) {
+    if header.timeout_seconds.present { return header.timeout_seconds.value as u64; }
+    return 60;
+}
+
 fn validate_host_grant_sets(request: ManifestHostGrantValidationRequestV1) -> (result: ManifestHostGrantIssueV1) {
     if !same_schema(request.schema_version, pretest_request_schema())
         || request.set_count != request.sets.len {
@@ -476,13 +505,41 @@ fn host_grant_public_result(
     request: ManifestHostGrantValidationRequestV1,
     issue: ManifestHostGrantIssueV1
 ) -> (result: ManifestHostGrantValidationResultV1) {
+    let empty_header: ManifestHeaderNormalizationV1 = ManifestHeaderNormalizationV1 {
+        profile: TextValueV1 { is_string: false, blank: false, bytes: [] },
+        step_budget: 0,
+        timeout_seconds: 0,
+        library_count: 0,
+        libraries: []
+    };
+    if issue.code != 0 {
+        return ManifestHostGrantValidationResultV1 {
+            schema_version: pretest_result_schema(),
+            supported: issue.code != 255,
+            valid: false,
+            issue_code: issue.code,
+            set_index: issue.set_index,
+            grant_index: issue.grant_index,
+            normalized_header: empty_header,
+            normalized_set_count: request.set_count,
+            normalized_sets: request.sets
+        };
+    }
+    let normalized_header: ManifestHeaderNormalizationV1 = ManifestHeaderNormalizationV1 {
+        profile: normalized_profile(request.header),
+        step_budget: normalized_step_budget(request.header),
+        timeout_seconds: normalized_timeout_seconds(request.header),
+        library_count: request.header.libraries.len,
+        libraries: request.header.libraries
+    };
     return ManifestHostGrantValidationResultV1 {
         schema_version: pretest_result_schema(),
-        supported: issue.code != 255,
-        valid: issue.code == 0,
-        issue_code: issue.code,
+        supported: true,
+        valid: true,
+        issue_code: 0,
         set_index: issue.set_index,
         grant_index: issue.grant_index,
+        normalized_header: normalized_header,
         normalized_set_count: request.set_count,
         normalized_sets: request.sets
     };

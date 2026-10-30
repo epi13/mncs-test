@@ -77,11 +77,13 @@ first-error order. Python decodes TOML and projects typed values; MNCS owns the
 schema version, required name/source/module fields, suite and profile shape,
 positive step and timeout budgets, library-array policy, grant-set shape and
 identity uniqueness, capability/locator requirements, duplicate pairs, and
-byte-array presence, length, and signed byte-range policy. The host retains
-source/library path resolution. MNCS returns normalized set/grant rows from
-the validated typed request, applying empty locator/byte-list defaults; Python
-only decodes those rows into the established Test envelope. The host projects
-a bounded signed integer sequence for MNCS; booleans,
+byte-array presence, length, and signed byte-range policy. Its result includes
+the effective profile, step budget, timeout, and validated library strings,
+including native defaults of `0.17`, `100000`, and `60`. Python only decodes
+those fields and resolves source/library paths. MNCS also returns normalized
+set/grant rows from the validated typed request, applying empty locator/byte-list
+defaults; Python only decodes those rows into the established Test envelope.
+The host projects a bounded signed integer sequence for MNCS; booleans,
 non-integers, and values outside signed 64-bit representation become an
 invalid sentinel for the native range check. Native validation is used for at
 most 16 libraries, 16 grant sets, 32 grants per set, 16 table keys, 1,024
