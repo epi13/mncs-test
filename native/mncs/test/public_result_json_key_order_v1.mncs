@@ -24,7 +24,8 @@ record JsonTokenDocumentV1 {
 record DocumentShapeV1 { total: u64, valid: bool }
 
 record KeyV1 {
-    raw: [byte; up_to 256],
+    raw_start: u64,
+    raw_length: u64,
     ordered: [byte; up_to 256],
     ordered_length: u64,
     valid: bool
@@ -33,8 +34,8 @@ record KeyV1 {
 enum JsonValueV1 {
     Empty,
     Null,
-    Raw { bytes: [byte; up_to 1024] },
-    String { bytes: [byte; up_to 1024] },
+    Raw { start: u64, length: u64 },
+    String { start: u64, length: u64 },
     Array { items: JsonValueV1 },
     Object { fields: JsonValueV1 },
     ArrayNil,
@@ -72,11 +73,6 @@ record DecodeStateV1 {
     valid: bool
 }
 
-record SourceRangeV1 {
-    bytes: [byte; up_to 1024],
-    valid: bool
-}
-
 record LocatedByteV1 { base: u64, value: byte }
 
 enum KeyOrderV1 { Before, Equal, After }
@@ -87,7 +83,7 @@ record JsonOrderRequestV1 {
     input_sha256: [byte; up_to 64]
 }
 
-record JsonOrderChunkV1 { bytes: [byte; 1024], length: u64 }
+record JsonOrderChunkV1 { bytes: [byte; 64], length: u64 }
 
 enum JsonOrderChunkListV1 {
     ChunkNil,
@@ -95,7 +91,7 @@ enum JsonOrderChunkListV1 {
 }
 
 record JsonOrderWriterV1 {
-    current_bytes: [byte; 1024],
+    current_bytes: [byte; 64],
     current_length: u64,
     completed: JsonOrderChunkListV1,
     completed_count: u64,
@@ -103,8 +99,10 @@ record JsonOrderWriterV1 {
     ok: bool
 }
 
+record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
+
 record JsonOrderChunkBuilderV1 {
-    chunks: [JsonOrderChunkV1; 8],
+    chunks: [JsonOrderChunkV1; 128],
     count: u64
 }
 
@@ -114,7 +112,7 @@ record JsonOrderResultV1 {
     input_sha256: [byte; up_to 64],
     document_length: u64,
     chunk_count: u64,
-    chunks: [JsonOrderChunkV1; up_to 8]
+    chunks: [JsonOrderChunkV1; up_to 128]
 }
 
 fn request_schema_v1() -> (result: [byte; up_to 64]) {
@@ -180,11 +178,11 @@ fn hex_value(value: byte) -> (result: u64) {
     return number -% 87;
 }
 
-fn decode_hex4(raw: [byte; up_to 256], start: u64) -> (result: u64) {
-    let a: u64 = hex_value(raw[start]);
-    let b: u64 = hex_value(raw[start +% 1]);
-    let c: u64 = hex_value(raw[start +% 2]);
-    let d: u64 = hex_value(raw[start +% 3]);
+fn decode_hex4(document: JsonTokenDocumentV1, start: u64, index: u64) -> (result: u64) {
+    let a: u64 = hex_value(located_byte(document, start +% index));
+    let b: u64 = hex_value(located_byte(document, start +% index +% 1));
+    let c: u64 = hex_value(located_byte(document, start +% index +% 2));
+    let d: u64 = hex_value(located_byte(document, start +% index +% 3));
     return a *% 4096 +% b *% 256 +% c *% 16 +% d;
 }
 
@@ -219,22 +217,31 @@ fn decoded_codepoint(state: DecodeStateV1, value: u64) -> (result: DecodeStateV1
     return DecodeStateV1 { ..state, valid: false };
 }
 
-fn decode_key_step(state: DecodeStateV1, raw: [byte; up_to 256], index: u64) -> (result: DecodeStateV1) {
-    let value: byte = raw[index];
+fn decode_key_step(
+    state: DecodeStateV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: DecodeStateV1) {
+    if index >= length { return state; }
+    let value: byte = located_byte(document, start +% index);
     if state.skip > 0 {
         return DecodeStateV1 { ..state, skip: state.skip -% 1 };
     }
     if state.escaped {
         if value == 117 {
-            if index +% 4 >= raw.len {
+            if index +% 4 >= length {
                 return DecodeStateV1 { ..state, valid: false, escaped: false };
             }
-            let code: u64 = decode_hex4(raw, index +% 1);
+            let code: u64 = decode_hex4(document, start, index +% 1);
             if code >= 55296 && code <= 56319 {
-                if index +% 10 >= raw.len || raw[index +% 5] != 92 || raw[index +% 6] != 117 {
+                if index +% 10 >= length
+                    || located_byte(document, start +% index +% 5) != 92
+                    || located_byte(document, start +% index +% 6) != 117 {
                     return DecodeStateV1 { ..state, valid: false, escaped: false };
                 }
-                let low: u64 = decode_hex4(raw, index +% 7);
+                let low: u64 = decode_hex4(document, start, index +% 7);
                 if low < 56320 || low > 57343 {
                     return DecodeStateV1 { ..state, valid: false, escaped: false };
                 }
@@ -275,24 +282,26 @@ fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64, common: u
     return order;
 }
 
-fn decode_key(raw: [byte; up_to 256]) -> (result: KeyV1) {
+fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: KeyV1) {
     let initial: DecodeStateV1 = DecodeStateV1 {
         bytes: [0; 256], length: 0, escaped: false, skip: 0, valid: true
     };
-    iterate i over raw carrying decoded: DecodeStateV1 = initial {
-        next decoded = decode_key_step(decoded, raw, i);
+    iterate i up_to 256 carrying decoded: DecodeStateV1 = initial {
+        next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
     }
     return KeyV1 {
-        raw: raw,
+        raw_start: raw_start,
+        raw_length: raw_length,
         ordered: decoded.bytes[0..decoded.length],
         ordered_length: decoded.length,
-        valid: decoded.valid && !decoded.escaped && decoded.skip == 0
+        valid: raw_length <= 256 && decoded.valid && !decoded.escaped && decoded.skip == 0
     };
 }
 
 fn compare_key(left: KeyV1, right: KeyV1) -> (result: KeyOrderV1) {
     let common: u64 = select(left.ordered_length < right.ordered_length, left.ordered_length, right.ordered_length);
-    iterate i up_to 256 carrying order: i64 = 0 {
+    let shared: [byte; up_to 256] = left.ordered[0..common];
+    iterate i over shared carrying order: i64 = 0 {
         next order = compare_key_step(order, left, right, i, common);
     }
     if order < 0 { return KeyOrderV1.Before; }
@@ -317,8 +326,8 @@ fn insert_field(fields: JsonValueV1, key: KeyV1, value: JsonValueV1) -> (result:
         },
         Empty => JsonValueV1.Empty,
         Null => JsonValueV1.Empty,
-        Raw { bytes: raw } => JsonValueV1.Empty,
-        String { bytes: raw } => JsonValueV1.Empty,
+        Raw { start: raw_start, length: raw_length } => JsonValueV1.Empty,
+        String { start: raw_start, length: raw_length } => JsonValueV1.Empty,
         Array { items: items } => JsonValueV1.Empty,
         Object { fields: nested } => JsonValueV1.Empty,
         ArrayNil => JsonValueV1.Empty,
@@ -332,8 +341,8 @@ fn prepend_array(items: JsonValueV1, value: JsonValueV1) -> (result: JsonValueV1
         ArrayCons { head: head, tail: tail } => JsonValueV1.ArrayCons { head: value, tail: items },
         Empty => JsonValueV1.Empty,
         Null => JsonValueV1.Empty,
-        Raw { bytes: raw } => JsonValueV1.Empty,
-        String { bytes: raw } => JsonValueV1.Empty,
+        Raw { start: raw_start, length: raw_length } => JsonValueV1.Empty,
+        String { start: raw_start, length: raw_length } => JsonValueV1.Empty,
         Array { items: nested } => JsonValueV1.Empty,
         Object { fields: nested } => JsonValueV1.Empty,
         ObjectNil => JsonValueV1.Empty,
@@ -349,8 +358,8 @@ fn reverse_array(items: JsonValueV1, accumulated: JsonValueV1) -> (result: JsonV
         ),
         Empty => accumulated,
         Null => accumulated,
-        Raw { bytes: raw } => accumulated,
-        String { bytes: raw } => accumulated,
+        Raw { start: raw_start, length: raw_length } => accumulated,
+        String { start: raw_start, length: raw_length } => accumulated,
         Array { items: nested } => accumulated,
         Object { fields: nested } => accumulated,
         ObjectNil => accumulated,
@@ -359,15 +368,21 @@ fn reverse_array(items: JsonValueV1, accumulated: JsonValueV1) -> (result: JsonV
 }
 
 fn empty_key() -> (result: KeyV1) {
-    return KeyV1 { raw: [0; 0], ordered: [0; 0], ordered_length: 0, valid: true };
+    return KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: [0; 0],
+        ordered_length: 0,
+        valid: true
+    };
 }
 
 fn is_empty_value(value: JsonValueV1) -> (result: bool) {
     return match value {
         Empty => true,
         Null => false,
-        Raw { bytes: raw } => false,
-        String { bytes: raw } => false,
+        Raw { start: raw_start, length: raw_length } => false,
+        String { start: raw_start, length: raw_length } => false,
         Array { items: items } => false,
         Object { fields: fields } => false,
         ArrayNil => false,
@@ -401,21 +416,6 @@ fn located_byte(document: JsonTokenDocumentV1, position: u64) -> (result: byte) 
         next found = locate_byte_step(found, document.chunks[i], position);
     }
     return found.value;
-}
-
-fn source_range_step(output: [byte; 1024], document: JsonTokenDocumentV1, start: u64, length: u64, index: u64) -> (result: [byte; 1024]) {
-    if index < length { return replace(output, index, located_byte(document, start +% index)); }
-    return output;
-}
-
-fn source_range(document: JsonTokenDocumentV1, start: u64, end: u64) -> (result: SourceRangeV1) {
-    let length: u64 = end -% start;
-    let initial: [byte; 1024] = [0; 1024];
-    if end < start || length > 1024 { return SourceRangeV1 { bytes: initial[0..0], valid: false }; }
-    iterate i up_to 1024 carrying output: [byte; 1024] = initial {
-        next output = source_range_step(output, document, start, length, i);
-    }
-    return SourceRangeV1 { bytes: output[0..length], valid: true };
 }
 
 fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV1) {
@@ -459,21 +459,20 @@ fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV
     return ParseStateV1 { ..state, valid: false };
 }
 
-fn finalize_scalar(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64) -> (result: ParseStateV1) {
+fn finalize_scalar(state: ParseStateV1, position: u64) -> (result: ParseStateV1) {
     if !state.scalar_active { return state; }
-    let span: SourceRangeV1 = source_range(document, state.scalar_start, position);
-    if !span.valid || span.bytes.len == 0 {
+    if position <= state.scalar_start {
         return ParseStateV1 { ..state, scalar_active: false, valid: false };
     }
     let appended: ParseStateV1 = append_value(
         ParseStateV1 { ..state, scalar_active: false },
-        JsonValueV1.Raw { bytes: span.bytes }
+        JsonValueV1.Raw { start: state.scalar_start, length: position -% state.scalar_start }
     );
     return appended;
 }
 
-fn maybe_finalize_scalar(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64, boundary: bool) -> (result: ParseStateV1) {
-    if boundary { return finalize_scalar(state, document, position); }
+fn maybe_finalize_scalar(state: ParseStateV1, position: u64, boundary: bool) -> (result: ParseStateV1) {
+    if boundary { return finalize_scalar(state, position); }
     return state;
 }
 
@@ -491,7 +490,7 @@ fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64)
     let value: byte = located_byte(document, position);
     let before: cursor.Cursor = state.cursor_state;
     let boundary: bool = !before.in_string && scalar_boundary(value);
-    let finalized: ParseStateV1 = maybe_finalize_scalar(state, document, position, boundary);
+    let finalized: ParseStateV1 = maybe_finalize_scalar(state, position, boundary);
     let after: cursor.Cursor = cursor.feed_byte(before, value);
     let advanced: ParseStateV1 = ParseStateV1 { ..finalized, cursor_state: after };
     if !after.valid { return ParseStateV1 { ..advanced, valid: false }; }
@@ -499,9 +498,11 @@ fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64)
     if after.event == 2 {
         if after.depth == 0 || after.depth > 12 { return ParseStateV1 { ..advanced, valid: false }; }
         let frame_index: u64 = (after.depth as u64) -% 1;
-        let raw: SourceRangeV1 = source_range(document, after.string_start, after.string_end);
-        if !raw.valid || raw.bytes.len > 256 { return ParseStateV1 { ..advanced, valid: false }; }
-        let key: KeyV1 = decode_key(raw.bytes);
+        let raw_length: u64 = after.string_end -% after.string_start;
+        if after.string_end < after.string_start || raw_length > 256 {
+            return ParseStateV1 { ..advanced, valid: false };
+        }
+        let key: KeyV1 = decode_key(document, after.string_start, raw_length);
         let frame: FrameV1 = advanced.frames[frame_index];
         if frame.kind != 1 || frame.has_pending_key || !key.valid {
             return ParseStateV1 { ..advanced, valid: false };
@@ -516,9 +517,13 @@ fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64)
     }
     if after.event == 4 {
         if after.position <= state.string_start +% 1 { return ParseStateV1 { ..advanced, valid: false }; }
-        let raw: SourceRangeV1 = source_range(document, state.string_start +% 1, after.position -% 1);
-        if !raw.valid { return ParseStateV1 { ..advanced, valid: false }; }
-        return append_value(advanced, JsonValueV1.String { bytes: raw.bytes });
+        return append_value(
+            advanced,
+            JsonValueV1.String {
+                start: state.string_start +% 1,
+                length: after.position -% state.string_start -% 2
+            }
+        );
     }
     if after.event == 5 || after.event == 6 {
         if after.depth == 0 || after.depth > 12 { return ParseStateV1 { ..advanced, valid: false }; }
@@ -579,7 +584,7 @@ fn parse_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
     iterate i over document.chunks carrying parsed: ParseStateV1 = empty_parse_state() {
         next parsed = parse_chunk(parsed, document, i);
     }
-    let finalized: ParseStateV1 = finalize_scalar(parsed, document, document.byte_length);
+    let finalized: ParseStateV1 = finalize_scalar(parsed, document.byte_length);
     let completed: cursor.Cursor = cursor.finish(finalized.cursor_state);
     return ParseStateV1 {
         ..finalized,
@@ -591,7 +596,7 @@ fn parse_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
 
 fn writer_empty() -> (result: JsonOrderWriterV1) {
     return JsonOrderWriterV1 {
-        current_bytes: [0; 1024],
+        current_bytes: [0; 64],
         current_length: 0,
         completed: JsonOrderChunkListV1.ChunkNil,
         completed_count: 0,
@@ -603,9 +608,9 @@ fn writer_empty() -> (result: JsonOrderWriterV1) {
 fn writer_next_chunk(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
     let finished: JsonOrderChunkV1 = JsonOrderChunkV1 {
         bytes: writer.current_bytes,
-        length: 1024
+        length: 64
     };
-    let empty: [byte; 1024] = [0; 1024];
+    let empty: [byte; 64] = [0; 64];
     return JsonOrderWriterV1 {
         ..writer,
         current_bytes: replace(empty, 0, value),
@@ -621,8 +626,8 @@ fn writer_next_chunk(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrd
 
 fn writer_byte(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
     if !writer.ok || writer.length >= 8192 { return JsonOrderWriterV1 { ..writer, ok: false }; }
-    if writer.current_length >= 1024 { return writer_next_chunk(writer, value); }
-    let updated: [byte; 1024] = replace(writer.current_bytes, writer.current_length, value);
+    if writer.current_length >= 64 { return writer_next_chunk(writer, value); }
+    let updated: [byte; 64] = replace(writer.current_bytes, writer.current_length, value);
     return JsonOrderWriterV1 {
         ..writer,
         current_bytes: updated,
@@ -648,8 +653,8 @@ fn is_array_nil(value: JsonValueV1) -> (result: bool) {
         ArrayNil => true,
         Empty => false,
         Null => false,
-        Raw { bytes: raw } => false,
-        String { bytes: raw } => false,
+        Raw { start: raw_start, length: raw_length } => false,
+        String { start: raw_start, length: raw_length } => false,
         Array { items: items } => false,
         Object { fields: fields } => false,
         ArrayCons { head: head, tail: tail } => false,
@@ -663,8 +668,8 @@ fn is_object_nil(value: JsonValueV1) -> (result: bool) {
         ObjectNil => true,
         Empty => false,
         Null => false,
-        Raw { bytes: raw } => false,
-        String { bytes: raw } => false,
+        Raw { start: raw_start, length: raw_length } => false,
+        String { start: raw_start, length: raw_length } => false,
         Array { items: items } => false,
         Object { fields: fields } => false,
         ArrayNil => false,
@@ -673,58 +678,121 @@ fn is_object_nil(value: JsonValueV1) -> (result: bool) {
     };
 }
 
-fn writer_key(writer: JsonOrderWriterV1, key: KeyV1) -> (result: JsonOrderWriterV1) {
+fn writer_source_chunk_step(
+    state: WriterSourceStateV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: WriterSourceStateV1) {
+    let chunk: JsonTokenInputChunkV1 = document.chunks[index];
+    let chunk_start: u64 = state.base;
+    let chunk_end: u64 = chunk_start +% chunk.length;
+    let range_end: u64 = start +% length;
+    let copy_start: u64 = select(start > chunk_start, start, chunk_start);
+    let copy_end: u64 = select(range_end < chunk_end, range_end, chunk_end);
+    if copy_start < copy_end {
+        let source_start: u64 = copy_start -% chunk_start;
+        let source_end: u64 = copy_end -% chunk_start;
+        let source: [byte; up_to 1024] = chunk.bytes[source_start..source_end];
+        return WriterSourceStateV1 {
+            writer: writer_bytes(state.writer, source),
+            base: chunk_end
+        };
+    }
+    return WriterSourceStateV1 { ..state, base: chunk_end };
+}
+
+fn writer_source_range(
+    writer: JsonOrderWriterV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: JsonOrderWriterV1) {
+    if length > 1024 || start > document.byte_length || length > document.byte_length -% start {
+        return JsonOrderWriterV1 { ..writer, ok: false };
+    }
+    let initial: WriterSourceStateV1 = WriterSourceStateV1 { writer: writer, base: 0 };
+    iterate i over document.chunks carrying output: WriterSourceStateV1 = initial {
+        next output = writer_source_chunk_step(output, document, start, length, i);
+    }
+    return output.writer;
+}
+
+fn writer_key(
+    writer: JsonOrderWriterV1,
+    key: KeyV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonOrderWriterV1) {
     let open: JsonOrderWriterV1 = writer_byte(writer, 34);
-    let raw: JsonOrderWriterV1 = writer_bytes(open, key.raw);
+    let raw: JsonOrderWriterV1 = writer_source_range(open, document, key.raw_start, key.raw_length);
     return writer_byte(raw, 34);
 }
 
-fn write_json(value: JsonValueV1, writer: JsonOrderWriterV1) -> (result: JsonOrderWriterV1) {
+fn write_json(
+    value: JsonValueV1,
+    writer: JsonOrderWriterV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonOrderWriterV1) {
     return match value {
         Empty => JsonOrderWriterV1 { ..writer, ok: false },
         Null => writer_bytes(writer, [110, 117, 108, 108]),
-        Raw { bytes: raw } => writer_bytes(writer, raw),
-        String { bytes: raw } => writer_byte(writer_bytes(writer_byte(writer, 34), raw), 34),
-        Array { items: items } => writer_byte(write_json(items, writer_byte(writer, 91)), 93),
-        Object { fields: fields } => writer_byte(write_json(fields, writer_byte(writer, 123)), 125),
+        Raw { start: start, length: length } => writer_source_range(writer, document, start, length),
+        String { start: start, length: length } => writer_byte(
+            writer_source_range(writer_byte(writer, 34), document, start, length),
+            34
+        ),
+        Array { items: items } => writer_byte(write_json(items, writer_byte(writer, 91), document), 93),
+        Object { fields: fields } => writer_byte(write_json(fields, writer_byte(writer, 123), document), 125),
         ArrayNil => writer,
         ArrayCons { head: head, tail: tail } => match tail {
-            ArrayNil => write_json(head, writer),
+            ArrayNil => write_json(head, writer, document),
             Empty => JsonOrderWriterV1 { ..writer, ok: false },
             Null => JsonOrderWriterV1 { ..writer, ok: false },
-            Raw { bytes: raw } => JsonOrderWriterV1 { ..writer, ok: false },
-            String { bytes: raw } => JsonOrderWriterV1 { ..writer, ok: false },
+            Raw { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
+            String { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
             Array { items: items } => JsonOrderWriterV1 { ..writer, ok: false },
             Object { fields: fields } => JsonOrderWriterV1 { ..writer, ok: false },
-            ArrayCons { head: next_head, tail: next_tail } => write_json(tail, writer_byte(write_json(head, writer), 44)),
+            ArrayCons { head: next_head, tail: next_tail } => write_json(
+                tail,
+                writer_byte(write_json(head, writer, document), 44),
+                document
+            ),
             ObjectNil => JsonOrderWriterV1 { ..writer, ok: false },
             ObjectCons { key: key, value: inner, tail: rest } => JsonOrderWriterV1 { ..writer, ok: false }
         },
         ObjectNil => writer,
         ObjectCons { key: key, value: inner, tail: tail } => match tail {
-            ObjectNil => write_json(inner, writer_byte(writer_key(writer, key), 58)),
+            ObjectNil => write_json(inner, writer_byte(writer_key(writer, key, document), 58), document),
             Empty => JsonOrderWriterV1 { ..writer, ok: false },
             Null => JsonOrderWriterV1 { ..writer, ok: false },
-            Raw { bytes: raw } => JsonOrderWriterV1 { ..writer, ok: false },
-            String { bytes: raw } => JsonOrderWriterV1 { ..writer, ok: false },
+            Raw { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
+            String { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
             Array { items: items } => JsonOrderWriterV1 { ..writer, ok: false },
             Object { fields: fields } => JsonOrderWriterV1 { ..writer, ok: false },
             ArrayNil => JsonOrderWriterV1 { ..writer, ok: false },
             ArrayCons { head: next_head, tail: next_tail } => JsonOrderWriterV1 { ..writer, ok: false },
-            ObjectCons { key: next_key, value: next_value, tail: next_tail } => write_json(tail, writer_byte(write_json(inner, writer_byte(writer_key(writer, key), 58)), 44))
+            ObjectCons { key: next_key, value: next_value, tail: next_tail } => write_json(
+                tail,
+                writer_byte(
+                    write_json(inner, writer_byte(writer_key(writer, key, document), 58), document),
+                    44
+                ),
+                document
+            )
         }
     };
 }
 
 fn empty_output_chunk() -> (result: JsonOrderChunkV1) {
-    return JsonOrderChunkV1 { bytes: [0; 1024], length: 0 };
+    return JsonOrderChunkV1 { bytes: [0; 64], length: 0 };
 }
 
 fn output_completed_chunks(
     completed: JsonOrderChunkListV1,
-    chunks: [JsonOrderChunkV1; 8],
+    chunks: [JsonOrderChunkV1; 128],
     index: u64
-) -> (result: [JsonOrderChunkV1; 8]) {
+) -> (result: [JsonOrderChunkV1; 128]) {
     return match completed {
         ChunkNil => chunks,
         ChunkCons { head: head, tail: tail } => output_completed_chunks(
@@ -737,8 +805,8 @@ fn output_completed_chunks(
 
 fn output_chunks(writer: JsonOrderWriterV1) -> (result: JsonOrderChunkBuilderV1) {
     let empty: JsonOrderChunkV1 = empty_output_chunk();
-    let initial: [JsonOrderChunkV1; 8] = [empty; 8];
-    let completed: [JsonOrderChunkV1; 8] = output_completed_chunks(
+    let initial: [JsonOrderChunkV1; 128] = [empty; 128];
+    let completed: [JsonOrderChunkV1; 128] = output_completed_chunks(
         writer.completed,
         initial,
         writer.completed_count -% 1
@@ -840,8 +908,8 @@ fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool, scanned: js
     return ParseStateV1 { ..empty_parse_state(), valid: false };
 }
 
-fn writer_for_parse(parsed: ParseStateV1) -> (result: JsonOrderWriterV1) {
-    if parsed.valid { return write_json(parsed.root, writer_empty()); }
+fn writer_for_parse(parsed: ParseStateV1, document: JsonTokenDocumentV1) -> (result: JsonOrderWriterV1) {
+    if parsed.valid { return write_json(parsed.root, writer_empty(), document); }
     return JsonOrderWriterV1 { ..writer_empty(), ok: false };
 }
 
@@ -866,7 +934,7 @@ fn public_result_json_key_order_app_v1(context: ApplicationContext) -> (result: 
     let request_valid: bool = valid_order_request(request, shape);
     let scanned: json.ScanState = scan_document(request.document);
     let parsed: ParseStateV1 = parse_checked(request.document, request_valid, scanned);
-    let writer: JsonOrderWriterV1 = writer_for_parse(parsed);
+    let writer: JsonOrderWriterV1 = writer_for_parse(parsed, request.document);
     let result: JsonOrderResultV1 = order_result(request_valid && json.is_valid(scanned) && parsed.valid, request.input_sha256, writer);
     let published: u64 = structured_write(context.argv[1], result_schema_v1(), result);
     if published == 0 {

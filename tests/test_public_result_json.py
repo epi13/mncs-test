@@ -533,6 +533,11 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
     assert public_calls
     assert all(call["status"] == "success" for call in public_calls)
     assert all(call.get("document_bytes", 0) > 0 for call in public_calls)
+    assert any(
+        call["application"] == "test-public-result-json-key-order.json"
+        and call.get("document_bytes", 0) > 4096
+        for call in public_calls
+    )
     assert all(not call.get("has_typed_tree") for call in public_calls)
     assert compatibility_documents == []
 

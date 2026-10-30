@@ -59,7 +59,7 @@ PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 8192
-PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 128
+PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 512
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/2"
@@ -80,7 +80,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.17"
+RUNNER_VERSION = "0.2.18"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -222,7 +222,11 @@ def _native_public_result_document_request(
 
 
 def _decode_public_result_chunks(
-    result: dict[str, Any], *, byte_length: int, maximum_chunks: int
+    result: dict[str, Any],
+    *,
+    byte_length: int,
+    maximum_chunks: int,
+    maximum_chunk_bytes: int = 1024,
 ) -> bytes:
     raw_chunks = result.get("chunks")
     chunk_count = result.get("chunk_count")
@@ -244,7 +248,7 @@ def _decode_public_result_chunks(
         if (
             not isinstance(length, int)
             or isinstance(length, bool)
-            or not 0 <= length <= 1024
+            or not 0 <= length <= maximum_chunk_bytes
         ):
             raise AdapterError("MNCS public-result JSON app returned an invalid chunk length")
         if isinstance(raw_bytes, str):
@@ -396,7 +400,8 @@ def _native_public_result_key_order(
     ordered = _decode_public_result_chunks(
         result,
         byte_length=byte_length,
-        maximum_chunks=8,
+        maximum_chunks=128,
+        maximum_chunk_bytes=64,
     )
     return ordered
 
