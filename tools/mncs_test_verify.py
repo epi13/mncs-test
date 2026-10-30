@@ -1564,39 +1564,56 @@ def _selection_request_size(scans: list[dict]) -> int:
     return len(json.dumps(request).encode("utf-8"))
 
 
-def _identity_bytes(values: list[str]) -> int:
-    return sum(len(value.encode("utf-8")) for value in values)
+def _selection_work(
+    scans: list[tuple[dict, list[dict]]], *, mncs: str, cwd: Path,
+    environment: dict[str, str], stats: dict | None = None,
+) -> list[dict]:
+    """Measure wire byte lengths and ask MNCS for comparison-work costs."""
+    def measured_record(record: dict) -> dict:
+        return {
+            "present": record["present"], "valid": record["valid"],
+            "byte_count": sum(len(value.encode("utf-8")) for value in record["identities"]),
+        }
 
-
-def _selection_base_identity_work(scan: dict) -> int:
-    inventory = scan["inventory"]
-    count = len(inventory)
-    maximum_length = max((len(item.encode("utf-8")) for item in inventory), default=0)
-    prefix_count = 0
-    wildcard = not scan["patterns"]
-    for pattern in scan["patterns"]:
-        if not pattern["is_text"]:
-            break
-        if pattern["identity"] == "*":
-            wildcard = True
-            break
-        prefix_count += 1
-    resolution_work = (
-        prefix_count * count * maximum_length
-        + prefix_count * prefix_count * maximum_length
-    )
-    sort_count = 0 if wildcard else min(prefix_count, MAX_PATTERNS, count)
-    sort_work = (sort_count * max(sort_count - 1, 0) // 2) * maximum_length
-    inventory_order_work = max(count - 1, 0) * maximum_length
-    return resolution_work + sort_work + inventory_order_work
-
-
-def _selection_record_work(required_bytes: int, record: dict) -> int:
-    if not record["present"] or not record["valid"]:
-        return 0
-    values = record["identities"]
-    record_bytes = _identity_bytes(values)
-    return min(required_bytes, record_bytes)
+    request = {
+        "schema_version": "mncs.test-selection-work-request/1",
+        "scans": [{
+            "limit": MAX_SELECTION_BATCH_IDENTITY_WORK,
+            "patterns": scan["patterns"],
+            "inventory_lengths": [len(value.encode("utf-8")) for value in scan["inventory"]],
+            "head": measured_record(scan["head"]),
+            "candidates": [measured_record(record) for record in candidates],
+        } for scan, candidates in scans],
+    }
+    if stats is not None:
+        stats["subprocesses"] += 1
+        stats["selection_work_runs"] = stats.get("selection_work_runs", 0) + 1
+    try:
+        result = run_native_app(
+            "test-selection-work.json", request,
+            request_schema="mncs.test-selection-work-request/1",
+            result_schema="mncs.test-selection-work/1",
+            mncs=mncs, cwd=cwd, environment=environment,
+        )
+    except NativeTransportError as error:
+        raise VerifyError(f"native selection work preflight failed: {error}") from error
+    if (type(result.get("scan_count")) is not int or result["scan_count"] != len(scans)
+            or not isinstance(result.get("scans"), list) or len(result["scans"]) != 8):
+        raise VerifyError("native selection work preflight returned malformed scans")
+    costs = result["scans"][:len(scans)]
+    for cost, (_, candidates) in zip(costs, scans, strict=True):
+        if (
+            not isinstance(cost, dict)
+            or type(cost.get("bounded")) is not bool
+            or type(cost.get("candidate_count")) is not int
+            or cost["candidate_count"] != len(candidates)
+            or not isinstance(cost.get("candidate_work"), list)
+            or len(cost["candidate_work"]) != MAX_IDENTITIES
+            or any(type(value) is not int or not 0 <= value <= MAX_SELECTION_BATCH_IDENTITY_WORK
+                   for value in (cost.get("base_work"), cost.get("head_work"), *cost["candidate_work"]))
+        ):
+            raise VerifyError("native selection work preflight returned malformed costs")
+    return costs
 
 
 def _selection_scan_specs(
@@ -1605,6 +1622,7 @@ def _selection_scan_specs(
     candidates: list[dict],
     *,
     include_head: bool,
+    work: dict,
 ) -> tuple[list[dict], bool]:
     """Bound one world's request bytes and identity-comparison work."""
     empty_head = {"present": False, "valid": False, "count": 0, "identities": []}
@@ -1615,12 +1633,11 @@ def _selection_scan_specs(
     if _selection_request_size([scan]) > MAX_SELECTION_REQUEST_BYTES:
         return [], False
 
-    required_bytes = _identity_bytes(base_scan["inventory"])
-    base_work = _selection_base_identity_work(base_scan)
-    if base_work > MAX_SELECTION_BATCH_IDENTITY_WORK:
+    base_work = work["base_work"]
+    if not work["bounded"]:
         return [], False
     head_work = (
-        _selection_record_work(required_bytes, base_scan["head"])
+        work["head_work"]
         if include_head else 0
     )
     if base_work + head_work > MAX_SELECTION_BATCH_IDENTITY_WORK:
@@ -1653,7 +1670,7 @@ def _selection_scan_specs(
         selected_work = base_work
 
     for candidate_index, candidate in enumerate(candidates):
-        candidate_work = _selection_record_work(required_bytes, candidate)
+        candidate_work = work["candidate_work"][candidate_index]
         trial_records = [*selected_records, candidate]
         trial = dict(base_scan)
         trial["head"] = base_scan["head"] if head_pending else empty_head
@@ -1706,6 +1723,7 @@ def evaluate_selection_admissions(
         raise VerifyError("native selection scan batch is outside its bound")
 
     admissions = []
+    pending_scans: list[tuple[int, dict, list[dict]]] = []
     specs: list[dict] = []
     for index, world in enumerate(worlds):
         candidates = recall_candidates(world) if include_candidates[index] else []
@@ -1728,11 +1746,18 @@ def evaluate_selection_admissions(
         candidate_records = [
             _recorded_selection(candidate, present=True) for candidate in candidates
         ]
-        world_specs, bounded = _selection_scan_specs(
-            index, base_scan, candidate_records, include_head=include_heads[index]
-        )
-        if bounded:
-            specs.extend(world_specs)
+        pending_scans.append((index, base_scan, candidate_records))
+
+    for offset in range(0, len(pending_scans), 8):
+        pending = pending_scans[offset:offset + 8]
+        costs = _selection_work([(scan, records) for _, scan, records in pending],
+                                mncs=mncs, cwd=cwd, environment=environment, stats=stats)
+        for (index, base_scan, candidate_records), work in zip(pending, costs, strict=True):
+            world_specs, bounded = _selection_scan_specs(
+                index, base_scan, candidate_records, include_head=include_heads[index], work=work,
+            )
+            if bounded:
+                specs.extend(world_specs)
 
     batches: list[list[dict]] = []
     batch: list[dict] = []

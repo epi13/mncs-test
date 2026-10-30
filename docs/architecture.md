@@ -511,3 +511,20 @@ that accepts a manifest and emits `mncs.check-result/1`; future Forge can
 orchestrate this seam exactly like other independent providers. It should not
 reimplement manifest semantics or inspect individual assertion fields to
 decide family health.
+
+## Verification comparison-work admission
+
+`mncs.test.verification_selection_v1::selection_work_app_v1` owns the
+conservative comparison-work model used before receipt selection. The model
+counts pattern resolution, duplicate checks, required-set sorting, inventory
+ordering, and recorded-set comparisons. Its cumulative arithmetic uses
+`mncs.std.budget.v1`; limits remain Test policy. Rejection is absorbing and
+never authorizes receipt reuse.
+
+The adapter measures UTF-8 byte lengths and aggregate receipt bytes, submits
+up to eight bounded scans per native preflight, validates returned costs,
+and packs the actual comparison requests within their JSON and process
+bounds. It contains no alternative work model. Aggregate receipt lengths
+keep the largest preflight within the existing structured-node limit.
+The additional preflight process is explicit in verification statistics as
+`selection_work_runs`; it is not evidence of reduced total execution cost.

@@ -642,6 +642,18 @@ def test_native_selection_batches_by_head_and_candidate_comparisons(
     batch_sizes: list[int] = []
 
     def fake_native_app(_descriptor, request, **_kwargs):
+        if _descriptor == "test-selection-work.json":
+            # Each fixture scan has a wildcard and one two-byte identity.
+            # Fixed costs keep this transport test independent of policy.
+            assert all(scan["inventory_lengths"] == [2] for scan in request["scans"])
+            costs = [{
+                "bounded": True, "base_work": 0, "head_work": 2,
+                "candidate_count": len(scan["candidates"]),
+                "candidate_work": [2] * len(scan["candidates"])
+                + [0] * (64 - len(scan["candidates"])),
+            } for scan in request["scans"]]
+            return {"schema_version": "mncs.test-selection-work/1",
+                    "scan_count": len(costs), "scans": costs + [{}] * (8 - len(costs))}
         scans = request["scans"]
         batch_sizes.append(sum(
             int(scan["head"]["present"]) + len(scan["candidates"])
@@ -712,7 +724,7 @@ def test_native_selection_batches_by_head_and_candidate_comparisons(
 
     assert [len(item["candidate_matches"]) for item in decisions] == [64] * 5
     assert batch_sizes == [195, 130]
-    assert stats == {"subprocesses": 2, "selection_runs": 2}
+    assert stats == {"subprocesses": 3, "selection_runs": 2, "selection_work_runs": 1}
 
 
 def test_semantic_recall_chunks_candidate_comparisons(

@@ -1,0 +1,39 @@
+{
+  "schema_version": "mncs.development-evidence/1",
+  "session_id": "ses_f9fdaaaa97260bed",
+  "responsibility": "Verification identity-comparison work estimation, including pattern-prefix, duplicate-detection, sorting, inventory ordering, and receipt comparison costs.",
+  "native_owner": "mncs.test.verification_selection_v1",
+  "shared_library": "mncs.std.budget.v1",
+  "stdlib_main_commit": "c606f8f",
+  "displaced_host_functions": [
+    "_selection_base_identity_work",
+    "_selection_record_work"
+  ],
+  "retained_host_boundaries": [
+    "UTF-8 byte measurements and shape validation",
+    "JSON request-size and OS process bounds",
+    "Packing requests using returned MNCS costs",
+    "Receipt and Store transport"
+  ],
+  "verification": {
+    "command": "pytest tests/test_selection_work.py tests/test_verifier_units.py tests/test_verification_coherence.py tests/test_verify.py -q",
+    "result": "72 passed",
+    "coverage": [
+      "Independent fixed arithmetic expectations, Unicode byte sizes, invalid and wildcard patterns, exact matching and stale receipts",
+      "Maximum 8-scan / 64-candidate preflight within the existing structured-node and fuel limits",
+      "Cold execution, warm reuse, irrelevant and relevant edits, rollback, Store outage, history forks and overflow, projection recovery, concurrent cold verification, and actual CLI transport"
+    ]
+  },
+  "development_pressure": {
+    "observation": "Per-candidate length arrays made the maximum 8-scan preflight exceed the runtime 32768-node contract.",
+    "correction": "Transport measures aggregate receipt byte counts; MNCS retains cost semantics. No node or fuel limit increased."
+  },
+  "resource_observation": {
+    "five_world_fixture": {
+      "selection_processes": 2,
+      "work_preflight_processes": 1,
+      "previous_unbatched_prototype_preflight_processes": 5
+    },
+    "interpretation": "Batching avoids four added preflight processes in this fixture. Native migration still adds one preflight process; no net speedup or burden-reduction claim."
+  }
+}

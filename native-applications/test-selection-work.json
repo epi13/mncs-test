@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.selection-work",
+  "source": "../native/mncs/test/verification_selection_v1.mncs",
+  "module": "mncs.test.verification_selection_v1",
+  "entry_function": "selection_work_app_v1",
+  "profile": "0.18",
+  "interface_identity": "7f8bde6a0f5bf4d68c811983a2c9f65d983167ff66982efbafd24ee69198cdc3",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": [
+    "test_artifact"
+  ]
+}

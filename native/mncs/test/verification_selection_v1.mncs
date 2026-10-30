@@ -7,6 +7,105 @@ mncs 0.18;
 module mncs.test.verification_selection_v1;
 
 use mncs.std.application.v1;
+use mncs.std.budget.v1 as budget;
+
+// Preflight works on byte lengths measured by transport, not the expensive
+// identity comparisons themselves. Pattern interpretation and the conservative
+// work model belong here with the selection algorithm they bound.
+record WorkRecordV1 {
+    present: bool,
+    valid: bool,
+    byte_count: u64
+}
+
+record WorkScanV1 {
+    limit: u64,
+    patterns: [SelectionPatternV1; up_to 64],
+    inventory_lengths: [u64; up_to 64],
+    head: WorkRecordV1,
+    candidates: [WorkRecordV1; up_to 64]
+}
+
+record WorkResultV1 {
+    schema_version: [byte; up_to 64],
+    bounded: bool,
+    base_work: u64,
+    head_work: u64,
+    candidate_count: u64,
+    candidate_work: [u64; 64]
+}
+
+record WorkRequestV1 {
+    schema_version: [byte; up_to 64],
+    scans: [WorkScanV1; up_to 8]
+}
+record WorkBatchResultV1 {
+    schema_version: [byte; up_to 64],
+    scan_count: u64,
+    scans: [WorkResultV1; 8]
+}
+
+record WorkPatternStateV1 { count: u64, wildcard: bool, active: bool }
+record WorkInventoryStateV1 { bytes: u64, maximum: u64, valid: bool }
+
+fn work_inventory(lengths: [u64; up_to 64]) -> (result: WorkInventoryStateV1) {
+    let seed: WorkInventoryStateV1 = WorkInventoryStateV1 { bytes: 0, maximum: 0, valid: true };
+    iterate i over lengths carrying state: WorkInventoryStateV1 = seed {
+        next state = WorkInventoryStateV1 {
+            bytes: state.bytes +% lengths[i],
+            maximum: select(lengths[i] > state.maximum, lengths[i], state.maximum),
+            valid: state.valid && lengths[i] <= 1024
+        };
+    }
+    return state;
+}
+
+fn work_record(required: u64, observed_record: WorkRecordV1) -> (result: u64) {
+    if !observed_record.present || !observed_record.valid {
+        return 0;
+    }
+    return select(required < observed_record.byte_count, required, observed_record.byte_count);
+}
+
+fn work_estimate(request: WorkScanV1) -> (result: WorkResultV1) {
+    let inventory: WorkInventoryStateV1 = work_inventory(request.inventory_lengths);
+    let seed: WorkPatternStateV1 = WorkPatternStateV1 {
+        count: 0, wildcard: request.patterns.len == 0, active: true
+    };
+    iterate i over request.patterns carrying state: WorkPatternStateV1 = seed {
+        let pattern: SelectionPatternV1 = request.patterns[i];
+        let star: bool = same_identity(pattern.identity, star_identity());
+        next state = WorkPatternStateV1 {
+            count: state.count +% select(state.active && pattern.is_text && !star, 1, 0),
+            wildcard: state.wildcard || (state.active && pattern.is_text && star),
+            active: state.active && pattern.is_text && !star
+        };
+    }
+    let count: u64 = request.inventory_lengths.len;
+    let sort_count: u64 = select(state.wildcard, 0, select(state.count < 8, state.count, 8));
+    let sorted: u64 = select(sort_count < count, sort_count, count);
+    let sort_pairs: u64 = sorted * select(sorted > 0, sorted -% 1, 0) / 2;
+    let resolve: budget.Budget = budget.reserve_product(budget.start(request.limit), state.count * count, inventory.maximum);
+    let duplicates: budget.Budget = budget.reserve_product(resolve, state.count * state.count, inventory.maximum);
+    let ordering: budget.Budget = budget.reserve_product(duplicates, sort_pairs, inventory.maximum);
+    let base: budget.Budget = budget.reserve_product(ordering, select(count > 0, count -% 1, 0), inventory.maximum);
+    let initial: WorkResultV1 = WorkResultV1 {
+        schema_version: work_result_schema(),
+        bounded: inventory.valid && request.head.byte_count <= 65536 && !base.exceeded,
+        base_work: base.used,
+        head_work: work_record(inventory.bytes, request.head),
+        candidate_count: request.candidates.len,
+        candidate_work: [0; 64]
+    };
+    iterate i over request.candidates carrying result: WorkResultV1 = initial {
+        next result = WorkResultV1 {
+            ..result,
+            bounded: result.bounded && request.candidates[i].byte_count <= 65536,
+            candidate_work: replace(result.candidate_work, i, work_record(inventory.bytes, request.candidates[i]))
+        };
+    }
+    return result;
+}
 
 record SelectionPatternV1 {
     is_text: bool,
@@ -421,6 +520,42 @@ fn selection_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
     let published: u64 = structured_write(context.argv[1], result_schema(), result);
     if published == 0 {
         return failure([115, 101, 108, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 4);
+    }
+    return success([]);
+}
+
+fn work_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 45, 119, 111, 114, 107, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn work_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 115, 101, 108, 101, 99, 116, 105, 111, 110, 45, 119, 111, 114, 107, 47, 49];
+}
+
+fn selection_work_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118], 2);
+    }
+    let request: WorkRequestV1 = structured_read(context.argv[0], work_request_schema());
+    let empty: WorkResultV1 = WorkResultV1 {
+        schema_version: work_result_schema(), bounded: false, base_work: 0,
+        head_work: 0, candidate_count: 0, candidate_work: [0; 64]
+    };
+    let seed: WorkBatchResultV1 = WorkBatchResultV1 {
+        schema_version: work_result_schema(), scan_count: request.scans.len, scans: [empty; 8]
+    };
+    iterate i over request.scans carrying result: WorkBatchResultV1 = seed {
+        next result = WorkBatchResultV1 {
+            ..result, scans: replace(result.scans, i, work_estimate(request.scans[i]))
+        };
+    }
+    let published: u64 = structured_write(context.argv[1], work_result_schema(), result);
+    if published == 0 {
+        return failure([112, 117, 98, 108, 105, 115, 104], 4);
     }
     return success([]);
 }
