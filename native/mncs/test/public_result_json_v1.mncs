@@ -376,7 +376,7 @@ fn as_window_json_request(request: JsonWindowRequestV1) -> (result: JsonRequestV
 
 fn valid_window_request(request: JsonWindowRequestV1) -> (result: bool) {
     if !same_bytes(request.schema_version, window_request_schema())
-        || request.window_start >= 32768 {
+        || request.window_start >= 65536 {
         return false;
     }
     let initial: bool = request.window_start == 0
@@ -558,7 +558,7 @@ fn writer_empty(window_start: u64) -> (result: JsonWriterV1) {
 }
 
 fn writer_byte(writer: JsonWriterV1, value: byte) -> (result: JsonWriterV1) {
-    if !writer.ok || writer.total_length >= 32768 {
+    if !writer.ok || writer.total_length >= 65536 {
         return JsonWriterV1 { ..writer, ok: false };
     }
     let absolute: u64 = writer.total_length;
@@ -1095,7 +1095,7 @@ fn public_result_json_window_app_v1(context: ApplicationContext) -> (result: App
         request.stack,
         request.visited
     );
-    if !serialized.writer.ok || serialized.writer.total_length > 32768 {
+    if !serialized.writer.ok || serialized.writer.total_length > 65536 {
         return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 101, 120, 99, 101, 101, 100, 115, 32, 98, 111, 117, 110, 100], 5);
     }
     if (!serialized.done && serialized.writer.length == 0)

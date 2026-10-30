@@ -58,7 +58,7 @@ PUBLIC_RESULT_JSON_MAX_NODES = 512
 PUBLIC_RESULT_JSON_MAX_DEPTH = 63
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 8192
-PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 32684
+PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
@@ -361,7 +361,7 @@ def _native_public_result_payload(
                 environment=environment,
                 step_budget=8_000_000,
             )
-        except NativeBudgetExhaustedError:
+        except (NativeBudgetExhaustedError, NativeInputBoundError):
             return None
         except NativeTransportError as error:
             raise AdapterError(f"native Test public result JSON failed: {error}") from error
@@ -416,7 +416,7 @@ def _native_public_result_payload(
                 environment=environment,
                 step_budget=8_000_000,
             )
-        except NativeBudgetExhaustedError:
+        except (NativeBudgetExhaustedError, NativeInputBoundError):
             return None
         except NativeTransportError as error:
             raise AdapterError(f"native Test public result JSON window failed: {error}") from error

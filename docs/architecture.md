@@ -115,16 +115,19 @@ most 8,192 bytes. Larger documents use up to 32 continuation calls, each
 carrying at most 8,192 JSON bytes plus a
 bounded traversal stack and SHA-256 state. A page can stop before a whole value
 when its conservative size bound would cross the page limit, so some page
-capacity may remain unused. The aggregate document limit is 32,684 bytes. The
+capacity may remain unused. The aggregate document limit is 65,536 bytes. The
 same window application updates `mncs.std.sha256.v1` as it emits each page and
 returns the final digest with the completed document. An independent host
 SHA-256 check validates the result. The native path accepts at most 512 values,
 depth 63,
-64 children per object, 256-byte keys, 1,024-byte scalar text, and 32,684 output
+64 children per object, 256-byte keys, 1,024-byte scalar text, and 65,536 output
 bytes. Python still projects arbitrary runtime values into that request,
 reassembles output pages, writes files, and keeps the compatibility serializer
 for values outside the native bounds or when a bounded MNCS serialization
-reports `budget_exhausted`.
+reports `budget_exhausted`. The structured application transport also caps an
+input artifact at 32,768 nodes; that specific input-bound result uses the
+compatibility serializer, while genuine native application and runtime errors
+remain errors.
 
 The family-check response records `execution.check_result_sha256` from the
 serialized `mncs.check-result/1` document produced by this same public-result
