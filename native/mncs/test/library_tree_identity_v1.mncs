@@ -1,0 +1,148 @@
+mncs 0.18;
+
+// mncs.test.library_tree_identity_v1 owns the canonical hash fold for a
+// deterministically enumerated library tree. Filesystem traversal and leaf
+// reads remain with the host adapter; each leaf arrives with its SHA-256
+// text and this module hashes `path NUL leaf-hex LF` in input order.
+module mncs.test.library_tree_identity_v1;
+
+use mncs.std.application.v1;
+use mncs.std.sha256.v1 as sha256;
+
+record LibraryTreeEntryV1 {
+    path: [byte; up_to 1024],
+    leaf_sha256: [byte; up_to 64]
+}
+
+record LibraryTreeIdentityRequestV1 {
+    schema_version: [byte; up_to 64],
+    entry_count: u64,
+    entries: [LibraryTreeEntryV1; up_to 128]
+}
+
+record LibraryTreeIdentityResultV1 {
+    schema_version: [byte; up_to 64],
+    entry_count: u64,
+    digest: [byte; 32]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 108, 105, 98, 114, 97, 114, 121, 45, 116, 114, 101, 101, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 108, 105, 98, 114, 97, 114, 121, 45, 116, 114, 101, 101, 45, 105, 100, 101, 110, 116, 105, 116, 121, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len {
+        return false;
+    }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn valid_leaf_digest(value: [byte; up_to 64]) -> (result: bool) {
+    if value.len != 64 {
+        return false;
+    }
+    iterate i over value carrying valid: bool = true {
+        let current: byte = value[i];
+        next valid = valid && (
+            (current >= 48 && current <= 57)
+            || (current >= 97 && current <= 102)
+        );
+    }
+    return valid;
+}
+
+fn valid_entry(entry: LibraryTreeEntryV1) -> (result: bool) {
+    return entry.path.len > 0 && valid_leaf_digest(entry.leaf_sha256);
+}
+
+fn valid_request(request: LibraryTreeIdentityRequestV1) -> (result: bool) {
+    if !same_bytes(request.schema_version, request_schema())
+        || request.entry_count != request.entries.len
+        || request.entry_count > 128 {
+        return false;
+    }
+    iterate i over request.entries carrying valid: bool = true {
+        next valid = valid && valid_entry(request.entries[i]);
+    }
+    return valid;
+}
+
+fn update_path_block(
+    state: sha256.DigestState,
+    path: [byte; up_to 1024],
+    length: u64,
+    offset: u64
+) -> (result: sha256.DigestState) {
+    if offset < length {
+        let remaining: u64 = length -% offset;
+        let chunk_length: u64 = select(remaining < 64, remaining, 64);
+        let end: u64 = offset +% chunk_length;
+        let chunk: [byte; up_to 64] = path[offset..end];
+        return sha256.update_standard(state, chunk, chunk_length);
+    }
+    return state;
+}
+
+fn update_path(
+    state: sha256.DigestState,
+    path: [byte; up_to 1024],
+    length: u64
+) -> (result: sha256.DigestState) {
+    let offsets: [u64; 16] = [0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960];
+    iterate i over offsets carrying current: sha256.DigestState = state {
+        next current = update_path_block(current, path, length, offsets[i]);
+    }
+    return current;
+}
+
+fn update_entry(
+    state: sha256.DigestState,
+    entry: LibraryTreeEntryV1
+) -> (result: sha256.DigestState) {
+    let with_path: sha256.DigestState = update_path(state, entry.path, entry.path.len);
+    let with_separator: sha256.DigestState = sha256.update_standard(with_path, [0], 1);
+    let with_leaf: sha256.DigestState = sha256.update_standard(
+        with_separator,
+        entry.leaf_sha256,
+        entry.leaf_sha256.len
+    );
+    return sha256.update_standard(with_leaf, [10], 1);
+}
+
+fn tree_digest(request: LibraryTreeIdentityRequestV1) -> (result: [byte; 32]) {
+    iterate i over request.entries carrying state: sha256.DigestState = sha256.init() {
+        next state = update_entry(state, request.entries[i]);
+    }
+    return sha256.finalize_standard(state);
+}
+
+fn library_tree_identity_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 108, 105, 98, 114, 97, 114, 121, 32, 116, 114, 101, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: LibraryTreeIdentityRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 108, 105, 98, 114, 97, 114, 121, 32, 116, 114, 101, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let result: LibraryTreeIdentityResultV1 = LibraryTreeIdentityResultV1 {
+        schema_version: result_schema(),
+        entry_count: request.entry_count,
+        digest: tree_digest(request)
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([108, 105, 98, 114, 97, 114, 121, 32, 116, 114, 101, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

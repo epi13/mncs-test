@@ -86,6 +86,11 @@ TEST_RESULT_IDENTITY_REQUEST_SCHEMA = "mncs.test-result-identity-request/1"
 TEST_RESULT_IDENTITY_RESULT_SCHEMA = "mncs.test-result-identity/1"
 TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA = "mncs.test-result-identity-stream-request/1"
 TEST_RESULT_IDENTITY_STREAM_RESULT_SCHEMA = "mncs.test-result-identity-stream/1"
+LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA = "mncs.test-library-tree-identity-request/1"
+LIBRARY_TREE_IDENTITY_RESULT_SCHEMA = "mncs.test-library-tree-identity/1"
+LIBRARY_TREE_IDENTITY_MAX_ENTRIES = 128
+LIBRARY_TREE_IDENTITY_MAX_PATH_BYTES = 1024
+LIBRARY_TREE_IDENTITY_MAX_REQUEST_BYTES = 65_536
 TEST_RESULT_IDENTITY_MAX_BYTES = 65536
 TEST_RESULT_IDENTITY_MAX_PAYLOADS = 16
 TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
@@ -570,18 +575,90 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def hash_tree(path: Path) -> str:
-    """Hash a directory by sorted relative names and file bytes.
+def library_tree_identity_sha256(
+    entries: list[tuple[str, str]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str:
+    """Hash bounded ordered path/leaf records through the Test MNCS app."""
+    if len(entries) > LIBRARY_TREE_IDENTITY_MAX_ENTRIES:
+        raise NativeInputBoundError(
+            "library tree exceeds the 128-entry native identity bound",
+            reason="library_tree_entry_count",
+        )
+    wire_entries: list[dict[str, list[int]]] = []
+    for relative, leaf_digest in entries:
+        path_bytes = relative.encode("utf-8")
+        if not path_bytes or len(path_bytes) > LIBRARY_TREE_IDENTITY_MAX_PATH_BYTES:
+            raise NativeInputBoundError(
+                "library tree path exceeds the 1,024-byte native identity bound",
+                reason="library_tree_path_length",
+            )
+        if not SHA256_HEX.fullmatch(leaf_digest):
+            raise AdapterError("library tree leaf digest is not lowercase SHA-256 hex")
+        wire_entries.append(
+            {
+                "path": list(path_bytes),
+                "leaf_sha256": list(leaf_digest.encode("ascii")),
+            }
+        )
 
-    This is provenance only.  It is intentionally kept in the adapter until
-    MNCS has a portable directory enumeration primitive; the limitation is
-    recorded as MNCS-TEST-P-002 / Commons tooling pressure.
+    request = {
+        "schema_version": LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA,
+        "entry_count": len(wire_entries),
+        "entries": wire_entries,
+    }
+    if len(json.dumps(request).encode("utf-8")) > LIBRARY_TREE_IDENTITY_MAX_REQUEST_BYTES:
+        raise NativeInputBoundError(
+            "library tree identity request exceeds its 65,536-byte native bound",
+            reason="library_tree_request_bytes",
+        )
+    result = run_native_app(
+        "test-library-tree-identity.json",
+        request,
+        request_schema=LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA,
+        result_schema=LIBRARY_TREE_IDENTITY_RESULT_SCHEMA,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        step_budget=TEST_RESULT_IDENTITY_MAX_STEP_BUDGET,
+    )
+    digest = result.get("digest")
+    if (
+        result.get("entry_count") != len(entries)
+        or not isinstance(digest, str)
+        or not SHA256_HEX.fullmatch(digest)
+    ):
+        raise AdapterError("MNCS library tree identity returned an invalid digest result")
+    return digest
+
+
+def _hash_tree_with_method(
+    path: Path,
+    *,
+    mncs: str | None = None,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Return the tree digest and report whether MNCS or the host computed it.
+
+    Filesystem enumeration and leaf reads stay in the adapter. For bounded
+    directories, MNCS owns the ordered `path NUL leaf-digest LF` fold. The
+    historical host hash remains an explicit fallback for unsupported bounds
+    and unavailable native execution.
     """
-
     if path.is_file():
-        return sha256_file(path)
+        return sha256_file(path), {
+            "algorithm": "sha256-file/1",
+            "implementation": "host",
+        }
     if not path.is_dir():
-        return sha256_bytes(f"missing:{path}".encode())
+        return sha256_bytes(f"missing:{path}".encode()), {
+            "algorithm": "sha256-missing-path/1",
+            "implementation": "host",
+        }
     entries: list[tuple[str, str]] = []
     for root, directories, files in os.walk(path, followlinks=False):
         directories.sort()
@@ -595,7 +672,51 @@ def hash_tree(path: Path) -> str:
             except OSError:
                 item_hash = sha256_bytes(f"unreadable:{relative}".encode())
             entries.append((relative, item_hash))
-    return sha256_bytes("".join(f"{name}\0{digest}\n" for name, digest in entries).encode())
+
+    if mncs is not None and cwd is not None and environment is not None:
+        try:
+            digest = library_tree_identity_sha256(
+                entries,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            return digest, {
+                "algorithm": "sha256-library-tree-records/1",
+                "implementation": "mncs.test.library_tree_identity_v1",
+                "entries": len(entries),
+            }
+        except NativeInputBoundError as error:
+            fallback_reason = error.reason
+            fallback_detail = str(error)
+        except NativeBudgetExhaustedError as error:
+            fallback_reason = "native_budget_exhausted"
+            fallback_detail = str(error)
+        except NativeTransportError as error:
+            fallback_reason = "native_transport_failure"
+            fallback_detail = str(error)
+        except AdapterError as error:
+            fallback_reason = "native_result_invalid"
+            fallback_detail = str(error)
+    else:
+        fallback_reason = "native_context_unavailable"
+        fallback_detail = None
+
+    material = "".join(f"{name}\0{digest}\n" for name, digest in entries).encode()
+    hashing: dict[str, Any] = {
+        "algorithm": "sha256-library-tree-records/1",
+        "implementation": "host",
+        "entries": len(entries),
+        "fallback_reason": fallback_reason,
+    }
+    if fallback_detail:
+        hashing["fallback_detail"] = fallback_detail[:512]
+    return sha256_bytes(material), hashing
+
+
+def hash_tree(path: Path) -> str:
+    """Compatibility helper preserving the existing directory identity."""
+    return _hash_tree_with_method(path)[0]
 
 
 def resolve_path(value: str | Path, base: Path, *, must_exist: bool = False) -> Path:
@@ -4011,6 +4132,8 @@ def manifest_provenance(
     library_paths: list[Path],
     *,
     artifacts: ArtifactStore,
+    cwd: Path,
+    environment: dict[str, str],
 ) -> dict[str, Any]:
     manifest_path = Path(manifest["manifest_path"])
     source_path = Path(manifest["source_path"])
@@ -4044,6 +4167,18 @@ def manifest_provenance(
         compiler["path"] = mncs
         compiler["sha256"] = None
         compiler["version"] = "unavailable"
+    tree_mncs = artifacts.mncs or mncs
+    tree_cwd = artifacts.cwd or cwd
+    tree_environment = artifacts.environment or environment
+    libraries: list[dict[str, Any]] = []
+    for path in library_paths:
+        digest, hashing = _hash_tree_with_method(
+            path,
+            mncs=tree_mncs,
+            cwd=tree_cwd,
+            environment=tree_environment,
+        )
+        libraries.append({"path": str(path), "sha256": digest, "hashing": hashing})
     return {
         "runner": {
             "name": "mncs-test",
@@ -4055,7 +4190,7 @@ def manifest_provenance(
         "compiler": compiler,
         "source": {"path": str(source_path), "sha256": digest_provenance_file(source_path)},
         "manifest": {"path": str(manifest_path), "sha256": digest_provenance_file(manifest_path)},
-        "libraries": [{"path": str(path), "sha256": hash_tree(path)} for path in library_paths],
+        "libraries": libraries,
         "host": {"os": platform.system(), "release": platform.release(), "arch": platform.machine()},
         "source_bytes": len(source_text.encode("utf-8")),
     }
@@ -5467,6 +5602,8 @@ def make_result(
         mncs,
         library_paths,
         artifacts=artifacts,
+        cwd=cwd,
+        environment=environment,
     )
     run_id = build_run_identity_sha256(
         provenance=provenance,

@@ -262,7 +262,12 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
     manifest_path.write_text('{"profile":"mncs 0.18"}\n', encoding="utf-8")
     library = tmp_path / "library"
     library.mkdir()
-    library_source = library / "nested.mncs"
+    nested_library = library / "a"
+    nested_library.mkdir()
+    root_library_source = library / "z-root.mncs"
+    root_library_bytes = b"module root;\n"
+    root_library_source.write_bytes(root_library_bytes)
+    library_source = nested_library / "inside-東京.mncs"
     library_bytes = b"module shared;\n"
     library_source.write_bytes(library_bytes)
 
@@ -290,6 +295,9 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
             mock.patch.object(
                 mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
             ) as host_payload_digest,
+            mock.patch.object(
+                mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+            ) as native_app,
             mock.patch.object(
                 mncs_test, "native_runner_policy", return_value=("success", 0)
             ),
@@ -348,8 +356,12 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
             "source": hashlib.sha256(source.read_bytes()).hexdigest(),
             "manifest": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         }
-        library_leaf_digest = hashlib.sha256(library_bytes).hexdigest()
-        expected_library_material = f"nested.mncs\0{library_leaf_digest}\n".encode()
+        root_leaf_digest = hashlib.sha256(root_library_bytes).hexdigest()
+        nested_leaf_digest = hashlib.sha256(library_bytes).hexdigest()
+        expected_library_material = (
+            f"z-root.mncs\0{root_leaf_digest}\n"
+            f"a/inside-東京.mncs\0{nested_leaf_digest}\n"
+        ).encode("utf-8")
         expected_library = hashlib.sha256(expected_library_material).hexdigest()
 
         assert provenance["compiler"]["sha256"] == expected["compiler"]
@@ -357,11 +369,61 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
         assert provenance["source"]["sha256"] == expected["source"]
         assert provenance["manifest"]["sha256"] == expected["manifest"]
         assert provenance["libraries"][0]["sha256"] == expected_library
+        assert provenance["libraries"][0]["hashing"] == {
+            "algorithm": "sha256-library-tree-records/1",
+            "implementation": "mncs.test.library_tree_identity_v1",
+            "entries": 2,
+        }
+        tree_calls = [
+            call for call in native_app.call_args_list
+            if call.args[0] == "test-library-tree-identity.json"
+        ]
+        assert len(tree_calls) == 1
         assert native_file_hash.call_count == 1
         assert native_payload_hash.call_count == 3
         assert native_digest.call_count == 4
-        assert host_file_digest.call_count == 1
-        assert host_payload_digest.call_count == 1
+        assert host_file_digest.call_count == 2
+        assert host_payload_digest.call_count == 0
+
+
+def test_library_tree_identity_reports_host_fallback_above_entry_bound(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "large-library"
+    library.mkdir()
+    for index in range(mncs_test.LIBRARY_TREE_IDENTITY_MAX_ENTRIES + 1):
+        (library / f"item-{index:03}.mncs").write_bytes(
+            f"module item{index};\n".encode()
+        )
+
+    entries = [
+        (
+            path.relative_to(library).as_posix(),
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in sorted(library.iterdir(), key=lambda item: item.name)
+    ]
+    expected_material = "".join(
+        f"{name}\0{digest}\n" for name, digest in entries
+    ).encode("utf-8")
+
+    with mock.patch.object(mncs_test, "run_native_app") as native_app:
+        digest, hashing = mncs_test._hash_tree_with_method(
+            library,
+            mncs="unused",
+            cwd=tmp_path,
+            environment={},
+        )
+
+    assert digest == hashlib.sha256(expected_material).hexdigest()
+    assert hashing == {
+        "algorithm": "sha256-library-tree-records/1",
+        "implementation": "host",
+        "entries": mncs_test.LIBRARY_TREE_IDENTITY_MAX_ENTRIES + 1,
+        "fallback_reason": "library_tree_entry_count",
+        "fallback_detail": "library tree exceeds the 128-entry native identity bound",
+    }
+    native_app.assert_not_called()
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")

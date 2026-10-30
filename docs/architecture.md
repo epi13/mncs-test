@@ -152,16 +152,20 @@ the runner source through the MNCS stream in 14,336-byte windows. Files above
 native application handles files through 65,536 bytes; larger files fall back
 to the host until warm-up. If embedding fails, bounded files use the existing
 native application through 65,536 bytes and larger files use host fallback.
-Library directory enumeration and tree hashing stay on the host because
-they may cover many files and do not yet have a useful aggregate work bound.
+Library directory enumeration, per-file reads, and leaf hashes stay on the
+host. `mncs.test.library_tree_identity_v1` now owns the final ordered
+`path NUL leaf-digest LF` fold for directories with at most 128 entries and a
+65,536-byte request. The adapter reports the selected implementation and
+retains an explicit host fallback when the entry, path, or request bounds are
+exceeded or native execution fails.
 Each retained window uses one MNCS function that validates the
 request and advances SHA-256 state together; the final window also finalizes the
 digest in that same call, with no separate initialization or finalization call
 from Python. Larger artifacts encountered
 before warm-up, or any artifact over 512 KiB, retain the host streaming
 fallback. Python still reads and writes files, supplies bounded typed values,
-enumerates library directories, hashes library trees, and preserves the host
-compatibility path for un-warmed, unavailable, and over-bound source hashes.
+enumerates library directories, hashes per-file library leaves, and preserves
+explicit host fallback for unavailable or out-of-bound tree and source hashes.
 
 `mncs.test.lineage_identity_v1` now constructs and hashes per-test execution
 and observation identity JSON from typed index, run, test-case, status, and

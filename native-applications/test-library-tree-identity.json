@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.library-tree-identity",
+  "source": "../native/mncs/test/library_tree_identity_v1.mncs",
+  "module": "mncs.test.library_tree_identity_v1",
+  "entry_function": "library_tree_identity_app_v1",
+  "profile": "0.18",
+  "interface_identity": "2025b7d5894513e0b462937638a910e426d7ebd1df7f089a207c8389ca731405",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}
