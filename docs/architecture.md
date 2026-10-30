@@ -125,9 +125,11 @@ bytes. Python still projects arbitrary runtime values into that request,
 reassembles output pages, writes files, and keeps the compatibility serializer
 for values outside the native bounds or when a bounded MNCS serialization
 reports `budget_exhausted`. The structured application transport also caps an
-input artifact at 32,768 nodes; that specific input-bound result uses the
-compatibility serializer, while genuine native application and runtime errors
-remain errors.
+input artifact at 32,768 nodes. The adapter encodes bounded byte fields as
+UTF-8 JSON strings, so text no longer expands into one structured input node
+per byte; the 33 KB differential case now completes through native windows.
+Genuinely oversized structured requests retain compatibility output, while
+native application and runtime errors remain errors.
 
 The family-check response records `execution.check_result_sha256` from the
 serialized `mncs.check-result/1` document produced by this same public-result

@@ -179,7 +179,7 @@ def _native_public_result_request(value: Any) -> tuple[dict[str, Any], int] | No
     escaped_text_bytes = 0
     depth_sum = 0
 
-    def encode_text(text: str, maximum: int) -> tuple[list[int], int]:
+    def encode_text(text: str, maximum: int) -> tuple[str, int]:
         nonlocal escaped_text_bytes
         encoded = text.encode("utf-8")
         if len(encoded) > maximum:
@@ -188,17 +188,20 @@ def _native_public_result_request(value: Any) -> tuple[dict[str, Any], int] | No
             6 if byte < 0x20 else 2 if byte in (0x22, 0x5C) else 1
             for byte in encoded
         )
-        return list(encoded), len(encoded)
+        # The typed MNCS byte fields accept JSON strings directly. Keeping
+        # their UTF-8 contents as strings avoids expanding each byte into a
+        # separate structured-input node before the native application runs.
+        return text, len(encoded)
 
     def append_node(item: Any, parent: int, key: str, depth: int) -> int:
         nonlocal depth_sum, escaped_text_bytes
         if len(nodes) >= PUBLIC_RESULT_JSON_MAX_NODES or depth > PUBLIC_RESULT_JSON_MAX_DEPTH:
             raise ValueError("native public JSON structure bound exceeded")
-        key_bytes, _ = encode_text(key, 256)
+        key_text, _ = encode_text(key, 256)
         depth_sum += depth
         index = len(nodes)
         kind = 0
-        text_bytes: list[int] = []
+        text_value = ""
         integer_value = 0
         children: list[tuple[str, Any]] | None = None
         container_identity: int | None = None
@@ -234,10 +237,10 @@ def _native_public_result_request(value: Any) -> tuple[dict[str, Any], int] | No
             if not math.isfinite(item):
                 raise ValueError("native public JSON does not accept non-finite numbers")
             kind = 5
-            text_bytes, _ = encode_text(repr(item), 1024)
+            text_value, _ = encode_text(repr(item), 1024)
         elif type(item) is str:
             kind = 3
-            text_bytes, _ = encode_text(item, 1024)
+            text_value, _ = encode_text(item, 1024)
         else:
             raise ValueError("native public JSON value is outside the JSON data model")
 
@@ -251,8 +254,8 @@ def _native_public_result_request(value: Any) -> tuple[dict[str, Any], int] | No
         node = {
             "kind": kind,
             "parent": parent,
-            "key": key_bytes,
-            "text": text_bytes,
+            "key": key_text,
+            "text": text_value,
             "first_edge": first_edge,
             "child_count": len(children) if children is not None else 0,
             "integer_value": integer_value,
