@@ -17,11 +17,17 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+_STRUCTURED_ARTIFACT_NODE_BOUND = re.compile(
+    r"structured artifact exceeds the [0-9]+-node bound"
+)
 
 
 class NativeTransportError(ValueError):
@@ -250,6 +256,11 @@ def run_native_app(
                     application_result = json.loads(completed.stdout)
                 except json.JSONDecodeError:
                     application_result = None
+                if _STRUCTURED_ARTIFACT_NODE_BOUND.search(detail):
+                    raise NativeInputBoundError(
+                        f"native application {descriptor_name} request exceeds the structured input node bound: {detail}",
+                        reason="structured_artifact_node_count",
+                    )
                 if (
                     isinstance(application_result, dict)
                     and application_result.get("status") == "budget_exhausted"

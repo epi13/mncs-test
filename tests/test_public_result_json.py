@@ -136,10 +136,61 @@ def test_native_json_supports_results_larger_than_legacy_window(tmp_path: Path) 
     assert calls == window_calls
 
 
-def test_results_above_expanded_native_window_keep_compatibility_json(
+def test_results_through_expanded_native_window_use_native_json(
+    tmp_path: Path,
+) -> None:
+    value: object = ["x" * 1000 for _ in range(29)]
+    for _ in range(50):
+        value = [value]
+    expected = mncs_test.json_bytes(value)
+    assert len(expected) > mncs_test.PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES
+    assert len(expected) <= mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    calls = [call.args[0] for call in native_app.call_args_list]
+    assert 1 < len(calls) <= 32
+    assert set(calls) == {"test-public-result-json-window.json"}
+
+
+def test_structured_input_node_bound_keeps_compatibility_json(
     tmp_path: Path,
 ) -> None:
     value = ["x" * 600 for _ in range(55)]
+    expected = mncs_test.json_bytes(value)
+    assert len(expected) > 32_684
+    assert len(expected) <= mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert native_app.call_count == 1
+    assert native_app.call_args.args[0] == "test-public-result-json-window.json"
+
+
+def test_results_above_expanded_native_window_keep_compatibility_json(
+    tmp_path: Path,
+) -> None:
+    value = ["x" * 600 for _ in range(110)]
     expected = mncs_test.json_bytes(value)
     assert len(expected) > mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
 
