@@ -124,7 +124,9 @@ record ManifestHostGrantValidationResultV1 {
     valid: bool,
     issue_code: u64,
     set_index: u64,
-    grant_index: u64
+    grant_index: u64,
+    normalized_set_count: u64,
+    normalized_sets: [HostGrantSetV1; up_to 16]
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
@@ -140,7 +142,7 @@ fn pretest_request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn pretest_result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 112, 114, 101, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 112, 114, 101, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 50];
 }
 
 fn same_schema(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -457,14 +459,19 @@ fn validate_host_grant_sets(request: ManifestHostGrantValidationRequestV1) -> (r
     return issue;
 }
 
-fn host_grant_public_result(issue: ManifestHostGrantIssueV1) -> (result: ManifestHostGrantValidationResultV1) {
+fn host_grant_public_result(
+    request: ManifestHostGrantValidationRequestV1,
+    issue: ManifestHostGrantIssueV1
+) -> (result: ManifestHostGrantValidationResultV1) {
     return ManifestHostGrantValidationResultV1 {
         schema_version: pretest_result_schema(),
         supported: issue.code != 255,
         valid: issue.code == 0,
         issue_code: issue.code,
         set_index: issue.set_index,
-        grant_index: issue.grant_index
+        grant_index: issue.grant_index,
+        normalized_set_count: request.set_count,
+        normalized_sets: request.sets
     };
 }
 
@@ -508,7 +515,7 @@ fn manifest_pretest_validation_app_v1(context: ApplicationContext) -> (result: A
     }
     let request: ManifestHostGrantValidationRequestV1 = structured_read(context.argv[0], pretest_request_schema());
     let issue: ManifestHostGrantIssueV1 = validate_host_grant_sets(request);
-    let result: ManifestHostGrantValidationResultV1 = host_grant_public_result(issue);
+    let result: ManifestHostGrantValidationResultV1 = host_grant_public_result(request, issue);
     let published: u64 = structured_write(context.argv[1], pretest_result_schema(), result);
     if published == 0 {
         return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 103, 114, 97, 110, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);

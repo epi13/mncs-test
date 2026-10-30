@@ -75,15 +75,17 @@ schema version, required name/source/module fields, suite and profile shape,
 positive step and timeout budgets, library-array policy, grant-set shape and
 identity uniqueness, capability/locator requirements, duplicate pairs, and
 byte-array presence, length, and signed byte-range policy. The host retains
-source/library path resolution and original byte-array values for normalized
-output. It projects a bounded signed integer sequence for MNCS; booleans,
+source/library path resolution. MNCS returns normalized set/grant rows from
+the validated typed request, applying empty locator/byte-list defaults; Python
+only decodes those rows into the established Test envelope. The host projects
+a bounded signed integer sequence for MNCS; booleans,
 non-integers, and values outside signed 64-bit representation become an
 invalid sentinel for the native range check. Native validation is used for at
 most 16 libraries, 16 grant sets, 32 grants per set, 16 table keys, 1,024
 projected byte values total, and a 65,536-byte request, with the shared
 512-byte projected-text bound. Inputs above the projection budget use the
-compatibility validator, preserving the manifest's 4,096-value per-grant cap
-and existing error messages. Arrays longer than 4,096 can be rejected from
+compatibility validator, preserving the manifest's 4,096-value per-grant cap,
+raw values, and existing error messages. Arrays longer than 4,096 can be rejected from
 their count without copying values. The native request stays within Profile
 0.18's 1,024-element sequence capacity.
 

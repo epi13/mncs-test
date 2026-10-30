@@ -224,15 +224,22 @@ class NativeManifestTestValidationTests(unittest.TestCase):
     def test_native_host_grant_policy_accepts_and_preserves_valid_grants(self) -> None:
         grants = [{
             "test_case_identity": "mncs:0.2:test-case:process::cancel",
-            "grants": [{
-                "capability": "process_capability", "locator": "/usr/bin/sleep",
-                "bytes": [0, 1, 127, 255] + [255] * 1020,
-            }],
+            "grants": [
+                {
+                    "capability": "process_capability", "locator": "/usr/bin/sleep",
+                    "bytes": [0, 1, 127, 255] + [255] * 1020,
+                },
+                {"capability": "defaulted_π"},
+            ],
         }]
         document = manifest_document(self.source, [], grants)
         host = mncs_test.validate_manifest(document, self.path)
         with mock.patch.object(mncs_test, "run_native_app", wraps=mncs_test.run_native_app) as native_app:
-            native = self.native_validate_document(document)
+            with mock.patch.object(
+                mncs_test, "_validate_host_grant_sets_host",
+                side_effect=AssertionError("native result should supply normalized grant sets"),
+            ):
+                native = self.native_validate_document(document)
         self.assertEqual(native["host_grant_sets"], host["host_grant_sets"])
         self.assertTrue(any(call.args[0] == "test-manifest-pretest-validation.json" for call in native_app.call_args_list))
 

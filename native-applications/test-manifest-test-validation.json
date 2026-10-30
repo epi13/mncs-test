@@ -5,7 +5,7 @@
   "module": "mncs.test.manifest_test_validation_v1",
   "entry_function": "manifest_test_validation_app_v1",
   "profile": "0.18",
-  "interface_identity": "5e952c7e7e09d1a76493ce5a17ece0c85f9811bd4dd2fd4468167139fa9c1912",
+  "interface_identity": "87e7f6cbfe5ec274cb8a1e9698c3bb5bfa65f5728b6afaa8488180fcabbb4287",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

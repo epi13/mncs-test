@@ -63,7 +63,7 @@ MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/1"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/1"
 MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-pretest-validation-request/1"
-MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-pretest-validation/1"
+MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-pretest-validation/2"
 MANIFEST_TEST_VALIDATION_MAX_TESTS = 16
 MANIFEST_TEST_VALIDATION_MAX_TEXT_BYTES = 512
 MANIFEST_TEST_VALIDATION_MAX_TAGS = 32
@@ -79,7 +79,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.13"
+RUNNER_VERSION = "0.2.14"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -2441,11 +2441,15 @@ def _native_manifest_pretest_validation(
         or type(result.get("supported")) is not bool or not result["supported"]
         or type(result.get("valid")) is not bool
         or any(type(result.get(field)) is not int for field in (
-            "issue_code", "set_index", "grant_index"))
+            "issue_code", "set_index", "grant_index", "normalized_set_count"))
+        or not isinstance(result.get("normalized_sets"), list)
+        or result["normalized_set_count"] != len(result["normalized_sets"])
     ):
         raise AdapterError("MNCS manifest pre-test validator returned malformed result metadata")
     if result["valid"] != (result["issue_code"] == 0):
         raise AdapterError("MNCS manifest pre-test validator returned inconsistent validity metadata")
+    if result["valid"] and result["normalized_set_count"] != len(grant_sets):
+        raise AdapterError("MNCS manifest pre-test validator returned an incomplete normalized grant projection")
     if result["issue_code"] in (11, 12, 13, 14, 15, 16, 17) and not 0 <= result["set_index"] < len(grant_sets):
         raise AdapterError("MNCS manifest pre-test validator returned an out-of-range set index")
     if result["issue_code"] in (14, 15, 16, 17):
@@ -2456,6 +2460,61 @@ def _native_manifest_pretest_validation(
         if not isinstance(grants, list) or not 0 <= result["grant_index"] < len(grants):
             raise AdapterError("MNCS manifest pre-test validator returned an out-of-range grant index")
     return result
+
+
+def _manifest_native_text(value: Any, field: str) -> str:
+    if not isinstance(value, dict) or value.get("is_string") is not True:
+        raise AdapterError(f"MNCS normalized manifest grant {field} is not a string")
+    encoded = value.get("bytes")
+    if isinstance(encoded, str):
+        return encoded
+    if not isinstance(encoded, list) or any(
+        type(item) is not int or not 0 <= item <= 255 for item in encoded
+    ):
+        raise AdapterError(f"MNCS normalized manifest grant {field} has malformed bytes")
+    try:
+        return bytes(encoded).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdapterError(f"MNCS normalized manifest grant {field} is not valid UTF-8") from error
+
+
+def _manifest_normalized_host_grant_sets(result: dict[str, Any]) -> list[dict[str, Any]]:
+    sets = result.get("normalized_sets")
+    if not isinstance(sets, list) or len(sets) != result.get("normalized_set_count"):
+        raise AdapterError("MNCS normalized manifest grant sets are malformed")
+    normalized_sets: list[dict[str, Any]] = []
+    for set_index, item in enumerate(sets):
+        if not isinstance(item, dict) or item.get("is_table") is not True or item.get("grants_are_array") is not True:
+            raise AdapterError(f"MNCS normalized manifest grant set {set_index} is malformed")
+        identity = _manifest_native_text(item.get("test_case_identity"), "test_case_identity")
+        grants = item.get("grants")
+        if not isinstance(grants, list) or not grants:
+            raise AdapterError(f"MNCS normalized manifest grant set {set_index} has malformed grants")
+        normalized_grants: list[dict[str, Any]] = []
+        for grant_index, grant in enumerate(grants):
+            if not isinstance(grant, dict) or grant.get("is_table") is not True or grant.get("bytes_are_array") is not True:
+                raise AdapterError(f"MNCS normalized manifest grant {set_index}:{grant_index} is malformed")
+            capability = _manifest_native_text(grant.get("capability_name"), "capability")
+            locator = _manifest_native_text(grant.get("locator"), "locator")
+            byte_values = grant.get("byte_values")
+            if (
+                not isinstance(byte_values, list)
+                or type(grant.get("byte_count")) is not int
+                or grant["byte_count"] != len(byte_values)
+            ):
+                raise AdapterError(f"MNCS normalized manifest grant {set_index}:{grant_index} has malformed bytes")
+            decoded_bytes: list[int] = []
+            for value in byte_values:
+                if (
+                    not isinstance(value, dict)
+                    or type(value.get("value")) is not int
+                    or not 0 <= value["value"] <= 255
+                ):
+                    raise AdapterError(f"MNCS normalized manifest grant {set_index}:{grant_index} has an invalid byte")
+                decoded_bytes.append(value["value"])
+            normalized_grants.append({"capability": capability, "locator": locator, "bytes": decoded_bytes})
+        normalized_sets.append({"test_case_identity": identity, "grants": normalized_grants})
+    return normalized_sets
 
 
 def _manifest_pretest_validation_error(result: dict[str, Any]) -> str:
@@ -2703,21 +2762,7 @@ def validate_manifest(
         raise ManifestError(_manifest_pretest_validation_error(native_pretest_validation))
     else:
         libraries = raw.get("libraries", [])
-        host_grant_sets = []
-        for item in raw_grant_sets:
-            assert isinstance(item, dict)
-            normalized_grants = [
-                {
-                    "capability": grant.get("capability"),
-                    "locator": grant.get("locator", ""),
-                    "bytes": grant.get("bytes", []),
-                }
-                for grant in item["grants"]
-            ]
-            host_grant_sets.append({
-                "test_case_identity": item["test_case_identity"],
-                "grants": normalized_grants,
-            })
+        host_grant_sets = _manifest_normalized_host_grant_sets(native_pretest_validation)
     profile = raw.get("profile", "0.17")
     tests = raw.get("tests", [])
     if not isinstance(tests, list):
