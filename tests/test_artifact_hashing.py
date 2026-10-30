@@ -148,8 +148,8 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
         cwd=tmp_path,
         environment=_native_environment(),
     )
-    payload = bytes((index * 37 + 5) % 256 for index in range(131_073))
-    file_payload = bytes((index * 41 + 13) % 256 for index in range(196_619))
+    payload = bytes((index * 37 + 5) % 256 for index in range(512 * 1024))
+    file_payload = bytes((index * 41 + 13) % 256 for index in range(384 * 1024 + 17))
     path = artifact_root / "compiler" / "large.bin"
     path.parent.mkdir(parents=True)
     path.write_bytes(file_payload)
@@ -245,6 +245,8 @@ def test_artifact_store_keeps_large_files_on_host_after_session_warmup(
         (index * 47 + 19) % 256
         for index in range(mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
     )
+    path = tmp_path / "large.bin"
+    path.write_bytes(payload)
 
     with (
         mock.patch.object(
@@ -253,14 +255,20 @@ def test_artifact_store_keeps_large_files_on_host_after_session_warmup(
         mock.patch.object(
             mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
         ) as host_digest,
+        mock.patch.object(
+            mncs_test, "sha256_file", wraps=mncs_test.sha256_file
+        ) as host_file_digest,
     ):
         for index, small_payload in enumerate((b"first", b"second", b"third")):
             store.digest_payload(small_payload)
         digest = store.digest_payload(payload)
+        file_digest = store.digest_file(path)
 
     assert digest == hashlib.sha256(payload).hexdigest()
+    assert file_digest == hashlib.sha256(payload).hexdigest()
     assert native_app.call_count == 3
     assert host_digest.call_count == 1
+    assert host_file_digest.call_count == 1
     assert store._identity_hasher is None
 
 
