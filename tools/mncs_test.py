@@ -60,8 +60,8 @@ PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
-MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/1"
-MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/1"
+MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
+MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/2"
 MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-pretest-validation-request/1"
 MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-pretest-validation/2"
 MANIFEST_TEST_VALIDATION_MAX_TESTS = 16
@@ -79,7 +79,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.14"
+RUNNER_VERSION = "0.2.15"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -2200,7 +2200,9 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
             rows.append({
                 "is_table": False,
                 "id": _manifest_text_value(None), "entry": _manifest_text_value(None),
-                "kind": _manifest_text_value(None), "tags_are_array": False, "tags": [],
+                "kind_present": False, "kind": _manifest_text_value(None),
+                "tags_present": False, "tags_are_array": False, "tags": [],
+                "arguments_present": False,
                 "arguments_are_array": False,
                 "step_budget": _manifest_integer_value(None, False),
                 "timeout_seconds": _manifest_integer_value(None, False),
@@ -2208,17 +2210,20 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
                 "case_index": _manifest_integer_value(None, False),
                 "expected_status_present": False,
                 "expected_status": _manifest_text_value(None),
+                "diagnostic_codes_present": False,
                 "diagnostic_codes_are_array": False, "diagnostic_codes": [],
             })
             continue
 
-        kind = item.get("kind", "unit")
-        if not isinstance(kind, str):
+        kind_present = "kind" in item
+        kind = item.get("kind")
+        if kind_present and not isinstance(kind, str):
             try:
                 hash(kind)
             except TypeError:
                 return None  # Keep the legacy unhashable-value exception path.
         tags_value = item.get("tags", [])
+        tags_present = "tags" in item
         tags_are_array = isinstance(tags_value, list)
         tags = tags_value if tags_are_array else []
         if len(tags) > MANIFEST_TEST_VALIDATION_MAX_TAGS:
@@ -2238,6 +2243,7 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
             return None
 
         diagnostics_value = item.get("diagnostic_codes", [])
+        diagnostics_present = "diagnostic_codes" in item
         diagnostics_are_array = isinstance(diagnostics_value, list)
         diagnostics = diagnostics_value if diagnostics_are_array else []
         if len(diagnostics) > MANIFEST_TEST_VALIDATION_MAX_DIAGNOSTIC_CODES:
@@ -2253,8 +2259,10 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
             return None
         rows.append({
             "is_table": True,
-            "id": id_value, "entry": entry_value, "kind": kind_value,
-            "tags_are_array": tags_are_array, "tags": tag_values,
+            "id": id_value, "entry": entry_value,
+            "kind_present": kind_present, "kind": kind_value,
+            "tags_present": tags_present, "tags_are_array": tags_are_array, "tags": tag_values,
+            "arguments_present": "arguments" in item,
             "arguments_are_array": isinstance(item.get("arguments", []), list),
             "step_budget": _manifest_integer_value(item.get("step_budget"), "step_budget" in item),
             "timeout_seconds": _manifest_integer_value(item.get("timeout_seconds"), "timeout_seconds" in item),
@@ -2262,6 +2270,7 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
             "case_index": _manifest_integer_value(item.get("case_index"), "case_index" in item),
             "expected_status_present": expected_status is not None,
             "expected_status": expected_value,
+            "diagnostic_codes_present": diagnostics_present,
             "diagnostic_codes_are_array": diagnostics_are_array,
             "diagnostic_codes": diagnostic_values,
         })
@@ -2619,7 +2628,10 @@ def _native_manifest_test_validation(
     environment: dict[str, str] | None,
 ) -> dict[str, Any] | None:
     if not tests:
-        return {"valid": True, "issue_code": 0, "test_index": 0, "field_index": 0, "item_index": 0}
+        return {
+            "valid": True, "issue_code": 0, "test_index": 0, "field_index": 0,
+            "item_index": 0, "normalized_test_count": 0, "normalized_tests": [],
+        }
     if mncs is None or cwd is None or environment is None:
         return None
     binary = resolve_mncs(mncs, cwd)
@@ -2645,16 +2657,63 @@ def _native_manifest_test_validation(
         or type(result.get("supported")) is not bool or not result["supported"]
         or type(result.get("valid")) is not bool
         or any(type(result.get(field)) is not int for field in (
-            "issue_code", "test_index", "field_index", "item_index"))
+            "issue_code", "test_index", "field_index", "item_index", "normalized_test_count"))
+        or not isinstance(result.get("normalized_tests"), list)
+        or len(result["normalized_tests"]) != MANIFEST_TEST_VALIDATION_MAX_TESTS
     ):
         raise AdapterError("MNCS manifest declaration validator returned malformed result metadata")
     if result["valid"] != (result["issue_code"] == 0):
         raise AdapterError("MNCS manifest declaration validator returned inconsistent validity metadata")
+    if result["normalized_test_count"] != (len(tests) if result["valid"] else 0):
+        raise AdapterError("MNCS manifest declaration validator returned inconsistent normalization metadata")
     if not result["valid"] and not 0 <= result["test_index"] < len(tests):
         raise AdapterError("MNCS manifest declaration validator returned an out-of-range test index")
     if result["issue_code"] == 8 and result["field_index"] not in range(4):
         raise AdapterError("MNCS manifest declaration validator returned an unknown numeric field")
     return result
+
+
+def _manifest_normalized_test_projection(
+    result: dict[str, Any], tests: list[Any],
+) -> list[dict[str, Any]]:
+    """Decode MNCS-selected manifest defaults while preserving opaque arguments."""
+    if not tests:
+        return []
+    rows = result.get("normalized_tests")
+    count = result.get("normalized_test_count")
+    if not isinstance(rows, list) or type(count) is not int or count != len(tests):
+        raise AdapterError("MNCS manifest declaration validator returned incomplete normalized tests")
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(tests):
+        if not isinstance(raw, dict):
+            raise AdapterError("MNCS manifest declaration validator normalized a non-table row")
+        row = rows[index]
+        if not isinstance(row, dict) or type(row.get("arguments_defaulted")) is not bool:
+            raise AdapterError(f"MNCS normalized manifest test {index} is malformed")
+        kind = _manifest_native_text(row.get("kind"), "kind")
+        tags_value = row.get("tags")
+        diagnostics_value = row.get("diagnostic_codes")
+        if not isinstance(tags_value, list) or not isinstance(diagnostics_value, list):
+            raise AdapterError(f"MNCS normalized manifest test {index} has malformed arrays")
+        tags = [_manifest_native_text(value, "tag") for value in tags_value]
+        diagnostics = [
+            _manifest_native_text(value, "diagnostic code") for value in diagnostics_value
+        ]
+        expected_kind = raw["kind"] if "kind" in raw else "unit"
+        expected_tags = raw["tags"] if "tags" in raw else []
+        expected_diagnostics = raw["diagnostic_codes"] if "diagnostic_codes" in raw else []
+        if (
+            kind != expected_kind or tags != expected_tags or diagnostics != expected_diagnostics
+            or row["arguments_defaulted"] != ("arguments" not in raw)
+        ):
+            raise AdapterError(f"MNCS normalized manifest test {index} disagrees with its request")
+        normalized.append({
+            "kind": kind,
+            "tags": tags,
+            "arguments_defaulted": row["arguments_defaulted"],
+            "diagnostic_codes": diagnostics,
+        })
+    return normalized
 
 
 def _manifest_test_validation_error(result: dict[str, Any], tests: list[Any]) -> str:
@@ -2776,14 +2835,15 @@ def validate_manifest(
         raise ManifestError(_manifest_test_validation_error(native_validation, tests))
     else:
         normalized_tests = []
-        for item in tests:
-            # The native app has already rejected every non-table row.
-            assert isinstance(item, dict)
+        test_defaults = _manifest_normalized_test_projection(native_validation, tests)
+        for item, defaults in zip(tests, test_defaults):
+            assert isinstance(item, dict)  # The native app already rejected non-table rows.
             normalized = dict(item)
-            normalized.setdefault("kind", "unit")
-            normalized.setdefault("tags", [])
-            normalized.setdefault("arguments", [])
-            normalized.setdefault("diagnostic_codes", [])
+            normalized["kind"] = defaults["kind"]
+            normalized["tags"] = defaults["tags"]
+            if defaults["arguments_defaulted"]:
+                normalized["arguments"] = []
+            normalized["diagnostic_codes"] = defaults["diagnostic_codes"]
             normalized_tests.append(normalized)
     source_path = resolve_path(raw["source"], manifest_path.parent, must_exist=True)
     if not source_path.is_file():

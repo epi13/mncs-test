@@ -123,11 +123,24 @@ class NativeManifestTestValidationTests(unittest.TestCase):
             },
             {"id": "case-b", "entry": "compile_error", "kind": "compile-fail",
              "diagnostic_codes": ["MNP"]},
+            {"id": "case-c", "entry": "opaque_arguments",
+             "tags": ["κ"], "arguments": [{"nested": [1, True, None, "λ"]}]},
         ]
         host = mncs_test.validate_manifest(manifest_document(self.source, declarations), self.path)
-        with mock.patch.object(mncs_test, "run_native_app", wraps=mncs_test.run_native_app) as native_app:
+        with (
+            mock.patch.object(mncs_test, "run_native_app", wraps=mncs_test.run_native_app) as native_app,
+            mock.patch.object(
+                mncs_test, "_validate_manifest_tests_host",
+                side_effect=AssertionError("bounded declaration defaults should come from MNCS"),
+            ),
+        ):
             native = self.native_validate(declarations)
         self.assertEqual(native["tests"], host["tests"])
+        self.assertEqual(native["tests"][1]["tags"], [])
+        self.assertEqual(native["tests"][1]["arguments"], [])
+        self.assertEqual(native["tests"][2]["kind"], "unit")
+        self.assertEqual(native["tests"][2]["diagnostic_codes"], [])
+        self.assertEqual(native["tests"][2]["arguments"], declarations[2]["arguments"])
         self.assertTrue(any(call.args[0] == "test-manifest-test-validation.json" for call in native_app.call_args_list))
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")

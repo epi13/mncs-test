@@ -24,9 +24,12 @@ record ManifestTestV1 {
     is_table: bool,
     id: TextValueV1,
     entry: TextValueV1,
+    kind_present: bool,
     kind: TextValueV1,
+    tags_present: bool,
     tags_are_array: bool,
     tags: [TextValueV1; up_to 32],
+    arguments_present: bool,
     arguments_are_array: bool,
     step_budget: NonnegativeIntegerV1,
     timeout_seconds: NonnegativeIntegerV1,
@@ -34,7 +37,15 @@ record ManifestTestV1 {
     case_index: NonnegativeIntegerV1,
     expected_status_present: bool,
     expected_status: TextValueV1,
+    diagnostic_codes_present: bool,
     diagnostic_codes_are_array: bool,
+    diagnostic_codes: [TextValueV1; up_to 256]
+}
+
+record ManifestTestNormalizationV1 {
+    kind: TextValueV1,
+    tags: [TextValueV1; up_to 32],
+    arguments_defaulted: bool,
     diagnostic_codes: [TextValueV1; up_to 256]
 }
 
@@ -58,7 +69,9 @@ record ManifestTestValidationResultV1 {
     issue_code: u64,
     test_index: u64,
     field_index: u64,
-    item_index: u64
+    item_index: u64,
+    normalized_test_count: u64,
+    normalized_tests: [ManifestTestNormalizationV1; up_to 16]
 }
 
 record ManifestByteValueV1 {
@@ -130,11 +143,11 @@ record ManifestHostGrantValidationResultV1 {
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 50];
 }
 
 fn pretest_request_schema() -> (result: [byte; up_to 64]) {
@@ -236,10 +249,10 @@ fn row_issue(request: ManifestTestValidationRequestV1, row: ManifestTestV1, inde
     if !row.entry.is_string || row.entry.blank {
         return ManifestTestIssueV1 { code: 4, test_index: index, field_index: 0, item_index: 0 };
     }
-    if !is_kind(row.kind) {
+    if row.kind_present && !is_kind(row.kind) {
         return ManifestTestIssueV1 { code: 5, test_index: index, field_index: 0, item_index: 0 };
     }
-    if !row.tags_are_array {
+    if row.tags_present && !row.tags_are_array {
         return ManifestTestIssueV1 { code: 6, test_index: index, field_index: 0, item_index: 0 };
     }
     iterate i over row.tags carrying tags_valid: bool = true {
@@ -249,7 +262,7 @@ fn row_issue(request: ManifestTestValidationRequestV1, row: ManifestTestV1, inde
         }
         next tags_valid = tags_valid;
     }
-    if !row.arguments_are_array {
+    if row.arguments_present && !row.arguments_are_array {
         return ManifestTestIssueV1 { code: 7, test_index: index, field_index: 0, item_index: 0 };
     }
     let numeric: ManifestTestIssueV1 = first_numeric_issue(row, index);
@@ -257,7 +270,7 @@ fn row_issue(request: ManifestTestValidationRequestV1, row: ManifestTestV1, inde
     if row.expected_status_present && !is_execution_status(row.expected_status) {
         return ManifestTestIssueV1 { code: 9, test_index: index, field_index: 0, item_index: 0 };
     }
-    if !row.diagnostic_codes_are_array {
+    if row.diagnostic_codes_present && !row.diagnostic_codes_are_array {
         return ManifestTestIssueV1 { code: 10, test_index: index, field_index: 0, item_index: 0 };
     }
     iterate i over row.diagnostic_codes carrying diagnostics_valid: bool = true {
@@ -475,15 +488,67 @@ fn host_grant_public_result(
     };
 }
 
-fn public_result(issue: ManifestTestIssueV1) -> (result: ManifestTestValidationResultV1) {
+fn unit_kind() -> (result: TextValueV1) {
+    let unit: [byte; up_to 512] = [117, 110, 105, 116];
+    return TextValueV1 { is_string: true, blank: false, bytes: unit };
+}
+
+fn normalize_manifest_test(row: ManifestTestV1) -> (result: ManifestTestNormalizationV1) {
+    let effective_kind: TextValueV1 = row.kind;
+    if !row.kind_present {
+        return ManifestTestNormalizationV1 {
+            kind: unit_kind(),
+            tags: row.tags,
+            arguments_defaulted: !row.arguments_present,
+            diagnostic_codes: row.diagnostic_codes
+        };
+    }
+    return ManifestTestNormalizationV1 {
+        kind: effective_kind,
+        tags: row.tags,
+        arguments_defaulted: !row.arguments_present,
+        diagnostic_codes: row.diagnostic_codes
+    };
+}
+
+fn public_result(
+    request: ManifestTestValidationRequestV1,
+    issue: ManifestTestIssueV1
+) -> (result: ManifestTestValidationResultV1) {
+    let empty_text: TextValueV1 = TextValueV1 { is_string: false, blank: false, bytes: [] };
+    let empty_normalization: ManifestTestNormalizationV1 = ManifestTestNormalizationV1 {
+        kind: empty_text,
+        tags: [],
+        arguments_defaulted: false,
+        diagnostic_codes: []
+    };
+    let empty_rows: [ManifestTestNormalizationV1; 16] = [empty_normalization; 16];
+    if issue.code != 0 {
+        return ManifestTestValidationResultV1 {
+            schema_version: result_schema(),
+            supported: issue.code != 255,
+            valid: false,
+            issue_code: issue.code,
+            test_index: issue.test_index,
+            field_index: issue.field_index,
+            item_index: issue.item_index,
+            normalized_test_count: 0,
+            normalized_tests: empty_rows
+        };
+    }
+    iterate i over request.tests carrying normalized: [ManifestTestNormalizationV1; 16] = empty_rows {
+        next normalized = replace(normalized, i, normalize_manifest_test(request.tests[i]));
+    }
     return ManifestTestValidationResultV1 {
         schema_version: result_schema(),
-        supported: issue.code != 255,
-        valid: issue.code == 0,
-        issue_code: issue.code,
+        supported: true,
+        valid: true,
+        issue_code: 0,
         test_index: issue.test_index,
         field_index: issue.field_index,
-        item_index: issue.item_index
+        item_index: issue.item_index,
+        normalized_test_count: request.test_count,
+        normalized_tests: normalized
     };
 }
 
@@ -497,7 +562,7 @@ fn manifest_test_validation_app_v1(context: ApplicationContext) -> (result: Appl
     }
     let request: ManifestTestValidationRequestV1 = structured_read(context.argv[0], request_schema());
     let issue: ManifestTestIssueV1 = validate(request);
-    let result: ManifestTestValidationResultV1 = public_result(issue);
+    let result: ManifestTestValidationResultV1 = public_result(request, issue);
     let published: u64 = structured_write(context.argv[1], result_schema(), result);
     if published == 0 {
         return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
