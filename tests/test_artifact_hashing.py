@@ -175,6 +175,9 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             "call_batch",
             wraps=hasher.session.call_batch,
         ) as embedded_call_batch:
+            empty_stream_digest = hasher.digest_chunks([])
+            exact_window = bytes(range(256)) * 48
+            exact_window_digest = hasher.digest_chunks([exact_window])
             store.write("stdout/large.bin", payload, "stdout")
             store.record_existing(path, "compiler-output")
 
@@ -182,14 +185,31 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             [item.get("function") for item in call.args[0]]
             for call in embedded_call_batch.call_args_list
         ]
-        expected_windows = sum(
+        requests = [
+            call.args[0][0]["typed_args"][0]
+            for call in embedded_call_batch.call_args_list
+        ]
+        finalize_values = [
+            request["record"]["fields"]["finalize"]["boolean"]["value"]
+            for request in requests
+        ]
+        window_counts = [
             (size + mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - 1)
             // mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
             for size in (len(payload), len(file_payload))
-        )
-        assert function_batches.count(["update_stream_state"]) == expected_windows
-        assert len(function_batches) == expected_windows + 4  # init and finalize per digest
+        ]
+        expected_windows = sum(window_counts)
+        assert function_batches.count(["update_stream_state"]) == expected_windows + 2
+        assert len(function_batches) == expected_windows + 2
         assert all(len(batch) == 1 for batch in function_batches)
+        assert "init" not in [batch[0] for batch in function_batches]
+        assert "finalize_standard" not in [batch[0] for batch in function_batches]
+        assert finalize_values[:2] == [True, True]
+        assert finalize_values[1 + window_counts[0]] is True
+        assert finalize_values[-1] is True
+        assert sum(finalize_values) == 4
+        assert empty_stream_digest == hashlib.sha256(b"").hexdigest()
+        assert exact_window_digest == hashlib.sha256(exact_window).hexdigest()
 
         assert store._identity_hasher is not None
         assert store._identity_hasher.session is not None

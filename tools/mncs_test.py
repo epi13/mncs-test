@@ -2740,7 +2740,9 @@ class ResultIdentityEmbedHasher:
             for pair in raw_fields
             if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)
         }
-        digest_value = fields.get("digest")
+        return self._digest_value(fields.get("digest"), label)
+
+    def _digest_value(self, digest_value: Any, label: str) -> str:
         sequence = digest_value.get("sequence") if isinstance(digest_value, dict) else None
         raw_bytes = sequence.get("values") if isinstance(sequence, dict) else None
         if not isinstance(raw_bytes, list) or len(raw_bytes) != 32:
@@ -2839,7 +2841,8 @@ class ResultIdentityEmbedHasher:
         window: bytes,
         *,
         total_before: int,
-    ) -> dict[str, Any]:
+        finalize: bool = False,
+    ) -> tuple[dict[str, Any], str | None]:
         if self.session is None:
             raise AdapterError("MNCS result identity session is closed")
         has_state = total_before > 0
@@ -2864,7 +2867,7 @@ class ResultIdentityEmbedHasher:
                 "has_state": _host_boolean(has_state),
                 "state": request_state,
                 "chunks": _host_sequence(chunks),
-                "finalize": _host_boolean(False),
+                "finalize": _host_boolean(finalize),
             },
         )
         budget = result_identity_step_budget([window])
@@ -2893,6 +2896,13 @@ class ResultIdentityEmbedHasher:
         accepted_boolean = accepted.get("boolean") if isinstance(accepted, dict) else None
         if not isinstance(accepted_boolean, dict) or accepted_boolean.get("value") is not True:
             raise AdapterError("MNCS result identity stream rejected the bounded hash request")
+        finalized = update_fields.get("finalized") if isinstance(update_fields, dict) else None
+        finalized_boolean = finalized.get("boolean") if isinstance(finalized, dict) else None
+        if (
+            not isinstance(finalized_boolean, dict)
+            or finalized_boolean.get("value") is not finalize
+        ):
+            raise AdapterError("MNCS result identity stream returned the wrong finalization status")
         state = update_fields.get("state")
         if not isinstance(state, dict) or not isinstance(state.get("record"), dict):
             raise AdapterError("MNCS result identity stream returned a malformed state record")
@@ -2902,26 +2912,17 @@ class ResultIdentityEmbedHasher:
         buffered_value = fields.get("buffered", {}).get("integer", {}).get("value")
         if total_value != total or buffered_value != total % 64:
             raise AdapterError("MNCS result identity stream returned inconsistent SHA-256 state")
-        return state
+        digest = (
+            self._digest_value(update_fields.get("digest"), "result identity stream finalization")
+            if finalize else None
+        )
+        return state, digest
 
     def digest_chunks(self, source_chunks: Iterable[bytes]) -> str:
         """Hash a byte stream through MNCS with bounded, reusable session calls."""
         if self.session is None or self._closed:
             raise AdapterError("MNCS result identity session is closed")
-        initialized = self.session.call_batch(
-            [
-                {
-                    "module": "mncs.std.sha256.v1",
-                    "function": "init",
-                    "args": [],
-                    "step_budget": 2_097_152,
-                }
-            ]
-        )[0]
-        state = _host_value_from_execution(self._returned(initialized, "SHA-256 init"))
-        if state.get("record", {}).get("type") != "DigestState":
-            raise AdapterError("MNCS SHA-256 init returned the wrong state type")
-
+        state = self._empty_stream_state()
         total = 0
         pending = bytearray()
         for source_chunk in source_chunks:
@@ -2931,45 +2932,24 @@ class ResultIdentityEmbedHasher:
                 raise AdapterError("MNCS retained hash session input exceeds its bounded byte limit")
             offset = 0
             while offset < len(source_chunk):
+                if len(pending) == TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES:
+                    state, _digest = self._update_stream_window(
+                        state, bytes(pending), total_before=total
+                    )
+                    total += len(pending)
+                    pending.clear()
                 take = min(
                     TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - len(pending),
                     len(source_chunk) - offset,
                 )
                 pending.extend(source_chunk[offset : offset + take])
                 offset += take
-                if len(pending) == TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES:
-                    state = self._update_stream_window(
-                        state, bytes(pending), total_before=total
-                    )
-                    total += len(pending)
-                    pending.clear()
-        if pending:
-            state = self._update_stream_window(state, bytes(pending), total_before=total)
-
-        finalized = self.session.call_batch(
-            [
-                {
-                    "module": "mncs.std.sha256.v1",
-                    "function": "finalize_standard",
-                    "typed_args": [state],
-                    "step_budget": 2_097_152,
-                }
-            ]
-        )[0]
-        value = self._returned(finalized, "SHA-256 finalization")
-        if not isinstance(value, dict):
-            raise AdapterError("MNCS SHA-256 finalization returned a malformed digest")
-        raw_bytes = value.get("sequence", {}).get("values")
-        if not isinstance(raw_bytes, list) or len(raw_bytes) != 32:
-            raise AdapterError("MNCS SHA-256 finalization returned a malformed digest")
-        digest: list[int] = []
-        for item in raw_bytes:
-            byte_value = item.get("byte") if isinstance(item, dict) else None
-            byte = byte_value.get("value") if isinstance(byte_value, dict) else None
-            if type(byte) is not int or byte < 0 or byte > 255:
-                raise AdapterError("MNCS SHA-256 finalization returned a malformed digest byte")
-            digest.append(byte)
-        return bytes(digest).hex()
+        _state, digest = self._update_stream_window(
+            state, bytes(pending), total_before=total, finalize=True
+        )
+        if digest is None:
+            raise AdapterError("MNCS result identity stream omitted its finalized digest")
+        return digest
 
     def _hash_stream(self, payload: bytes) -> str:
         return self.digest_chunks(

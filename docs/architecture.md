@@ -138,7 +138,9 @@ identity and SHA-256 functions in bounded windows for payloads and files up to
 artifact against independent Python `hashlib` results. The retained session
 adds a one-time compile and open cost; no throughput gain over host `hashlib`
 is claimed. Each retained window now uses one MNCS function that validates the
-request and advances SHA-256 state together. Larger artifacts encountered
+request and advances SHA-256 state together; the final window also finalizes the
+digest in that same call, with no separate initialization or finalization call
+from Python. Larger artifacts encountered
 before warm-up, or any artifact over 512 KiB, retain the host streaming
 fallback. Python still reads
 and writes files, supplies bounded typed values, and hashes source and
