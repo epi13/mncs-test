@@ -168,8 +168,28 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
     ):
         for index, small_payload in enumerate((b"first", b"second", b"third")):
             store.write(f"stdout/{index}.bin", small_payload, "stdout")
-        store.write("stdout/large.bin", payload, "stdout")
-        store.record_existing(path, "compiler-output")
+        hasher = store._retained_identity_hasher()
+        assert hasher is not None and hasher.session is not None
+        with mock.patch.object(
+            hasher.session,
+            "call_batch",
+            wraps=hasher.session.call_batch,
+        ) as embedded_call_batch:
+            store.write("stdout/large.bin", payload, "stdout")
+            store.record_existing(path, "compiler-output")
+
+        function_batches = [
+            [item.get("function") for item in call.args[0]]
+            for call in embedded_call_batch.call_args_list
+        ]
+        expected_windows = sum(
+            (size + mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - 1)
+            // mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
+            for size in (len(payload), len(file_payload))
+        )
+        assert function_batches.count(["update_stream_state"]) == expected_windows
+        assert len(function_batches) == expected_windows + 4  # init and finalize per digest
+        assert all(len(batch) == 1 for batch in function_batches)
 
         assert store._identity_hasher is not None
         assert store._identity_hasher.session is not None

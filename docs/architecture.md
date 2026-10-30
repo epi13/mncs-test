@@ -137,8 +137,10 @@ identity and SHA-256 functions in bounded windows for payloads and files up to
 512 KiB. A differential test covers a 512 KiB payload and a 393,233-byte compiler
 artifact against independent Python `hashlib` results. The retained session
 adds a one-time compile and open cost; no throughput gain over host `hashlib`
-is claimed. Larger artifacts encountered before warm-up, or any artifact over
-512 KiB, retain the host streaming fallback. Python still reads
+is claimed. Each retained window now uses one MNCS function that validates the
+request and advances SHA-256 state together. Larger artifacts encountered
+before warm-up, or any artifact over 512 KiB, retain the host streaming
+fallback. Python still reads
 and writes files, supplies bounded typed values, and hashes source and
 provenance files.
 

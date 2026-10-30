@@ -2874,23 +2874,28 @@ class ResultIdentityEmbedHasher:
             [
                 {
                     "module": "mncs.test.result_identity_v1",
-                    "function": "valid_stream_request",
-                    "typed_args": [request],
-                    "step_budget": budget,
-                },
-                {
-                    "module": "mncs.test.result_identity_v1",
                     "function": "update_stream_state",
-                    "typed_args": [state, request],
+                    "typed_args": [request],
                     "step_budget": budget,
                 },
             ]
         )
-        if len(outputs) != 2:
+        if len(outputs) != 1:
             raise AdapterError("MNCS result identity stream returned the wrong result count")
-        valid, updated = outputs
-        self._require_valid(valid, "result identity stream validation")
-        state = _host_value_from_execution(self._returned(updated, "result identity stream"))
+        update = _host_value_from_execution(
+            self._returned(outputs[0], "result identity stream")
+        )
+        if not isinstance(update, dict):
+            raise AdapterError("MNCS result identity stream returned no update record")
+        record = update.get("record")
+        update_fields = record.get("fields") if isinstance(record, dict) else None
+        accepted = update_fields.get("accepted") if isinstance(update_fields, dict) else None
+        accepted_boolean = accepted.get("boolean") if isinstance(accepted, dict) else None
+        if not isinstance(accepted_boolean, dict) or accepted_boolean.get("value") is not True:
+            raise AdapterError("MNCS result identity stream rejected the bounded hash request")
+        state = update_fields.get("state")
+        if not isinstance(state, dict) or not isinstance(state.get("record"), dict):
+            raise AdapterError("MNCS result identity stream returned a malformed state record")
         total = total_before + len(window)
         fields = self._state_fields(state)
         total_value = fields.get("total", {}).get("integer", {}).get("value")

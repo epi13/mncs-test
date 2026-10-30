@@ -53,6 +53,11 @@ record ResultIdentityStreamResultV1 {
     digest: [byte; 32]
 }
 
+record ResultIdentityStreamUpdateV1 {
+    accepted: bool,
+    state: sha256.DigestState
+}
+
 fn request_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
 }
@@ -225,13 +230,21 @@ fn stream_initial_state(request: ResultIdentityStreamRequestV1) -> (result: sha2
 }
 
 fn update_stream_state(
-    state: sha256.DigestState,
     request: ResultIdentityStreamRequestV1
-) -> (result: sha256.DigestState) {
-    iterate i over request.chunks carrying digest: sha256.DigestState = state {
+) -> (result: ResultIdentityStreamUpdateV1) {
+    if !valid_stream_request(request) {
+        return ResultIdentityStreamUpdateV1 {
+            accepted: false,
+            state: sha256.init()
+        };
+    }
+    iterate i over request.chunks carrying digest: sha256.DigestState = stream_initial_state(request) {
         next digest = absorb_chunk(digest, request.chunks[i]);
     }
-    return digest;
+    return ResultIdentityStreamUpdateV1 {
+        accepted: true,
+        state: digest
+    };
 }
 
 fn stream_state_record(state: sha256.DigestState) -> (result: ResultIdentityHashStateV1) {
@@ -280,13 +293,11 @@ fn result_identity_stream_app_v1(context: ApplicationContext) -> (result: Applic
         context.argv[0],
         stream_request_schema()
     );
-    if !valid_stream_request(request) {
+    let update: ResultIdentityStreamUpdateV1 = update_stream_state(request);
+    if !update.accepted {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 116, 114, 101, 97, 109, 32, 114, 101, 113, 117, 101, 115, 116], 4);
     }
-    let updated: sha256.DigestState = update_stream_state(
-        stream_initial_state(request),
-        request
-    );
+    let updated: sha256.DigestState = update.state;
     let digest: [byte; 32] = select(
         request.finalize,
         sha256.finalize_standard(updated),
