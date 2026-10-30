@@ -27,10 +27,15 @@ WORKSPACE_ROOT = next(
 LANGUAGE = Path(os.environ.get("MNCS_LANGUAGE_REPO", WORKSPACE_ROOT / "mncs-language"))
 COMMONS = Path(os.environ.get("MNCS_COMMONS_REPO", WORKSPACE_ROOT / "MNCS-Commons"))
 os.environ.setdefault("MNCS_COMMONS_ROOT", str(COMMONS))
-MNCS = Path(os.environ.get("MNCS", LANGUAGE / "target" / "debug" / "mncs"))
-EMBED_LIBRARY = Path(
-    os.environ.get("MNCS_EMBED_LIBRARY", LANGUAGE / "target" / "debug" / "libmncs_embed.so")
-)
+_RELEASE_MNCS = LANGUAGE / "target" / "release" / "mncs"
+_DEBUG_MNCS = LANGUAGE / "target" / "debug" / "mncs"
+MNCS = Path(os.environ.get(
+    "MNCS", _RELEASE_MNCS if _RELEASE_MNCS.is_file() else _DEBUG_MNCS
+))
+_DEFAULT_EMBED_LIBRARY = MNCS.resolve().parent / "libmncs_embed.so"
+if not _DEFAULT_EMBED_LIBRARY.is_file():
+    _DEFAULT_EMBED_LIBRARY = LANGUAGE / "target" / "debug" / "libmncs_embed.so"
+EMBED_LIBRARY = Path(os.environ.get("MNCS_EMBED_LIBRARY", _DEFAULT_EMBED_LIBRARY))
 LIVE = MNCS.is_file() and os.access(MNCS, os.X_OK)
 
 
