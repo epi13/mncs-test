@@ -108,11 +108,14 @@ compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_v1` sorts object keys and emits the public JSON
 format, indentation, escaping, and final newline in MNCS. The original
 single-call application handles output through 16,300 bytes. Larger documents
-use up to 32 continuation pages of at most 8,192 bytes, carrying a bounded
-traversal stack and SHA-256 state between calls. The same window application
-updates `mncs.std.sha256.v1` as it emits each page and returns the final digest
-with the completed document. An independent host SHA-256 check validates the
-result. The native path accepts at most 512 values, depth 63,
+use up to 32 continuation calls, each carrying at most 8,192 JSON bytes plus a
+bounded traversal stack and SHA-256 state. A page can stop before a whole value
+when its conservative size bound would cross the page limit, so some page
+capacity may remain unused. The aggregate document limit is 32,684 bytes. The
+same window application updates `mncs.std.sha256.v1` as it emits each page and
+returns the final digest with the completed document. An independent host
+SHA-256 check validates the result. The native path accepts at most 512 values,
+depth 63,
 64 children per object, 256-byte keys, 1,024-byte scalar text, and 32,684 output
 bytes. Python still projects arbitrary runtime values into that request,
 reassembles output pages, writes files, and keeps the compatibility serializer
