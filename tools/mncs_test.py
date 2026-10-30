@@ -91,6 +91,7 @@ LIBRARY_TREE_IDENTITY_RESULT_SCHEMA = "mncs.test-library-tree-identity/1"
 LIBRARY_TREE_IDENTITY_MAX_ENTRIES = 128
 LIBRARY_TREE_IDENTITY_MAX_PATH_BYTES = 1024
 LIBRARY_TREE_IDENTITY_MAX_REQUEST_BYTES = 65_536
+LIBRARY_TREE_IDENTITY_MAX_NATIVE_LEAF_TOTAL_BYTES = 1024 * 1024
 TEST_RESULT_IDENTITY_MAX_BYTES = 65536
 TEST_RESULT_IDENTITY_MAX_PAYLOADS = 16
 TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
@@ -635,12 +636,55 @@ def library_tree_identity_sha256(
     return digest
 
 
+def _library_tree_native_leaf_fallback_reason(
+    entries: list[tuple[Path, str]],
+    *,
+    artifacts: ArtifactStore | None,
+) -> str | None:
+    """Return why bounded leaf hashing cannot use the existing MNCS adapter."""
+    if len(entries) > LIBRARY_TREE_IDENTITY_MAX_ENTRIES:
+        return "library_tree_entry_count"
+    if artifacts is None or artifacts.mncs is None:
+        return "native_context_unavailable"
+    if artifacts.cwd is None or artifacts.environment is None or artifacts._closed:
+        return "native_context_unavailable"
+
+    encoded_paths: list[list[int]] = []
+    total_bytes = 0
+    for path, relative in entries:
+        path_bytes = relative.encode("utf-8")
+        if not path_bytes or len(path_bytes) > LIBRARY_TREE_IDENTITY_MAX_PATH_BYTES:
+            return "library_tree_path_length"
+        try:
+            total_bytes += path.stat().st_size
+        except OSError:
+            return "library_leaf_size_unavailable"
+        encoded_paths.append(list(path_bytes))
+    if total_bytes > LIBRARY_TREE_IDENTITY_MAX_NATIVE_LEAF_TOTAL_BYTES:
+        return "library_tree_native_leaf_byte_bound"
+
+    # Each hexadecimal digest byte is at most 102, so this request is an
+    # upper bound on the eventual JSON wire size before reading any leaf.
+    request = {
+        "schema_version": LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA,
+        "entry_count": len(entries),
+        "entries": [
+            {"path": path_bytes, "leaf_sha256": [102] * 64}
+            for path_bytes in encoded_paths
+        ],
+    }
+    if len(json.dumps(request).encode("utf-8")) > LIBRARY_TREE_IDENTITY_MAX_REQUEST_BYTES:
+        return "library_tree_request_bytes"
+    return None
+
+
 def _hash_tree_with_method(
     path: Path,
     *,
     mncs: str | None = None,
     cwd: Path | None = None,
     environment: dict[str, str] | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Return the tree digest and report whether MNCS or the host computed it.
 
@@ -659,19 +703,62 @@ def _hash_tree_with_method(
             "algorithm": "sha256-missing-path/1",
             "implementation": "host",
         }
-    entries: list[tuple[str, str]] = []
-    for root, directories, files in os.walk(path, followlinks=False):
+    file_entries: list[tuple[Path, str]] = []
+    for root, directories, names in os.walk(path, followlinks=False):
         directories.sort()
-        files.sort()
+        names.sort()
         root_path = Path(root)
-        for name in files:
+        for name in names:
             item = root_path / name
             relative = item.relative_to(path).as_posix()
-            try:
+            file_entries.append((item, relative))
+
+    entries: list[tuple[str, str]] = []
+    leaf_fallback = _library_tree_native_leaf_fallback_reason(
+        file_entries,
+        artifacts=artifacts,
+    )
+    leaf_hashing: dict[str, Any] = {
+        "algorithm": "sha256-file/1",
+        "native_implementation": "mncs.test.result_identity_v1",
+        "native_entries": 0,
+        "native_bytes": 0,
+        "native_transport_counts": {},
+        "host_entries": 0,
+        "host_bytes": 0,
+        "host_fallback_reasons": {},
+    }
+    for item, relative in file_entries:
+        try:
+            if leaf_fallback is None and artifacts is not None:
+                item_hash, leaf_method = artifacts.digest_file_with_method(item)
+            else:
                 item_hash = sha256_file(item)
-            except OSError:
-                item_hash = sha256_bytes(f"unreadable:{relative}".encode())
-            entries.append((relative, item_hash))
+                leaf_method = {
+                    "implementation": "host",
+                    "fallback_reason": leaf_fallback or "native_context_unavailable",
+                }
+            item_size = item.stat().st_size
+        except OSError:
+            item_hash = sha256_bytes(f"unreadable:{relative}".encode())
+            item_size = 0
+            leaf_method = {
+                "implementation": "host",
+                "fallback_reason": "library_leaf_unreadable",
+            }
+        entries.append((relative, item_hash))
+        if leaf_method.get("implementation") in {"mncs-application", "mncs-embed"}:
+            leaf_hashing["native_entries"] += 1
+            leaf_hashing["native_bytes"] += item_size
+            transport = leaf_method["implementation"]
+            transports = leaf_hashing["native_transport_counts"]
+            transports[transport] = transports.get(transport, 0) + 1
+        else:
+            leaf_hashing["host_entries"] += 1
+            leaf_hashing["host_bytes"] += item_size
+            reason = leaf_method.get("fallback_reason", "host_compatibility")
+            fallbacks = leaf_hashing["host_fallback_reasons"]
+            fallbacks[reason] = fallbacks.get(reason, 0) + 1
 
     if mncs is not None and cwd is not None and environment is not None:
         try:
@@ -685,6 +772,7 @@ def _hash_tree_with_method(
                 "algorithm": "sha256-library-tree-records/1",
                 "implementation": "mncs.test.library_tree_identity_v1",
                 "entries": len(entries),
+                "leaf_hashing": leaf_hashing,
             }
         except NativeInputBoundError as error:
             fallback_reason = error.reason
@@ -708,6 +796,7 @@ def _hash_tree_with_method(
         "implementation": "host",
         "entries": len(entries),
         "fallback_reason": fallback_reason,
+        "leaf_hashing": leaf_hashing,
     }
     if fallback_detail:
         hashing["fallback_detail"] = fallback_detail[:512]
@@ -2476,6 +2565,56 @@ class ArtifactStore:
             )
         return self._digest_bounded_payload(payload)
 
+    def digest_file_with_method(self, path: Path) -> tuple[str, dict[str, str]]:
+        """Hash one file and report the native adapter or explicit host fallback."""
+        if self._closed:
+            raise AdapterError("artifact store is closed")
+        if self.mncs is None:
+            return sha256_file(path), {
+                "implementation": "host",
+                "fallback_reason": "native_context_unavailable",
+            }
+        if self.cwd is None or self.environment is None:
+            raise AdapterError("native artifact hashing context is incomplete")
+        file_size = path.stat().st_size
+        if file_size > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+            return sha256_file(path), {
+                "implementation": "host",
+                "fallback_reason": "artifact_file_over_native_bound",
+            }
+
+        operations_before = self._native_hash_operations
+        try:
+            digest = self.digest_file(path)
+        except (AdapterError, NativeTransportError, NativeBudgetExhaustedError) as error:
+            return sha256_file(path), {
+                "implementation": "host",
+                "fallback_reason": "native_hash_failure",
+                "fallback_detail": str(error)[:512],
+            }
+
+        if self._identity_hasher is not None:
+            return digest, {"implementation": "mncs-embed"}
+        if self._native_hash_operations > operations_before:
+            return digest, {"implementation": "mncs-application"}
+
+        if file_size > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+            if operations_before < TEST_RESULT_IDENTITY_EMBED_SESSION_AFTER_ARTIFACTS:
+                reason = "native_embed_session_not_warm"
+            else:
+                reason = "native_embed_session_unavailable"
+            detail = self._identity_hasher_failure
+        else:
+            reason = "native_hash_not_used"
+            detail = self._identity_hasher_failure
+        result: dict[str, str] = {
+            "implementation": "host",
+            "fallback_reason": reason,
+        }
+        if detail:
+            result["fallback_detail"] = detail[:512]
+        return digest, result
+
     def write(self, relative: str, payload: bytes, kind: str) -> str:
         path = (self.root / relative).resolve()
         try:
@@ -4177,6 +4316,7 @@ def manifest_provenance(
             mncs=tree_mncs,
             cwd=tree_cwd,
             environment=tree_environment,
+            artifacts=artifacts,
         )
         libraries.append({"path": str(path), "sha256": digest, "hashing": hashing})
     return {

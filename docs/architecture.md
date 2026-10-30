@@ -152,20 +152,25 @@ the runner source through the MNCS stream in 14,336-byte windows. Files above
 native application handles files through 65,536 bytes; larger files fall back
 to the host until warm-up. If embedding fails, bounded files use the existing
 native application through 65,536 bytes and larger files use host fallback.
-Library directory enumeration, per-file reads, and leaf hashes stay on the
-host. `mncs.test.library_tree_identity_v1` now owns the final ordered
-`path NUL leaf-digest LF` fold for directories with at most 128 entries and a
-65,536-byte request. The adapter reports the selected implementation and
-retains an explicit host fallback when the entry, path, or request bounds are
-exceeded or native execution fails.
+Library directory enumeration and per-file reads stay on the host. For a
+directory with at most 128 entries, a request within 65,536 bytes, and at most
+1 MiB of leaf bytes, `ArtifactStore` hashes eligible leaf files through
+`mncs.test.result_identity_v1`: files through 65,536 bytes use a native
+application or the retained session; larger files through 512 KiB use the
+retained session after warm-up. Oversized files, a retained session that is
+not warm or unavailable, and native failures retain the exact host digest and
+report its fallback reason. `mncs.test.library_tree_identity_v1` owns the
+final ordered `path NUL leaf-digest LF` fold. The adapter reports leaf and
+tree implementations separately and retains an explicit host fold when the
+entry, path, or request bounds are exceeded or native execution fails.
 Each retained window uses one MNCS function that validates the
 request and advances SHA-256 state together; the final window also finalizes the
 digest in that same call, with no separate initialization or finalization call
 from Python. Larger artifacts encountered
 before warm-up, or any artifact over 512 KiB, retain the host streaming
 fallback. Python still reads and writes files, supplies bounded typed values,
-enumerates library directories, hashes per-file library leaves, and preserves
-explicit host fallback for unavailable or out-of-bound tree and source hashes.
+enumerates library directories, and preserves explicit host fallback for
+unavailable or out-of-bound leaf, tree, and source hashes.
 
 `mncs.test.lineage_identity_v1` now constructs and hashes per-test execution
 and observation identity JSON from typed index, run, test-case, status, and
