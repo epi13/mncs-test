@@ -83,10 +83,15 @@ TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
 TEST_RESULT_SUMMARY_RESULT_SCHEMA = "mncs.test-result-summary/1"
 TEST_RESULT_IDENTITY_REQUEST_SCHEMA = "mncs.test-result-identity-request/1"
 TEST_RESULT_IDENTITY_RESULT_SCHEMA = "mncs.test-result-identity/1"
+TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA = "mncs.test-result-identity-stream-request/1"
+TEST_RESULT_IDENTITY_STREAM_RESULT_SCHEMA = "mncs.test-result-identity-stream/1"
 TEST_RESULT_IDENTITY_MAX_BYTES = 65536
 TEST_RESULT_IDENTITY_MAX_PAYLOADS = 16
 TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
 TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
+TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES = 12 * 1024
+TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST = 12
+TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES = 65_536
 TEST_LINEAGE_IDENTITY_REQUEST_SCHEMA = "mncs.test.lineage-identity-request/1"
 TEST_LINEAGE_IDENTITY_RESULT_SCHEMA = "mncs.test.lineage-identity/1"
 TEST_LINEAGE_IDENTITY_MAX_ROWS = 16
@@ -1151,6 +1156,166 @@ def result_identity_sha256_batch(
     return output
 
 
+def _bounded_result_identity_stream_chunks(chunks: Iterable[bytes]) -> Iterable[bytes]:
+    """Coalesce source reads into fixed, SHA-block-aligned MNCS windows."""
+    pending = bytearray()
+    for chunk in chunks:
+        if not isinstance(chunk, bytes):
+            raise AdapterError("Test artifact hash stream must yield byte chunks")
+        offset = 0
+        while offset < len(chunk):
+            take = min(
+                TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - len(pending),
+                len(chunk) - offset,
+            )
+            pending.extend(chunk[offset : offset + take])
+            offset += take
+            if len(pending) == TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES:
+                yield bytes(pending)
+                pending.clear()
+    if pending:
+        yield bytes(pending)
+
+
+def _result_identity_stream_state(
+    result: dict[str, Any], *, expected_total: int, finalized: bool
+) -> tuple[dict[str, Any] | None, str | None]:
+    if (
+        result.get("schema_version") != TEST_RESULT_IDENTITY_STREAM_RESULT_SCHEMA
+        or type(result.get("finalized")) is not bool
+        or result["finalized"] is not finalized
+    ):
+        raise AdapterError("MNCS result-identity stream returned malformed metadata")
+
+    raw_state = result.get("state")
+    if not isinstance(raw_state, dict):
+        raise AdapterError("MNCS result-identity stream returned a malformed SHA-256 state")
+    h = raw_state.get("h")
+    total = raw_state.get("total")
+    buffered = raw_state.get("buffered")
+    buf = raw_state.get("buf")
+    if (
+        not isinstance(h, list)
+        or len(h) != 8
+        or any(
+            not isinstance(word, int)
+            or isinstance(word, bool)
+            or not 0 <= word <= 0xFFFFFFFF
+            for word in h
+        )
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total != expected_total
+        or not isinstance(buffered, int)
+        or isinstance(buffered, bool)
+        or not 0 <= buffered < 64
+        or buffered != expected_total % 64
+    ):
+        raise AdapterError("MNCS result-identity stream returned an inconsistent SHA-256 state")
+
+    if isinstance(buf, str):
+        valid_buffer_shape = len(buf) == 64
+        empty_buffer = buf == "\x00" * 64
+    elif isinstance(buf, list):
+        valid_buffer_shape = len(buf) == 64 and all(
+            isinstance(byte, int)
+            and not isinstance(byte, bool)
+            and 0 <= byte <= 255
+            for byte in buf
+        )
+        empty_buffer = valid_buffer_shape and not any(buf)
+    else:
+        valid_buffer_shape = False
+        empty_buffer = False
+    if not valid_buffer_shape or (not finalized and (buffered != 0 or not empty_buffer)):
+        raise AdapterError("MNCS result-identity stream returned malformed buffered bytes")
+
+    digest = result.get("digest")
+    if finalized:
+        if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
+            raise AdapterError("MNCS result-identity stream returned a malformed digest")
+        return None, digest
+    if not isinstance(digest, str) or digest != "0" * 64:
+        raise AdapterError("MNCS result-identity stream returned a digest before finalization")
+    return {
+        "h": h,
+        "total": total,
+        "buf": [0] * 64,
+        "buffered": buffered,
+    }, None
+
+
+def _native_result_identity_stream_digest(
+    chunks: Iterable[bytes],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str:
+    """Hash a bounded artifact as MNCS-owned SHA-256 state windows."""
+    source = iter(_bounded_result_identity_stream_chunks(chunks))
+    try:
+        current = next(source)
+    except StopIteration:
+        current = b""
+
+    total = 0
+    hash_state: dict[str, Any] | None = None
+    while True:
+        try:
+            following = next(source)
+            finalized = False
+        except StopIteration:
+            following = None
+            finalized = True
+
+        request = {
+            "schema_version": TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA,
+            "has_state": hash_state is not None,
+            "state": hash_state or {
+                "h": [0] * 8,
+                "total": 0,
+                "buf": [0] * 64,
+                "buffered": 0,
+            },
+            "chunks": [
+                list(current[offset : offset + 1024])
+                for offset in range(0, len(current), 1024)
+            ],
+            "finalize": finalized,
+        }
+        if len(request["chunks"]) > TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST:
+            raise AdapterError("Test artifact hash stream exceeded its bounded MNCS window")
+        step_budget = result_identity_step_budget([current])
+        if step_budget > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET:
+            raise AdapterError("Test artifact hash stream exceeded the MNCS step budget")
+        try:
+            result = run_native_app(
+                "test-result-identity-stream.json",
+                request,
+                request_schema=TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA,
+                result_schema=TEST_RESULT_IDENTITY_STREAM_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=step_budget,
+            )
+        except NativeTransportError as error:
+            raise AdapterError(f"native Test artifact hash stream failed: {error}") from error
+
+        total += len(current)
+        hash_state, digest = _result_identity_stream_state(
+            result, expected_total=total, finalized=finalized
+        )
+        if finalized:
+            if digest is None:
+                raise AdapterError("MNCS result-identity stream did not finalize its digest")
+            return digest
+        if hash_state is None or following is None:
+            raise AdapterError("MNCS result-identity stream returned no continuation state")
+        current = following
+
+
 def result_identity_sha256_many(
     payloads: list[bytes],
     *,
@@ -2041,29 +2206,56 @@ class ArtifactStore:
         self.environment = environment
 
     def digest_payload(self, payload: bytes) -> str:
-        """Hash a bounded artifact payload through MNCS when configured."""
+        """Use MNCS for bounded artifacts and hashlib for larger payloads."""
         if self.mncs is None:
             return sha256_bytes(payload)
         if self.cwd is None or self.environment is None:
             raise AdapterError("native artifact hashing context is incomplete")
-        return result_identity_sha256(
-            payload,
+        if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+            return sha256_bytes(payload)
+        if (
+            len(payload) <= TEST_RESULT_IDENTITY_MAX_BYTES
+            and result_identity_step_budget([payload])
+            <= TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+        ):
+            return result_identity_sha256(
+                payload,
+                mncs=self.mncs,
+                cwd=self.cwd,
+                environment=self.environment,
+            )
+        return _native_result_identity_stream_digest(
+            [payload],
             mncs=self.mncs,
             cwd=self.cwd,
             environment=self.environment,
         )
 
     def digest_file(self, path: Path) -> str:
-        """Hash a small file natively and stream larger files on the host."""
-        with path.open("rb") as handle:
-            payload = handle.read(TEST_RESULT_IDENTITY_MAX_BYTES + 1)
-        if (
-            len(payload) > TEST_RESULT_IDENTITY_MAX_BYTES
-            or result_identity_step_budget([payload])
-            > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
-        ):
+        """Use MNCS for bounded files and the host streaming hash for larger files."""
+        if self.mncs is None:
             return sha256_file(path)
-        return self.digest_payload(payload)
+        if self.cwd is None or self.environment is None:
+            raise AdapterError("native artifact hashing context is incomplete")
+        if path.stat().st_size > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+            return sha256_file(path)
+        with path.open("rb") as handle:
+            payload = handle.read(TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES + 1)
+            if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+                return sha256_file(path)
+            if (
+                len(payload) <= TEST_RESULT_IDENTITY_MAX_BYTES
+                and result_identity_step_budget([payload])
+                <= TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+            ):
+                return self.digest_payload(payload)
+
+            return _native_result_identity_stream_digest(
+                [payload],
+                mncs=self.mncs,
+                cwd=self.cwd,
+                environment=self.environment,
+            )
 
     def write(self, relative: str, payload: bytes, kind: str) -> str:
         path = (self.root / relative).resolve()

@@ -31,12 +31,42 @@ record ResultIdentityResultV1 {
     digests: [IdentityHashV1; up_to 16]
 }
 
+record ResultIdentityHashStateV1 {
+    h: [u32; 8],
+    total: u64,
+    buf: [byte; 64],
+    buffered: u64
+}
+
+record ResultIdentityStreamRequestV1 {
+    schema_version: [byte; up_to 64],
+    has_state: bool,
+    state: ResultIdentityHashStateV1,
+    chunks: [[byte; up_to 1024]; up_to 12],
+    finalize: bool
+}
+
+record ResultIdentityStreamResultV1 {
+    schema_version: [byte; up_to 64],
+    state: ResultIdentityHashStateV1,
+    finalized: bool,
+    digest: [byte; 32]
+}
+
 fn request_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 47, 49];
+}
+
+fn stream_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 115, 116, 114, 101, 97, 109, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn stream_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 115, 116, 114, 101, 97, 109, 47, 49];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -83,6 +113,37 @@ fn valid_payload_slices(request: ResultIdentityRequestV1) -> (result: bool) {
     }
     let last: IdentityPayloadSliceV1 = request.payloads[request.payload_count -% 1];
     return valid && last.first_chunk +% last.chunk_count == request.chunk_count;
+}
+
+fn empty_stream_state(state: ResultIdentityHashStateV1) -> (result: bool) {
+    iterate i over state.h carrying valid: bool = state.total == 0 && state.buffered == 0 {
+        next valid = valid && state.h[i] == 0;
+    }
+    iterate i over state.buf carrying zero_buf: bool = valid {
+        next zero_buf = zero_buf && state.buf[i] == 0;
+    }
+    return zero_buf;
+}
+
+fn valid_stream_state(state: ResultIdentityHashStateV1) -> (result: bool) {
+    if state.buffered >= 64 || state.total % 64 != state.buffered {
+        return false;
+    }
+    iterate i over state.buf carrying valid: bool = true {
+        next valid = valid && (i < state.buffered || state.buf[i] == 0);
+    }
+    return valid;
+}
+
+fn valid_stream_request(request: ResultIdentityStreamRequestV1) -> (result: bool) {
+    if !same_bytes(request.schema_version, stream_request_schema())
+        || request.chunks.len > 12 {
+        return false;
+    }
+    if request.has_state {
+        return valid_stream_state(request.state);
+    }
+    return empty_stream_state(request.state);
 }
 
 fn total_chunk_bytes(request: ResultIdentityRequestV1) -> (result: u64) {
@@ -151,6 +212,37 @@ fn hash_payloads(request: ResultIdentityRequestV1) -> (result: [IdentityHashV1; 
     return hashes[0..request.payload_count];
 }
 
+fn stream_initial_state(request: ResultIdentityStreamRequestV1) -> (result: sha256.DigestState) {
+    if request.has_state {
+        return sha256.DigestState {
+            h: request.state.h,
+            total: request.state.total,
+            buf: request.state.buf,
+            buffered: request.state.buffered
+        };
+    }
+    return sha256.init();
+}
+
+fn update_stream_state(
+    state: sha256.DigestState,
+    request: ResultIdentityStreamRequestV1
+) -> (result: sha256.DigestState) {
+    iterate i over request.chunks carrying digest: sha256.DigestState = state {
+        next digest = absorb_chunk(digest, request.chunks[i]);
+    }
+    return digest;
+}
+
+fn stream_state_record(state: sha256.DigestState) -> (result: ResultIdentityHashStateV1) {
+    return ResultIdentityHashStateV1 {
+        h: state.h,
+        total: state.total,
+        buf: state.buf,
+        buffered: state.buffered
+    };
+}
+
 fn result_identity_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
     capability test_artifact
     effect structured_read authorized_by test_artifact
@@ -172,6 +264,47 @@ fn result_identity_app_v1(context: ApplicationContext) -> (result: ApplicationEx
     let published: u64 = structured_write(context.argv[1], result_schema(), result);
     if published == 0 {
         return failure([114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
+
+fn result_identity_stream_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 116, 114, 101, 97, 109, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ResultIdentityStreamRequestV1 = structured_read(
+        context.argv[0],
+        stream_request_schema()
+    );
+    if !valid_stream_request(request) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 116, 114, 101, 97, 109, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let updated: sha256.DigestState = update_stream_state(
+        stream_initial_state(request),
+        request
+    );
+    let digest: [byte; 32] = select(
+        request.finalize,
+        sha256.finalize_standard(updated),
+        [0; 32]
+    );
+    let result: ResultIdentityStreamResultV1 = ResultIdentityStreamResultV1 {
+        schema_version: stream_result_schema(),
+        state: stream_state_record(updated),
+        finalized: request.finalize,
+        digest: digest
+    };
+    let published: u64 = structured_write(
+        context.argv[1],
+        stream_result_schema(),
+        result
+    );
+    if published == 0 {
+        return failure([114, 101, 115, 117, 108, 116, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 115, 116, 114, 101, 97, 109, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
     }
     return success([]);
 }

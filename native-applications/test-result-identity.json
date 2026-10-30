@@ -5,7 +5,7 @@
   "module": "mncs.test.result_identity_v1",
   "entry_function": "result_identity_app_v1",
   "profile": "0.18",
-  "interface_identity": "5dffa748d5ccc26eaa863a76c1e22f81f1b1527c5db715b842c36fa1ed71b61d",
+  "interface_identity": "e58b71e7f1a05cbaff7e5bab462a617b8bcee6d7fa71553ae726f2f69c1771b3",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

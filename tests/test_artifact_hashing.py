@@ -79,7 +79,7 @@ def test_artifact_store_hashes_bounded_payloads_with_native_sha256(
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
-def test_artifact_store_streams_over_budget_file_hashes_on_host(
+def test_artifact_store_streams_medium_payload_and_file_hashes_in_mncs(
     tmp_path: Path,
 ) -> None:
     artifact_root = tmp_path / "artifacts"
@@ -90,7 +90,69 @@ def test_artifact_store_streams_over_budget_file_hashes_on_host(
         environment=_native_environment(),
     )
     payload = bytes((index * 19 + 7) % 256 for index in range(20_000))
+    file_payload = bytes((index * 23 + 11) % 256 for index in range(20_000))
     path = artifact_root / "compiler" / "large.bin"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(file_payload)
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+        mock.patch.object(
+            mncs_test, "sha256_file", wraps=mncs_test.sha256_file
+        ) as host_file_digest,
+        mock.patch.object(
+            mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
+        ) as host_bytes_digest,
+    ):
+        written = store.write("stdout/large.bin", payload, "stdout")
+        relative = store.record_existing(path, "compiler-output")
+
+    assert written == "stdout/large.bin"
+    assert relative == "compiler/large.bin"
+    assert store.items[0]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert store.items[1]["sha256"] == hashlib.sha256(file_payload).hexdigest()
+    assert native_app.call_count == 4
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-result-identity-stream.json",
+        "test-result-identity-stream.json",
+        "test-result-identity-stream.json",
+        "test-result-identity-stream.json",
+    ]
+    requests = [call.args[1] for call in native_app.call_args_list]
+    assert [sum(len(chunk) for chunk in request["chunks"]) for request in requests] == [
+        12_288,
+        7_712,
+        12_288,
+        7_712,
+    ]
+    assert [request["has_state"] for request in requests] == [False, True, False, True]
+    assert [request["finalize"] for request in requests] == [False, True, False, True]
+    assert all(
+        call.kwargs["step_budget"] <= mncs_test.TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+        for call in native_app.call_args_list
+    )
+    assert host_file_digest.call_count == 0
+    assert host_bytes_digest.call_count == 0
+
+
+@pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
+def test_artifact_store_bounds_native_streaming_to_64_kib(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    store = mncs_test.ArtifactStore(
+        artifact_root,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+    payload = bytes(
+        (index * 31 + 3) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES + 1)
+    )
+    path = artifact_root / "compiler" / "over-bound.bin"
     path.parent.mkdir(parents=True)
     path.write_bytes(payload)
 
@@ -105,13 +167,16 @@ def test_artifact_store_streams_over_budget_file_hashes_on_host(
             mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
         ) as host_bytes_digest,
     ):
+        written = store.write("stdout/over-bound.bin", payload, "stdout")
         relative = store.record_existing(path, "compiler-output")
 
-    assert relative == "compiler/large.bin"
-    assert store.items[0]["sha256"] == hashlib.sha256(payload).hexdigest()
+    expected = hashlib.sha256(payload).hexdigest()
+    assert written == "stdout/over-bound.bin"
+    assert relative == "compiler/over-bound.bin"
+    assert [item["sha256"] for item in store.items] == [expected, expected]
     assert native_app.call_count == 0
+    assert host_bytes_digest.call_count == 1
     assert host_file_digest.call_count == 1
-    assert host_bytes_digest.call_count == 0
 
 
 def test_artifact_store_requires_a_complete_native_context(tmp_path: Path) -> None:

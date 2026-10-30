@@ -121,17 +121,23 @@ bytes. Python still projects arbitrary runtime values into that request,
 reassembles output pages, writes files, and keeps the compatibility serializer
 for values outside the native bounds.
 
-`mncs.test.result_identity_v1` hashes canonical run-identity JSON bytes and
-bounded artifact content through `mncs.std.sha256.v1`. Python still constructs
-the canonical `run_id` JSON and formats the final result envelope. The adapter
-batches up to 16 payloads, 64 chunks, 65,536 bytes, and the toolchain's
-8,000,000-step application ceiling per request; larger payload lists split into
-bounded calls. An individual identity payload whose byte or step estimate
-exceeds those bounds keeps the host compatibility hash. `ArtifactStore` also
-uses this application for bounded artifact payloads and small compiler-created
-files, including execution-request digests. Filesystem reads and writes remain
-host operations; an artifact file whose native byte, chunk, or step estimate
-exceeds the application bound is hashed by the streaming host fallback.
+`mncs.test.result_identity_v1` constructs canonical run-identity JSON and
+hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
+fields into the request and formats the final result envelope; out-of-contract
+run identities retain the compact-JSON compatibility path. The batch identity
+application accepts up to 16 payloads, 64 chunks, 65,536 bytes, and the
+toolchain's 8,000,000-step ceiling per request. `ArtifactStore` uses the
+streaming identity application when a payload or file exceeds the batch's
+step limit but is at most 65,536 bytes. It carries native SHA-256 state between
+calls, with at most twelve 1,024-byte chunks (12,288 bytes) per call, so the
+continuation is bounded to six application executions. The first integrated
+self-suite attempt showed excessive process fan-out for its roughly 13 MB
+compiler artifacts and was stopped after 5:43. After capping native
+continuation and retaining the host's streaming `hashlib` path for larger
+artifacts, the integrated self-suite passed in 184.69 seconds. Python reads
+and writes files and sends bounded native chunks. Filesystem access, larger
+artifact compatibility hashes, and source and provenance hashes remain host
+operations.
 
 `mncs.test.lineage_identity_v1` now constructs and hashes per-test execution
 and observation identity JSON from typed index, run, test-case, status, and

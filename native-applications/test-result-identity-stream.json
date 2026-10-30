@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.result-identity-stream",
+  "source": "../native/mncs/test/result_identity_v1.mncs",
+  "module": "mncs.test.result_identity_v1",
+  "entry_function": "result_identity_stream_app_v1",
+  "profile": "0.18",
+  "interface_identity": "e58b71e7f1a05cbaff7e5bab462a617b8bcee6d7fa71553ae726f2f69c1771b3",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}
