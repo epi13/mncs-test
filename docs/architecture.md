@@ -68,6 +68,17 @@ codes per test, 512 UTF-8 bytes per projected string, and a 65,536-byte
 request). The `validate-manifest`, `discover`, and `run` commands use the
 native validator when the selected Stage-0 executable is available.
 
+For bounded `host_grant_sets`, Python similarly decodes TOML and builds a
+compact typed request; MNCS owns set and grant shape, identity uniqueness,
+capability/locator string requirements, duplicate capability-locator pairs,
+and the byte-array presence and length policy. The host keeps byte-array values
+for normalized output and supplies their element type/range validity as a
+bounded fact because the TOML decoder is still the input boundary. Native
+validation is used for at most 16 sets, 32 grants per set, 16 table keys, and a
+4,096-byte list per grant, with a 65,536-byte request ceiling and the shared
+512-byte projected-text bound. Larger or unprojectable inputs use the
+compatibility validator, preserving its existing error order and messages.
+
 ## Execution sequence
 
 For a first-class source, `mncs test` obtains the generic

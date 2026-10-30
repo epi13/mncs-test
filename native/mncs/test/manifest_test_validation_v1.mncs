@@ -61,12 +61,59 @@ record ManifestTestValidationResultV1 {
     item_index: u64
 }
 
+record HostGrantV1 {
+    is_table: bool,
+    keys: [TextValueV1; up_to 16],
+    capability_name: TextValueV1,
+    locator: TextValueV1,
+    bytes_are_array: bool,
+    byte_count: u64,
+    byte_values_are_valid: bool
+}
+
+record HostGrantSetV1 {
+    is_table: bool,
+    keys: [TextValueV1; up_to 16],
+    test_case_identity: TextValueV1,
+    grants_are_array: bool,
+    grants: [HostGrantV1; up_to 32]
+}
+
+record ManifestHostGrantValidationRequestV1 {
+    schema_version: [byte; up_to 64],
+    set_count: u64,
+    sets: [HostGrantSetV1; up_to 16]
+}
+
+record ManifestHostGrantIssueV1 {
+    code: u64,
+    set_index: u64,
+    grant_index: u64
+}
+
+record ManifestHostGrantValidationResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    valid: bool,
+    issue_code: u64,
+    set_index: u64,
+    grant_index: u64
+}
+
 fn request_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 49];
+}
+
+fn host_grant_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 104, 111, 115, 116, 45, 103, 114, 97, 110, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn host_grant_result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 104, 111, 115, 116, 45, 103, 114, 97, 110, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 49];
 }
 
 fn same_schema(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -215,6 +262,132 @@ fn merge_issue(current: ManifestTestIssueV1, candidate: ManifestTestIssueV1) -> 
     return candidate;
 }
 
+fn host_grant_field_matches(value: TextValueV1, field: u64) -> (result: bool) {
+    let test_case_identity: [byte; up_to 512] = [116, 101, 115, 116, 95, 99, 97, 115, 101, 95, 105, 100, 101, 110, 116, 105, 116, 121];
+    let grants: [byte; up_to 512] = [103, 114, 97, 110, 116, 115];
+    let capability_key: [byte; up_to 512] = [99, 97, 112, 97, 98, 105, 108, 105, 116, 121];
+    let locator: [byte; up_to 512] = [108, 111, 99, 97, 116, 111, 114];
+    let bytes: [byte; up_to 512] = [98, 121, 116, 101, 115];
+    if !value.is_string { return false; }
+    if field == 1 { return same_text(value.bytes, test_case_identity); }
+    if field == 2 { return same_text(value.bytes, grants); }
+    if field == 3 { return same_text(value.bytes, capability_key); }
+    if field == 4 { return same_text(value.bytes, locator); }
+    if field == 5 { return same_text(value.bytes, bytes); }
+    return false;
+}
+
+fn host_grant_has_key(keys: [TextValueV1; up_to 16], field: u64) -> (result: bool) {
+    iterate i over keys carrying found: bool = false {
+        next found = found || host_grant_field_matches(keys[i], field);
+    }
+    return found;
+}
+
+fn valid_host_grant_set_keys(keys: [TextValueV1; up_to 16]) -> (result: bool) {
+    return keys.len == 2 && host_grant_has_key(keys, 1) && host_grant_has_key(keys, 2);
+}
+
+fn valid_host_grant_keys(keys: [TextValueV1; up_to 16]) -> (result: bool) {
+    if keys.len > 3 { return false; }
+    iterate i over keys carrying valid: bool = true {
+        let key: TextValueV1 = keys[i];
+        let allowed: bool = host_grant_field_matches(key, 3)
+            || host_grant_field_matches(key, 4)
+            || host_grant_field_matches(key, 5);
+        if !allowed { return false; }
+        next valid = valid;
+    }
+    return true;
+}
+
+fn has_duplicate_host_grant_set(
+    request: ManifestHostGrantValidationRequestV1,
+    row: HostGrantSetV1,
+    index: u64
+) -> (result: bool) {
+    iterate i over request.sets carrying found: bool = false {
+        let earlier: HostGrantSetV1 = request.sets[i];
+        next found = found || (i < index && earlier.test_case_identity.is_string
+            && same_text(earlier.test_case_identity.bytes, row.test_case_identity.bytes));
+    }
+    return found;
+}
+
+fn has_duplicate_host_grant(set: HostGrantSetV1, grant: HostGrantV1, index: u64) -> (result: bool) {
+    iterate i over set.grants carrying found: bool = false {
+        let earlier: HostGrantV1 = set.grants[i];
+        next found = found || (i < index && earlier.capability_name.is_string && grant.capability_name.is_string
+            && earlier.locator.is_string && grant.locator.is_string
+            && same_text(earlier.capability_name.bytes, grant.capability_name.bytes)
+            && same_text(earlier.locator.bytes, grant.locator.bytes));
+    }
+    return found;
+}
+
+fn host_grant_issue(
+    request: ManifestHostGrantValidationRequestV1,
+    row: HostGrantSetV1,
+    set_index: u64
+) -> (result: ManifestHostGrantIssueV1) {
+    if !row.is_table || !valid_host_grant_set_keys(row.keys) {
+        return ManifestHostGrantIssueV1 { code: 1, set_index: set_index, grant_index: 0 };
+    }
+    if !row.test_case_identity.is_string || row.test_case_identity.bytes.len == 0
+        || has_duplicate_host_grant_set(request, row, set_index) {
+        return ManifestHostGrantIssueV1 { code: 2, set_index: set_index, grant_index: 0 };
+    }
+    if !row.grants_are_array || row.grants.len == 0 {
+        return ManifestHostGrantIssueV1 { code: 3, set_index: set_index, grant_index: 0 };
+    }
+    iterate i over row.grants carrying grants_valid: bool = true {
+        let grant: HostGrantV1 = row.grants[i];
+        if !grant.is_table || !valid_host_grant_keys(grant.keys) {
+            return ManifestHostGrantIssueV1 { code: 4, set_index: set_index, grant_index: i };
+        }
+        if !grant.capability_name.is_string || grant.capability_name.bytes.len == 0 || !grant.locator.is_string {
+            return ManifestHostGrantIssueV1 { code: 5, set_index: set_index, grant_index: i };
+        }
+        if !grant.bytes_are_array || grant.byte_count > 4096 || !grant.byte_values_are_valid {
+            return ManifestHostGrantIssueV1 { code: 6, set_index: set_index, grant_index: i };
+        }
+        if has_duplicate_host_grant(row, grant, i) {
+            return ManifestHostGrantIssueV1 { code: 7, set_index: set_index, grant_index: i };
+        }
+        next grants_valid = grants_valid;
+    }
+    return ManifestHostGrantIssueV1 { code: 0, set_index: set_index, grant_index: 0 };
+}
+
+fn merge_host_grant_issue(current: ManifestHostGrantIssueV1, candidate: ManifestHostGrantIssueV1) -> (result: ManifestHostGrantIssueV1) {
+    if current.code != 0 { return current; }
+    return candidate;
+}
+
+fn validate_host_grant_sets(request: ManifestHostGrantValidationRequestV1) -> (result: ManifestHostGrantIssueV1) {
+    if !same_schema(request.schema_version, host_grant_request_schema())
+        || request.set_count != request.sets.len {
+        return ManifestHostGrantIssueV1 { code: 255, set_index: 0, grant_index: 0 };
+    }
+    iterate i over request.sets carrying issue: ManifestHostGrantIssueV1 = ManifestHostGrantIssueV1 {
+        code: 0, set_index: 0, grant_index: 0
+    } {
+        next issue = merge_host_grant_issue(issue, host_grant_issue(request, request.sets[i], i));
+    }
+    return issue;
+}
+
+fn host_grant_public_result(issue: ManifestHostGrantIssueV1) -> (result: ManifestHostGrantValidationResultV1) {
+    return ManifestHostGrantValidationResultV1 {
+        schema_version: host_grant_result_schema(),
+        supported: issue.code != 255,
+        valid: issue.code == 0,
+        issue_code: issue.code,
+        set_index: issue.set_index,
+        grant_index: issue.grant_index
+    };
+}
+
 fn public_result(issue: ManifestTestIssueV1) -> (result: ManifestTestValidationResultV1) {
     return ManifestTestValidationResultV1 {
         schema_version: result_schema(),
@@ -241,6 +414,24 @@ fn manifest_test_validation_app_v1(context: ApplicationContext) -> (result: Appl
     let published: u64 = structured_write(context.argv[1], result_schema(), result);
     if published == 0 {
         return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
+
+fn manifest_host_grant_validation_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 103, 114, 97, 110, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ManifestHostGrantValidationRequestV1 = structured_read(context.argv[0], host_grant_request_schema());
+    let issue: ManifestHostGrantIssueV1 = validate_host_grant_sets(request);
+    let result: ManifestHostGrantValidationResultV1 = host_grant_public_result(issue);
+    let published: u64 = structured_write(context.argv[1], host_grant_result_schema(), result);
+    if published == 0 {
+        return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 103, 114, 97, 110, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
     }
     return success([]);
 }

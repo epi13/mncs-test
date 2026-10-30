@@ -37,14 +37,19 @@ def native_environment() -> dict[str, str]:
     return environment
 
 
-def manifest_document(source: Path, tests: list[object]) -> dict[str, object]:
-    return {
+def manifest_document(
+    source: Path, tests: list[object], host_grant_sets: list[object] | None = None,
+) -> dict[str, object]:
+    document: dict[str, object] = {
         "schema_version": "mncs.test-manifest/1",
         "name": "native-manifest-validation",
         "source": str(source),
         "module": "fixture.native_manifest_validation",
         "tests": tests,
     }
+    if host_grant_sets is not None:
+        document["host_grant_sets"] = host_grant_sets
+    return document
 
 
 class NativeManifestTestValidationTests(unittest.TestCase):
@@ -63,6 +68,12 @@ class NativeManifestTestValidationTests(unittest.TestCase):
         return mncs_test.validate_manifest(
             manifest_document(self.source, tests), self.path,
             mncs=str(MNCS), cwd=REPO, environment=self.environment,
+        )
+
+    def native_validate_document(self, document: dict[str, object]) -> dict[str, object]:
+        return mncs_test.validate_manifest(
+            document, self.path, mncs=str(MNCS), cwd=REPO,
+            environment=self.environment,
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -164,6 +175,75 @@ class NativeManifestTestValidationTests(unittest.TestCase):
         self.assertEqual(exit_code, mncs_test.EXIT_INVALID_INVOCATION)
         self.assertIn("tests[0].kind is unsupported: 'invalid-kind'", output.getvalue())
         self.assertTrue(any(call.args[0] == "test-manifest-test-validation.json" for call in native_app.call_args_list))
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_native_host_grant_policy_accepts_and_preserves_valid_grants(self) -> None:
+        grants = [{
+            "test_case_identity": "mncs:0.2:test-case:process::cancel",
+            "grants": [{
+                "capability": "process_capability", "locator": "/usr/bin/sleep",
+                "bytes": [0, 1, 127, 255],
+            }],
+        }]
+        document = manifest_document(self.source, [], grants)
+        host = mncs_test.validate_manifest(document, self.path)
+        with mock.patch.object(mncs_test, "run_native_app", wraps=mncs_test.run_native_app) as native_app:
+            native = self.native_validate_document(document)
+        self.assertEqual(native["host_grant_sets"], host["host_grant_sets"])
+        self.assertTrue(any(call.args[0] == "test-manifest-host-grant-validation.json" for call in native_app.call_args_list))
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_native_host_grant_first_errors_match_host_oracle(self) -> None:
+        valid_set = {
+            "test_case_identity": "case",
+            "grants": [{"capability": "process_capability", "locator": "/usr/bin/sleep", "bytes": []}],
+        }
+        cases = [
+            ([{"test_case_identity": "case", "grants": [], "extra": True}],
+             "host_grant_sets[0] must contain only test_case_identity and grants"),
+            ([valid_set, {**valid_set}],
+             "host_grant_sets[1].test_case_identity must be unique and non-empty"),
+            ([{"test_case_identity": "case", "grants": []}],
+             "host_grant_sets[0].grants must be a non-empty array"),
+            ([{"test_case_identity": "case", "grants": [{"capability": "x", "extra": 1}]}],
+             "host_grant_sets[0].grants[0] is malformed"),
+            ([{"test_case_identity": "case", "grants": [{"locator": "x"}]}],
+             "host_grant_sets[0].grants[0] needs capability and locator strings"),
+            ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [True]}]}],
+             "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
+            ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [256]}]}],
+             "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
+            ([{"test_case_identity": "case", "grants": [{"capability": "x", "bytes": [0] * 4097}]}],
+             "host_grant_sets[0].grants[0].bytes must be a bounded byte array"),
+            ([{"test_case_identity": "case", "grants": [
+                {"capability": "x", "locator": "y"},
+                {"capability": "x", "locator": "y"},
+            ]}], "host_grant_sets[0] contains a duplicate capability and locator"),
+        ]
+        for grants, message in cases:
+            with self.subTest(message=message):
+                document = manifest_document(self.source, [], grants)
+                with self.assertRaises(mncs_test.ManifestError) as host_error:
+                    mncs_test.validate_manifest(document, self.path)
+                with self.assertRaises(mncs_test.ManifestError) as native_error:
+                    self.native_validate_document(document)
+                self.assertEqual(str(host_error.exception), message)
+                self.assertEqual(str(native_error.exception), str(host_error.exception))
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_over_bound_host_grants_use_compatibility_validator(self) -> None:
+        grants = [
+            {"test_case_identity": f"case-{index}", "grants": [{"capability": "x"}]}
+            for index in range(mncs_test.MANIFEST_HOST_GRANT_VALIDATION_MAX_SETS + 1)
+        ]
+        document = manifest_document(self.source, [], grants)
+        with mock.patch.object(mncs_test, "run_native_app") as native_app:
+            native = self.native_validate_document(document)
+        self.assertEqual(len(native["host_grant_sets"]), len(grants))
+        self.assertFalse(any(
+            call.args[0] == "test-manifest-host-grant-validation.json"
+            for call in native_app.call_args_list
+        ))
 
 
 if __name__ == "__main__":

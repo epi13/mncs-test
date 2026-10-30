@@ -62,11 +62,17 @@ PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/1"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/1"
+MANIFEST_HOST_GRANT_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-host-grant-validation-request/1"
+MANIFEST_HOST_GRANT_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-host-grant-validation/1"
 MANIFEST_TEST_VALIDATION_MAX_TESTS = 16
 MANIFEST_TEST_VALIDATION_MAX_TEXT_BYTES = 512
 MANIFEST_TEST_VALIDATION_MAX_TAGS = 32
 MANIFEST_TEST_VALIDATION_MAX_DIAGNOSTIC_CODES = 256
 MANIFEST_TEST_VALIDATION_MAX_REQUEST_BYTES = 65_536
+MANIFEST_HOST_GRANT_VALIDATION_MAX_SETS = 16
+MANIFEST_HOST_GRANT_VALIDATION_MAX_GRANTS_PER_SET = 32
+MANIFEST_HOST_GRANT_VALIDATION_MAX_FIELDS = 16
+MANIFEST_HOST_GRANT_VALIDATION_MAX_REQUEST_BYTES = 65_536
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
@@ -2271,10 +2277,195 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
     return request if wire_bytes <= MANIFEST_TEST_VALIDATION_MAX_REQUEST_BYTES else None
 
 
+def _manifest_host_grant_validation_request(
+    grant_sets: list[Any],
+) -> dict[str, Any] | None:
+    if len(grant_sets) > MANIFEST_HOST_GRANT_VALIDATION_MAX_SETS:
+        return None
+
+    def field_names(value: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(value, dict) or len(value) > MANIFEST_HOST_GRANT_VALIDATION_MAX_FIELDS:
+            return None if isinstance(value, dict) else []
+        fields = [_manifest_text_value(key) for key in value]
+        return None if any(field is None for field in fields) else fields
+
+    rows: list[dict[str, Any]] = []
+    for item in grant_sets:
+        set_keys = field_names(item)
+        if set_keys is None:
+            return None
+        is_table = isinstance(item, dict)
+        identity = _manifest_text_value(item.get("test_case_identity")) if is_table else _manifest_text_value(None)
+        if identity is None:
+            return None
+        grants_value = item.get("grants") if is_table else None
+        grants_are_array = isinstance(grants_value, list)
+        grants = grants_value if grants_are_array else []
+        if len(grants) > MANIFEST_HOST_GRANT_VALIDATION_MAX_GRANTS_PER_SET:
+            return None
+        grant_rows: list[dict[str, Any]] = []
+        for grant in grants:
+            grant_keys = field_names(grant)
+            if grant_keys is None:
+                return None
+            grant_is_table = isinstance(grant, dict)
+            capability = _manifest_text_value(grant.get("capability")) if grant_is_table else _manifest_text_value(None)
+            locator = _manifest_text_value(grant.get("locator", "")) if grant_is_table else _manifest_text_value(None)
+            if capability is None or locator is None:
+                return None
+            bytes_value = grant.get("bytes", []) if grant_is_table else None
+            bytes_are_array = isinstance(bytes_value, list)
+            byte_count = len(bytes_value) if bytes_are_array else 0
+            byte_values_are_valid = (
+                bytes_are_array
+                and byte_count <= 4096
+                and all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    and 0 <= value <= 255
+                    for value in bytes_value
+                )
+            )
+            grant_rows.append({
+                "is_table": grant_is_table,
+                "keys": grant_keys,
+                "capability_name": capability,
+                "locator": locator,
+                "bytes_are_array": bytes_are_array,
+                "byte_count": byte_count,
+                "byte_values_are_valid": byte_values_are_valid,
+            })
+        rows.append({
+            "is_table": is_table,
+            "keys": set_keys,
+            "test_case_identity": identity,
+            "grants_are_array": grants_are_array,
+            "grants": grant_rows,
+        })
+
+    request = {
+        "schema_version": MANIFEST_HOST_GRANT_VALIDATION_REQUEST_SCHEMA,
+        "set_count": len(rows),
+        "sets": rows,
+    }
+    try:
+        wire_bytes = len(json.dumps(request, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError, UnicodeEncodeError):
+        return None
+    return request if wire_bytes <= MANIFEST_HOST_GRANT_VALIDATION_MAX_REQUEST_BYTES else None
+
+
+def _native_manifest_host_grant_validation(
+    grant_sets: list[Any], *, mncs: str | None, cwd: Path | None,
+    environment: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    if not grant_sets:
+        return {"valid": True, "issue_code": 0, "set_index": 0, "grant_index": 0}
+    if mncs is None or cwd is None or environment is None:
+        return None
+    binary = resolve_mncs(mncs, cwd)
+    if not Path(binary).is_file() or not os.access(binary, os.X_OK):
+        return None
+    request = _manifest_host_grant_validation_request(grant_sets)
+    if request is None:
+        return None
+    try:
+        result = run_native_app(
+            "test-manifest-host-grant-validation.json", request,
+            request_schema=MANIFEST_HOST_GRANT_VALIDATION_REQUEST_SCHEMA,
+            result_schema=MANIFEST_HOST_GRANT_VALIDATION_RESULT_SCHEMA,
+            mncs=binary, cwd=cwd, environment=environment,
+            step_budget=8_000_000,
+        )
+    except NativeInputBoundError:
+        return None
+    except (NativeBudgetExhaustedError, NativeTransportError) as error:
+        raise AdapterError(f"native Test manifest host-grant validation failed: {error}") from error
+    if (
+        result.get("schema_version") != MANIFEST_HOST_GRANT_VALIDATION_RESULT_SCHEMA
+        or type(result.get("supported")) is not bool or not result["supported"]
+        or type(result.get("valid")) is not bool
+        or any(type(result.get(field)) is not int for field in (
+            "issue_code", "set_index", "grant_index"))
+    ):
+        raise AdapterError("MNCS manifest host-grant validator returned malformed result metadata")
+    if result["valid"] != (result["issue_code"] == 0):
+        raise AdapterError("MNCS manifest host-grant validator returned inconsistent validity metadata")
+    if not result["valid"] and not 0 <= result["set_index"] < len(grant_sets):
+        raise AdapterError("MNCS manifest host-grant validator returned an out-of-range set index")
+    if result["issue_code"] in (4, 5, 6, 7):
+        grant_set = grant_sets[result["set_index"]]
+        if not isinstance(grant_set, dict):
+            raise AdapterError("MNCS manifest host-grant validator returned a grant for a non-table set")
+        grants = grant_set.get("grants")
+        if not isinstance(grants, list) or not 0 <= result["grant_index"] < len(grants):
+            raise AdapterError("MNCS manifest host-grant validator returned an out-of-range grant index")
+    return result
+
+
+def _manifest_host_grant_validation_error(result: dict[str, Any]) -> str:
+    set_index, grant_index = result["set_index"], result["grant_index"]
+    code = result["issue_code"]
+    if code == 1:
+        return f"host_grant_sets[{set_index}] must contain only test_case_identity and grants"
+    if code == 2:
+        return f"host_grant_sets[{set_index}].test_case_identity must be unique and non-empty"
+    if code == 3:
+        return f"host_grant_sets[{set_index}].grants must be a non-empty array"
+    if code == 4:
+        return f"host_grant_sets[{set_index}].grants[{grant_index}] is malformed"
+    if code == 5:
+        return f"host_grant_sets[{set_index}].grants[{grant_index}] needs capability and locator strings"
+    if code == 6:
+        return f"host_grant_sets[{set_index}].grants[{grant_index}].bytes must be a bounded byte array"
+    if code == 7:
+        return f"host_grant_sets[{set_index}] contains a duplicate capability and locator"
+    raise AdapterError(f"MNCS manifest host-grant validator returned unknown issue code {code}")
+
+
+def _validate_host_grant_sets_host(raw_grant_sets: list[Any]) -> list[dict[str, Any]]:
+    grant_set_ids: set[str] = set()
+    host_grant_sets: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_grant_sets):
+        if not isinstance(item, dict) or set(item) != {"test_case_identity", "grants"}:
+            raise ManifestError(f"host_grant_sets[{index}] must contain only test_case_identity and grants")
+        test_identity = item.get("test_case_identity")
+        grants = item.get("grants")
+        if not isinstance(test_identity, str) or not test_identity or test_identity in grant_set_ids:
+            raise ManifestError(f"host_grant_sets[{index}].test_case_identity must be unique and non-empty")
+        if not isinstance(grants, list) or not grants:
+            raise ManifestError(f"host_grant_sets[{index}].grants must be a non-empty array")
+        normalized_grants: list[dict[str, Any]] = []
+        seen_grants: set[tuple[str, str]] = set()
+        for grant_index, grant in enumerate(grants):
+            if not isinstance(grant, dict) or set(grant) - {"capability", "locator", "bytes"}:
+                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}] is malformed")
+            capability = grant.get("capability")
+            locator = grant.get("locator", "")
+            grant_bytes = grant.get("bytes", [])
+            if not isinstance(capability, str) or not capability or not isinstance(locator, str):
+                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}] needs capability and locator strings")
+            if (
+                not isinstance(grant_bytes, list)
+                or len(grant_bytes) > 4096
+                or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255 for value in grant_bytes)
+            ):
+                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}].bytes must be a bounded byte array")
+            identity = (capability, locator)
+            if identity in seen_grants:
+                raise ManifestError(f"host_grant_sets[{index}] contains a duplicate capability and locator")
+            seen_grants.add(identity)
+            normalized_grants.append({"capability": capability, "locator": locator, "bytes": grant_bytes})
+        grant_set_ids.add(test_identity)
+        host_grant_sets.append({"test_case_identity": test_identity, "grants": normalized_grants})
+    return host_grant_sets
+
+
 def _native_manifest_test_validation(
     tests: list[Any], *, mncs: str | None, cwd: Path | None,
     environment: dict[str, str] | None,
 ) -> dict[str, Any] | None:
+    if not tests:
+        return {"valid": True, "issue_code": 0, "test_index": 0, "field_index": 0, "item_index": 0}
     if mncs is None or cwd is None or environment is None:
         return None
     binary = resolve_mncs(mncs, cwd)
@@ -2421,40 +2612,29 @@ def validate_manifest(
     raw_grant_sets = raw.get("host_grant_sets", [])
     if not isinstance(raw_grant_sets, list):
         raise ManifestError("host_grant_sets must be an array when present")
-    grant_set_ids: set[str] = set()
-    host_grant_sets: list[dict[str, Any]] = []
-    for index, item in enumerate(raw_grant_sets):
-        if not isinstance(item, dict) or set(item) != {"test_case_identity", "grants"}:
-            raise ManifestError(f"host_grant_sets[{index}] must contain only test_case_identity and grants")
-        test_identity = item.get("test_case_identity")
-        grants = item.get("grants")
-        if not isinstance(test_identity, str) or not test_identity or test_identity in grant_set_ids:
-            raise ManifestError(f"host_grant_sets[{index}].test_case_identity must be unique and non-empty")
-        if not isinstance(grants, list) or not grants:
-            raise ManifestError(f"host_grant_sets[{index}].grants must be a non-empty array")
-        normalized_grants: list[dict[str, Any]] = []
-        seen_grants: set[tuple[str, str]] = set()
-        for grant_index, grant in enumerate(grants):
-            if not isinstance(grant, dict) or set(grant) - {"capability", "locator", "bytes"}:
-                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}] is malformed")
-            capability = grant.get("capability")
-            locator = grant.get("locator", "")
-            grant_bytes = grant.get("bytes", [])
-            if not isinstance(capability, str) or not capability or not isinstance(locator, str):
-                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}] needs capability and locator strings")
-            if (
-                not isinstance(grant_bytes, list)
-                or len(grant_bytes) > 4096
-                or any(not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255 for value in grant_bytes)
-            ):
-                raise ManifestError(f"host_grant_sets[{index}].grants[{grant_index}].bytes must be a bounded byte array")
-            identity = (capability, locator)
-            if identity in seen_grants:
-                raise ManifestError(f"host_grant_sets[{index}] contains a duplicate capability and locator")
-            seen_grants.add(identity)
-            normalized_grants.append({"capability": capability, "locator": locator, "bytes": grant_bytes})
-        grant_set_ids.add(test_identity)
-        host_grant_sets.append({"test_case_identity": test_identity, "grants": normalized_grants})
+    native_grant_validation = _native_manifest_host_grant_validation(
+        raw_grant_sets, mncs=mncs, cwd=cwd, environment=environment,
+    )
+    if native_grant_validation is None:
+        host_grant_sets = _validate_host_grant_sets_host(raw_grant_sets)
+    elif not native_grant_validation["valid"]:
+        raise ManifestError(_manifest_host_grant_validation_error(native_grant_validation))
+    else:
+        host_grant_sets = []
+        for item in raw_grant_sets:
+            assert isinstance(item, dict)
+            normalized_grants = [
+                {
+                    "capability": grant.get("capability"),
+                    "locator": grant.get("locator", ""),
+                    "bytes": grant.get("bytes", []),
+                }
+                for grant in item["grants"]
+            ]
+            host_grant_sets.append({
+                "test_case_identity": item["test_case_identity"],
+                "grants": normalized_grants,
+            })
     tests = raw.get("tests", [])
     if not isinstance(tests, list):
         raise ManifestError("tests must be an array when present")
