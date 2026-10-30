@@ -62,8 +62,8 @@ PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/1"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/1"
-MANIFEST_HOST_GRANT_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-host-grant-validation-request/1"
-MANIFEST_HOST_GRANT_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-host-grant-validation/1"
+MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-pretest-validation-request/1"
+MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-pretest-validation/1"
 MANIFEST_TEST_VALIDATION_MAX_TESTS = 16
 MANIFEST_TEST_VALIDATION_MAX_TEXT_BYTES = 512
 MANIFEST_TEST_VALIDATION_MAX_TAGS = 32
@@ -2278,11 +2278,60 @@ def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None
     return request if wire_bytes <= MANIFEST_TEST_VALIDATION_MAX_REQUEST_BYTES else None
 
 
-def _manifest_host_grant_validation_request(
-    grant_sets: list[Any],
+def _manifest_header_integer_value(value: Any, present: bool) -> dict[str, Any] | None:
+    is_integer = isinstance(value, int)
+    is_boolean = isinstance(value, bool)
+    if is_integer and not is_boolean and not -(1 << 63) <= value <= (1 << 63) - 1:
+        return None
+    return {
+        "present": present,
+        "is_integer": is_integer,
+        "is_boolean": is_boolean,
+        "value": value if is_integer and not is_boolean else 0,
+    }
+
+
+def _manifest_pretest_validation_request(
+    raw_manifest: dict[str, Any], grant_sets: list[Any],
 ) -> dict[str, Any] | None:
     if len(grant_sets) > MANIFEST_HOST_GRANT_VALIDATION_MAX_SETS:
         return None
+
+    header_strings = {
+        "schema_version": _manifest_text_value(raw_manifest.get("schema_version")),
+        "name": _manifest_text_value(raw_manifest.get("name")),
+        "source": _manifest_text_value(raw_manifest.get("source")),
+        "module_name": _manifest_text_value(raw_manifest.get("module")),
+        "suite": _manifest_text_value(raw_manifest.get("suite")),
+        "profile": _manifest_text_value(raw_manifest.get("profile", "0.17")),
+    }
+    if any(value is None for value in header_strings.values()):
+        return None
+    libraries_value = raw_manifest.get("libraries", [])
+    libraries_are_array = isinstance(libraries_value, list)
+    libraries = libraries_value if libraries_are_array else []
+    if len(libraries) > 16:
+        return None
+    library_values = [_manifest_text_value(value) for value in libraries]
+    if any(value is None for value in library_values):
+        return None
+    step_budget = _manifest_header_integer_value(
+        raw_manifest.get("step_budget"), "step_budget" in raw_manifest,
+    )
+    timeout_seconds = _manifest_header_integer_value(
+        raw_manifest.get("timeout_seconds"), "timeout_seconds" in raw_manifest,
+    )
+    if step_budget is None or timeout_seconds is None:
+        return None
+    header = {
+        **header_strings,
+        "suite_present": "suite" in raw_manifest,
+        "suite_is_null": raw_manifest.get("suite") is None,
+        "step_budget": step_budget,
+        "timeout_seconds": timeout_seconds,
+        "libraries_are_array": libraries_are_array,
+        "libraries": library_values,
+    }
 
     def field_names(value: Any) -> list[dict[str, Any]] | None:
         if not isinstance(value, dict) or len(value) > MANIFEST_HOST_GRANT_VALIDATION_MAX_FIELDS:
@@ -2351,7 +2400,8 @@ def _manifest_host_grant_validation_request(
         })
 
     request = {
-        "schema_version": MANIFEST_HOST_GRANT_VALIDATION_REQUEST_SCHEMA,
+        "schema_version": MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA,
+        "header": header,
         "set_count": len(rows),
         "sets": rows,
     }
@@ -2362,72 +2412,109 @@ def _manifest_host_grant_validation_request(
     return request if wire_bytes <= MANIFEST_HOST_GRANT_VALIDATION_MAX_REQUEST_BYTES else None
 
 
-def _native_manifest_host_grant_validation(
-    grant_sets: list[Any], *, mncs: str | None, cwd: Path | None,
+def _native_manifest_pretest_validation(
+    raw_manifest: dict[str, Any], grant_sets: list[Any], *, mncs: str | None, cwd: Path | None,
     environment: dict[str, str] | None,
 ) -> dict[str, Any] | None:
-    if not grant_sets:
-        return {"valid": True, "issue_code": 0, "set_index": 0, "grant_index": 0}
     if mncs is None or cwd is None or environment is None:
         return None
     binary = resolve_mncs(mncs, cwd)
     if not Path(binary).is_file() or not os.access(binary, os.X_OK):
         return None
-    request = _manifest_host_grant_validation_request(grant_sets)
+    request = _manifest_pretest_validation_request(raw_manifest, grant_sets)
     if request is None:
         return None
     try:
         result = run_native_app(
-            "test-manifest-host-grant-validation.json", request,
-            request_schema=MANIFEST_HOST_GRANT_VALIDATION_REQUEST_SCHEMA,
-            result_schema=MANIFEST_HOST_GRANT_VALIDATION_RESULT_SCHEMA,
+            "test-manifest-pretest-validation.json", request,
+            request_schema=MANIFEST_PRETEST_VALIDATION_REQUEST_SCHEMA,
+            result_schema=MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA,
             mncs=binary, cwd=cwd, environment=environment,
             step_budget=8_000_000,
         )
     except NativeInputBoundError:
         return None
     except (NativeBudgetExhaustedError, NativeTransportError) as error:
-        raise AdapterError(f"native Test manifest host-grant validation failed: {error}") from error
+        raise AdapterError(f"native Test manifest pre-test validation failed: {error}") from error
     if (
-        result.get("schema_version") != MANIFEST_HOST_GRANT_VALIDATION_RESULT_SCHEMA
+        result.get("schema_version") != MANIFEST_PRETEST_VALIDATION_RESULT_SCHEMA
         or type(result.get("supported")) is not bool or not result["supported"]
         or type(result.get("valid")) is not bool
         or any(type(result.get(field)) is not int for field in (
             "issue_code", "set_index", "grant_index"))
     ):
-        raise AdapterError("MNCS manifest host-grant validator returned malformed result metadata")
+        raise AdapterError("MNCS manifest pre-test validator returned malformed result metadata")
     if result["valid"] != (result["issue_code"] == 0):
-        raise AdapterError("MNCS manifest host-grant validator returned inconsistent validity metadata")
-    if not result["valid"] and not 0 <= result["set_index"] < len(grant_sets):
-        raise AdapterError("MNCS manifest host-grant validator returned an out-of-range set index")
-    if result["issue_code"] in (4, 5, 6, 7):
+        raise AdapterError("MNCS manifest pre-test validator returned inconsistent validity metadata")
+    if result["issue_code"] in (11, 12, 13, 14, 15, 16, 17) and not 0 <= result["set_index"] < len(grant_sets):
+        raise AdapterError("MNCS manifest pre-test validator returned an out-of-range set index")
+    if result["issue_code"] in (14, 15, 16, 17):
         grant_set = grant_sets[result["set_index"]]
         if not isinstance(grant_set, dict):
-            raise AdapterError("MNCS manifest host-grant validator returned a grant for a non-table set")
+            raise AdapterError("MNCS manifest pre-test validator returned a grant for a non-table set")
         grants = grant_set.get("grants")
         if not isinstance(grants, list) or not 0 <= result["grant_index"] < len(grants):
-            raise AdapterError("MNCS manifest host-grant validator returned an out-of-range grant index")
+            raise AdapterError("MNCS manifest pre-test validator returned an out-of-range grant index")
     return result
 
 
-def _manifest_host_grant_validation_error(result: dict[str, Any]) -> str:
+def _manifest_pretest_validation_error(result: dict[str, Any]) -> str:
     set_index, grant_index = result["set_index"], result["grant_index"]
     code = result["issue_code"]
     if code == 1:
-        return f"host_grant_sets[{set_index}] must contain only test_case_identity and grants"
-    if code == 2:
-        return f"host_grant_sets[{set_index}].test_case_identity must be unique and non-empty"
-    if code == 3:
-        return f"host_grant_sets[{set_index}].grants must be a non-empty array"
-    if code == 4:
-        return f"host_grant_sets[{set_index}].grants[{grant_index}] is malformed"
+        return f"schema_version must be {MANIFEST_SCHEMA}"
+    if code in (2, 3, 4):
+        field = {2: "name", 3: "source", 4: "module"}[code]
+        return f"manifest field {field!r} must be a non-empty string"
     if code == 5:
-        return f"host_grant_sets[{set_index}].grants[{grant_index}] needs capability and locator strings"
+        return "suite must be a string when present"
     if code == 6:
-        return f"host_grant_sets[{set_index}].grants[{grant_index}].bytes must be a bounded byte array"
+        return "profile must be a non-empty string"
     if code == 7:
+        return "step_budget must be a positive integer"
+    if code == 8:
+        return "timeout_seconds must be a positive integer"
+    if code == 9:
+        return "libraries must be an array of non-empty strings"
+    if code == 11:
+        return f"host_grant_sets[{set_index}] must contain only test_case_identity and grants"
+    if code == 12:
+        return f"host_grant_sets[{set_index}].test_case_identity must be unique and non-empty"
+    if code == 13:
+        return f"host_grant_sets[{set_index}].grants must be a non-empty array"
+    if code == 14:
+        return f"host_grant_sets[{set_index}].grants[{grant_index}] is malformed"
+    if code == 15:
+        return f"host_grant_sets[{set_index}].grants[{grant_index}] needs capability and locator strings"
+    if code == 16:
+        return f"host_grant_sets[{set_index}].grants[{grant_index}].bytes must be a bounded byte array"
+    if code == 17:
         return f"host_grant_sets[{set_index}] contains a duplicate capability and locator"
-    raise AdapterError(f"MNCS manifest host-grant validator returned unknown issue code {code}")
+    raise AdapterError(f"MNCS manifest pre-test validator returned unknown issue code {code}")
+
+
+def _validate_manifest_header_host(raw: dict[str, Any]) -> list[str]:
+    if raw.get("schema_version") != MANIFEST_SCHEMA:
+        raise ManifestError(f"schema_version must be {MANIFEST_SCHEMA}")
+    for field in ("name", "source", "module"):
+        if not isinstance(raw.get(field), str) or not raw[field].strip():
+            raise ManifestError(f"manifest field {field!r} must be a non-empty string")
+    if "suite" in raw and raw["suite"] is not None and not isinstance(raw["suite"], str):
+        raise ManifestError("suite must be a string when present")
+    profile = raw.get("profile", "0.17")
+    if not isinstance(profile, str) or not profile:
+        raise ManifestError("profile must be a non-empty string")
+    for field in ("step_budget", "timeout_seconds"):
+        if field in raw and (
+            not isinstance(raw[field], int) or isinstance(raw[field], bool) or raw[field] <= 0
+        ):
+            raise ManifestError(f"{field} must be a positive integer")
+    libraries = raw.get("libraries", [])
+    if not isinstance(libraries, list) or not all(
+        isinstance(item, str) and item for item in libraries
+    ):
+        raise ManifestError("libraries must be an array of non-empty strings")
+    return libraries
 
 
 def _validate_host_grant_sets_host(raw_grant_sets: list[Any]) -> list[dict[str, Any]]:
@@ -2601,33 +2688,21 @@ def validate_manifest(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ManifestError("manifest must be a TOML table")
-    if raw.get("schema_version") != MANIFEST_SCHEMA:
-        raise ManifestError(f"schema_version must be {MANIFEST_SCHEMA}")
-    for field in ("name", "source", "module"):
-        if not isinstance(raw.get(field), str) or not raw[field].strip():
-            raise ManifestError(f"manifest field {field!r} must be a non-empty string")
-    if "suite" in raw and raw["suite"] is not None and not isinstance(raw["suite"], str):
-        raise ManifestError("suite must be a string when present")
-    profile = raw.get("profile", "0.17")
-    if not isinstance(profile, str) or not profile:
-        raise ManifestError("profile must be a non-empty string")
-    for field in ("step_budget", "timeout_seconds"):
-        if field in raw and (not isinstance(raw[field], int) or isinstance(raw[field], bool) or raw[field] <= 0):
-            raise ManifestError(f"{field} must be a positive integer")
-    libraries = raw.get("libraries", [])
-    if not isinstance(libraries, list) or not all(isinstance(item, str) and item for item in libraries):
-        raise ManifestError("libraries must be an array of non-empty strings")
     raw_grant_sets = raw.get("host_grant_sets", [])
-    if not isinstance(raw_grant_sets, list):
-        raise ManifestError("host_grant_sets must be an array when present")
-    native_grant_validation = _native_manifest_host_grant_validation(
-        raw_grant_sets, mncs=mncs, cwd=cwd, environment=environment,
-    )
-    if native_grant_validation is None:
+    native_pretest_validation = None
+    if isinstance(raw_grant_sets, list):
+        native_pretest_validation = _native_manifest_pretest_validation(
+            raw, raw_grant_sets, mncs=mncs, cwd=cwd, environment=environment,
+        )
+    if native_pretest_validation is None:
+        libraries = _validate_manifest_header_host(raw)
+        if not isinstance(raw_grant_sets, list):
+            raise ManifestError("host_grant_sets must be an array when present")
         host_grant_sets = _validate_host_grant_sets_host(raw_grant_sets)
-    elif not native_grant_validation["valid"]:
-        raise ManifestError(_manifest_host_grant_validation_error(native_grant_validation))
+    elif not native_pretest_validation["valid"]:
+        raise ManifestError(_manifest_pretest_validation_error(native_pretest_validation))
     else:
+        libraries = raw.get("libraries", [])
         host_grant_sets = []
         for item in raw_grant_sets:
             assert isinstance(item, dict)
@@ -2643,6 +2718,7 @@ def validate_manifest(
                 "test_case_identity": item["test_case_identity"],
                 "grants": normalized_grants,
             })
+    profile = raw.get("profile", "0.17")
     tests = raw.get("tests", [])
     if not isinstance(tests, list):
         raise ManifestError("tests must be an array when present")

@@ -77,6 +77,41 @@ class NativeManifestTestValidationTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_native_header_policy_matches_host_oracle(self) -> None:
+        cases = [
+            ({"schema_version": "wrong"}, "schema_version must be mncs.test-manifest/1"),
+            ({"name": " \t "}, "manifest field 'name' must be a non-empty string"),
+            ({"source": ""}, "manifest field 'source' must be a non-empty string"),
+            ({"module": None}, "manifest field 'module' must be a non-empty string"),
+            ({"suite": 7}, "suite must be a string when present"),
+            ({"profile": ""}, "profile must be a non-empty string"),
+            ({"step_budget": True}, "step_budget must be a positive integer"),
+            ({"timeout_seconds": 0}, "timeout_seconds must be a positive integer"),
+            ({"libraries": None}, "libraries must be an array of non-empty strings"),
+            ({"libraries": [""]}, "libraries must be an array of non-empty strings"),
+            ({"host_grant_sets": None}, "host_grant_sets must be an array when present"),
+        ]
+        for updates, message in cases:
+            with self.subTest(updates=updates):
+                document = manifest_document(self.source, [])
+                document.update(updates)
+                with self.assertRaises(mncs_test.ManifestError) as host_error:
+                    mncs_test.validate_manifest(document, self.path)
+                with self.assertRaises(mncs_test.ManifestError) as native_error:
+                    self.native_validate_document(document)
+                self.assertEqual(str(host_error.exception), message)
+                self.assertEqual(str(native_error.exception), str(host_error.exception))
+
+        document = manifest_document(self.source, [], [{"test_case_identity": "case", "grants": []}])
+        document["name"] = " "
+        with self.assertRaises(mncs_test.ManifestError) as host_error:
+            mncs_test.validate_manifest(document, self.path)
+        with self.assertRaises(mncs_test.ManifestError) as native_error:
+            self.native_validate_document(document)
+        self.assertEqual(str(host_error.exception), "manifest field 'name' must be a non-empty string")
+        self.assertEqual(str(native_error.exception), str(host_error.exception))
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_native_policy_accepts_and_normalizes_supported_rows(self) -> None:
         declarations = [
             {
@@ -139,10 +174,19 @@ class NativeManifestTestValidationTests(unittest.TestCase):
             {"id": f"case-{index}", "entry": "run"}
             for index in range(mncs_test.MANIFEST_TEST_VALIDATION_MAX_TESTS + 1)
         ]
-        with mock.patch.object(mncs_test, "run_native_app") as native_app:
+        with mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app,
+        ) as native_app:
             native = self.native_validate(declarations)
         self.assertEqual(len(native["tests"]), len(declarations))
-        native_app.assert_not_called()
+        self.assertTrue(any(
+            call.args[0] == "test-manifest-pretest-validation.json"
+            for call in native_app.call_args_list
+        ))
+        self.assertFalse(any(
+            call.args[0] == "test-manifest-test-validation.json"
+            for call in native_app.call_args_list
+        ))
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_run_command_uses_native_manifest_policy_before_execution(self) -> None:
@@ -190,7 +234,7 @@ class NativeManifestTestValidationTests(unittest.TestCase):
         with mock.patch.object(mncs_test, "run_native_app", wraps=mncs_test.run_native_app) as native_app:
             native = self.native_validate_document(document)
         self.assertEqual(native["host_grant_sets"], host["host_grant_sets"])
-        self.assertTrue(any(call.args[0] == "test-manifest-host-grant-validation.json" for call in native_app.call_args_list))
+        self.assertTrue(any(call.args[0] == "test-manifest-pretest-validation.json" for call in native_app.call_args_list))
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_native_host_grant_first_errors_match_host_oracle(self) -> None:
@@ -245,7 +289,7 @@ class NativeManifestTestValidationTests(unittest.TestCase):
             native = self.native_validate_document(document)
         self.assertEqual(len(native["host_grant_sets"]), len(grants))
         self.assertFalse(any(
-            call.args[0] == "test-manifest-host-grant-validation.json"
+            call.args[0] == "test-manifest-pretest-validation.json"
             for call in native_app.call_args_list
         ))
 
@@ -261,7 +305,7 @@ class NativeManifestTestValidationTests(unittest.TestCase):
             native = self.native_validate_document(document)
         self.assertEqual(native["host_grant_sets"], mncs_test._validate_host_grant_sets_host(byte_values))
         self.assertFalse(any(
-            call.args[0] == "test-manifest-host-grant-validation.json"
+            call.args[0] == "test-manifest-pretest-validation.json"
             for call in native_app.call_args_list
         ))
 

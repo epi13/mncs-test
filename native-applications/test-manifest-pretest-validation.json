@@ -1,11 +1,11 @@
 {
   "schema_version": "mncs.native-application/1",
-  "application_identity": "mncs-test.manifest-host-grant-validation",
+  "application_identity": "mncs-test.manifest-pretest-validation",
   "source": "../native/mncs/test/manifest_test_validation_v1.mncs",
   "module": "mncs.test.manifest_test_validation_v1",
-  "entry_function": "manifest_host_grant_validation_app_v1",
+  "entry_function": "manifest_pretest_validation_app_v1",
   "profile": "0.18",
-  "interface_identity": "2be657a41b067f36364ae60ca0a9eb1ec4bdcfd54223c0d484d9ef30a6c0ab40",
+  "interface_identity": "5e952c7e7e09d1a76493ce5a17ece0c85f9811bd4dd2fd4468167139fa9c1912",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
