@@ -52,10 +52,13 @@ CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
+PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
+PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
+PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
@@ -168,13 +171,22 @@ def json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def _native_public_result_request(value: Any) -> tuple[dict[str, Any], int] | None:
+def _native_public_result_request(
+    value: Any, *, sort_keys: bool = True
+) -> tuple[dict[str, Any], int] | None:
     """Encode one compact JSON document for bounded native token streaming."""
     try:
-        document = compact_json(value)
+        document = compact_json(value, sort_keys=sort_keys)
         encoded = document.encode("utf-8")
     except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
         return None
+    return _native_public_result_document_request(encoded)
+
+
+def _native_public_result_document_request(
+    encoded: bytes,
+) -> tuple[dict[str, Any], int] | None:
+    """Pack an existing compact JSON byte stream for native token processing."""
     if not encoded or len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
         return None
     chunks = _public_result_input_chunks(encoded)
@@ -241,6 +253,134 @@ def _decode_public_result_chunks(
     return bytes(document)
 
 
+def _native_key_order_candidate_within_bound(value: Any) -> bool:
+    """Check native ordering eligibility with a conservative JSON size bound."""
+    maximum = PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES
+    byte_lower_bound = 0
+    active: set[int] = set()
+    pending: list[tuple[Any, bool]] = [(value, False)]
+
+    while pending:
+        current, leaving = pending.pop()
+        if leaving:
+            active.remove(id(current))
+            continue
+
+        if type(current) is str:
+            if byte_lower_bound + len(current) + 2 > maximum:
+                return False
+            try:
+                byte_lower_bound += len(current.encode("utf-8")) + 2
+            except UnicodeEncodeError:
+                return False
+        elif type(current) is dict:
+            count = len(current)
+            byte_lower_bound += 2 + max(0, count - 1) + count
+            if byte_lower_bound > maximum:
+                return False
+            identity = id(current)
+            if identity in active:
+                return False
+            active.add(identity)
+            for key in current:
+                if type(key) is not str:
+                    return False
+                if byte_lower_bound + len(key) + 2 > maximum:
+                    return False
+                try:
+                    byte_lower_bound += len(key.encode("utf-8")) + 2
+                except UnicodeEncodeError:
+                    return False
+                if byte_lower_bound > maximum:
+                    return False
+            pending.append((current, True))
+            pending.extend((child, False) for child in current.values())
+        elif type(current) in (list, tuple):
+            count = len(current)
+            byte_lower_bound += 2 + max(0, count - 1)
+            if byte_lower_bound > maximum:
+                return False
+            identity = id(current)
+            if identity in active:
+                return False
+            active.add(identity)
+            pending.append((current, True))
+            pending.extend((child, False) for child in current)
+        elif current is None or type(current) in (bool, float):
+            byte_lower_bound += 1
+        elif type(current) is int:
+            bits = abs(current).bit_length()
+            # 0.30102 is a conservative lower approximation to log10(2).
+            byte_lower_bound += max(1, ((bits - 1) * 30102) // 100000 + 1)
+            if current < 0:
+                byte_lower_bound += 1
+        else:
+            return False
+
+        if byte_lower_bound > maximum:
+            return False
+
+    return True
+
+
+def _native_public_result_key_order(
+    document: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bytes | None:
+    """Sort one bounded JSON document's object keys in the native Test app."""
+    if not document or len(document) > PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES:
+        return None
+    packed = _native_public_result_document_request(document)
+    if packed is None:
+        return None
+    start_request, source_length = packed
+    if source_length != len(document):
+        raise AdapterError("MNCS public-result key-order input packing changed its length")
+    key_request = {
+        "schema_version": PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA,
+        "document": start_request["document"],
+        "input_sha256": hashlib.sha256(document).hexdigest(),
+    }
+    try:
+        result = run_native_app(
+            "test-public-result-json-key-order.json",
+            key_request,
+            request_schema=PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA,
+            result_schema=PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeBudgetExhaustedError, NativeInputBoundError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test public-result key ordering failed: {error}") from error
+
+    if result.get("schema_version") != PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA:
+        raise AdapterError("MNCS public-result key-order app returned an unsupported result schema")
+    if type(result.get("supported")) is not bool:
+        raise AdapterError("MNCS public-result key-order app returned malformed support metadata")
+    if not result["supported"]:
+        return None
+    byte_length = result.get("document_length")
+    if (
+        result.get("input_sha256") != key_request["input_sha256"]
+        or type(byte_length) is not int
+        or not 0 < byte_length <= PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES
+    ):
+        raise AdapterError("MNCS public-result key-order app returned malformed document metadata")
+    ordered = _decode_public_result_chunks(
+        result,
+        byte_length=byte_length,
+        maximum_chunks=4,
+    )
+    return ordered
+
+
 def _native_public_result_payload(
     value: Any,
     *,
@@ -249,17 +389,40 @@ def _native_public_result_payload(
     environment: dict[str, str],
 ) -> tuple[bytes, str] | None:
     """Run the MNCS token formatter over packed compact-JSON byte windows."""
-    prepared = _native_public_result_request(value)
+    if _native_key_order_candidate_within_bound(value):
+        try:
+            source = compact_json(value, sort_keys=False).encode("utf-8")
+        except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+            return None
+        ordered = _native_public_result_key_order(
+            source,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+        if ordered is not None:
+            source = ordered
+        else:
+            try:
+                source = compact_json(value).encode("utf-8")
+            except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+                return None
+    else:
+        try:
+            source = compact_json(value).encode("utf-8")
+        except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+            return None
+    prepared = _native_public_result_document_request(source)
     if prepared is None:
         return None
     start_request, source_length = prepared
     document = start_request["document"]
-    source = b"".join(
+    packed_source = b"".join(
         item["bytes"].encode("utf-8")
         for item in document["chunks"]
     )
-    input_hash = hashlib.sha256(source).hexdigest()
-    if len(source) != source_length or input_hash != start_request["input_sha256"]:
+    input_hash = hashlib.sha256(packed_source).hexdigest()
+    if packed_source != source or len(packed_source) != source_length or input_hash != start_request["input_sha256"]:
         raise AdapterError("MNCS public-result input packing changed its source bytes")
 
     output = bytearray()
@@ -431,8 +594,8 @@ def _public_result_input_chunks(document: bytes) -> list[bytes]:
         start = end
     return chunks
 
-def compact_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def compact_json(value: Any, *, sort_keys: bool = True) -> str:
+    return json.dumps(value, sort_keys=sort_keys, separators=(",", ":"), ensure_ascii=False)
 
 
 def compiler_inventory_identity(inventory: dict[str, Any]) -> str:

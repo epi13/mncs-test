@@ -111,11 +111,18 @@ compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_token_v1` consumes one compact JSON document in
 UTF-8-safe chunks and uses `mncs.std.json_cursor.v1` to validate and traverse
 its native token stream. The adapter no longer recursively projects Python
-values into a typed-value node/edge tree. The host still encodes the already
-available runtime value as key-sorted compact JSON for structured transport,
-and verifies the packed source digest before dispatch. MNCS scans the JSON,
-enforces token, depth, member, text, and byte bounds, and emits the indented
-public format with a trailing newline. It returns output in
+values into a typed-value node/edge tree. For bounded values with only built-in
+string object keys, the adapter uses a conservative size preflight and sends
+unsorted compact JSON to `mncs.test.public_result_json_key_order_v1`. That
+application parses the token stream into a bounded native value, compares
+decoded UTF-8 keys, and emits compact JSON in sorted key order. It accepts at
+most 4,096 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
+and 1,024-byte scalar text. The host verifies the packed source digest before
+dispatch. Non-string mapping keys, oversized values, and native unsupported or
+budget outcomes retain Python's sorted compact-JSON compatibility path. MNCS
+then scans the ordered document, enforces token, depth, member, text, and byte
+bounds, and emits the indented public format with a trailing newline. It
+returns output in
 8,192-byte windows while carrying cursor and SHA-256 state. The aggregate
 compact-input and formatted-output limits are each 65,536 bytes; the native
 path accepts at most 512 values, depth 63, 64 children per object, 256-byte

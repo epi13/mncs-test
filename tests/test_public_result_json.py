@@ -141,8 +141,60 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
 
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_count == 1
-    assert native_app.call_args.args[0] == "test-public-result-json-token.json"
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+    ]
+
+
+def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path) -> None:
+    value = {
+        "z": 0,
+        "Ω": 1,
+        "é": 2,
+        "😀": 3,
+        "\n": 4,
+        "a": 5,
+        '"': 6,
+        "\\": 7,
+        "nested": {"z": [3, 2], "a": {"Ω": 1, "A": 2}},
+    }
+    expected = _python_result_bytes(value)
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert native_app.call_args_list[0].args[0] == (
+        "test-public-result-json-key-order.json"
+    )
+
+
+def test_non_string_mapping_keys_keep_python_sort_semantics(tmp_path: Path) -> None:
+    value = {10: "ten", 2: "two"}
+    expected = _python_result_bytes(value)
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-token.json",
+    ]
 
 
 def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> None:
@@ -165,6 +217,7 @@ def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> N
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
         "test-public-result-json-token.json",
     ]
 
@@ -243,9 +296,14 @@ def test_packed_text_keeps_large_public_result_on_native_windows(
     assert len(expected) > 32_684
     assert len(expected) <= mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
 
-    with mock.patch.object(
-        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
-    ) as native_app:
+    with (
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+    ):
         actual, digest = mncs_test._public_result_json_payload(
             value,
             mncs=str(MNCS),
@@ -259,6 +317,7 @@ def test_packed_text_keeps_large_public_result_on_native_windows(
     assert 1 < len(calls) <= 6
     assert calls[0] == "test-public-result-json-token.json"
     assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
+    assert all(call.kwargs.get("sort_keys", True) for call in compact.call_args_list)
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(
@@ -302,8 +361,10 @@ def test_out_of_bound_string_falls_back_after_native_cursor_rejects_it(
 
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_count == 1
-    assert native_app.call_args.args[0] == "test-public-result-json-token.json"
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+    ]
 
 
 def test_native_budget_exhaustion_is_classified_separately(tmp_path: Path) -> None:
@@ -333,6 +394,7 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
+        "test-public-result-json-key-order.json",
         "test-public-result-json-token.json",
         "test-public-result-json-token.json",
     ]
