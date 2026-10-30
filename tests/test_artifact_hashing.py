@@ -247,6 +247,124 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
+def test_manifest_provenance_hashes_bounded_sources_with_mncs(
+    tmp_path: Path,
+) -> None:
+    compiler = tmp_path / "mncs-fixture"
+    compiler.write_text(
+        "#!/bin/sh\nprintf 'mncs-test-fixture 1\\n'\n",
+        encoding="utf-8",
+    )
+    compiler.chmod(0o755)
+    source = tmp_path / "sample.mncs"
+    source.write_text("module sample;\n", encoding="utf-8")
+    manifest_path = tmp_path / "sample.json"
+    manifest_path.write_text('{"profile":"mncs 0.18"}\n', encoding="utf-8")
+    library = tmp_path / "library"
+    library.mkdir()
+    library_source = library / "nested.mncs"
+    library_bytes = b"module shared;\n"
+    library_source.write_bytes(library_bytes)
+
+    store = mncs_test.ArtifactStore(
+        tmp_path / "artifacts",
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+    with store:
+        for payload in (b"first", b"second", b"third"):
+            store.digest_payload(payload)
+        hasher = store._retained_identity_hasher()
+        assert hasher is not None and hasher.session is not None
+
+        with (
+            mock.patch.object(store, "digest_file", wraps=store.digest_file) as native_file_hash,
+            mock.patch.object(
+                store, "digest_payload", wraps=store.digest_payload
+            ) as native_payload_hash,
+            mock.patch.object(hasher, "digest", wraps=hasher.digest) as native_digest,
+            mock.patch.object(
+                mncs_test, "sha256_file", wraps=mncs_test.sha256_file
+            ) as host_file_digest,
+            mock.patch.object(
+                mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
+            ) as host_payload_digest,
+            mock.patch.object(
+                mncs_test, "native_runner_policy", return_value=("success", 0)
+            ),
+            mock.patch.object(
+                mncs_test, "build_run_identity_sha256", return_value="a" * 64
+            ),
+        ):
+            result = mncs_test.make_result(
+                manifest={
+                    "manifest_path": str(manifest_path),
+                    "source_path": str(source),
+                    "profile": "mncs 0.18",
+                    "name": "native-provenance-fixture",
+                    "module": "sample",
+                    "suite": None,
+                    "tests": [],
+                    "timeout_seconds": 30,
+                },
+                source_text=source.read_text(encoding="utf-8"),
+                mncs=str(compiler),
+                cwd=tmp_path,
+                environment=_native_environment(),
+                library_paths=[library],
+                artifacts=store,
+                test_results=[],
+                suite_result=None,
+                suite_summary={
+                    "total": 1,
+                    "passed": 1,
+                    "failed": 0,
+                    "skipped": 0,
+                    "unsupported": 0,
+                    "assertion_failures": 0,
+                    "setup_failures": 0,
+                    "compile_failures": 0,
+                    "runtime_failures": 0,
+                    "timeout_failures": 0,
+                    "infrastructure_failures": 0,
+                    "assertion_count": 0,
+                    "failure_count": 0,
+                    "verdict": "PASS",
+                },
+                test_inventory=None,
+                execution=None,
+                classification="success",
+                failure_class="none",
+                message=None,
+                failure_details=None,
+                allow_unsupported=False,
+            )
+        provenance = result["provenance"]
+
+        expected = {
+            "compiler": hashlib.sha256(compiler.read_bytes()).hexdigest(),
+            "runner": hashlib.sha256(Path(mncs_test.__file__).read_bytes()).hexdigest(),
+            "source": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "manifest": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
+        library_leaf_digest = hashlib.sha256(library_bytes).hexdigest()
+        expected_library_material = f"nested.mncs\0{library_leaf_digest}\n".encode()
+        expected_library = hashlib.sha256(expected_library_material).hexdigest()
+
+        assert provenance["compiler"]["sha256"] == expected["compiler"]
+        assert provenance["runner"]["source_sha256"] == expected["runner"]
+        assert provenance["source"]["sha256"] == expected["source"]
+        assert provenance["manifest"]["sha256"] == expected["manifest"]
+        assert provenance["libraries"][0]["sha256"] == expected_library
+        assert native_file_hash.call_count == 0
+        assert native_payload_hash.call_count == 3
+        assert native_digest.call_count == 3
+        assert host_file_digest.call_count == 2
+        assert host_payload_digest.call_count == 1
+
+
+@pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
 def test_artifact_store_bounds_native_streaming_to_64_kib(
     tmp_path: Path,
 ) -> None:

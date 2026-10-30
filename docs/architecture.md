@@ -138,14 +138,19 @@ identity and SHA-256 functions in bounded windows for payloads and files up to
 512 KiB. A differential test covers a 512 KiB payload and a 393,233-byte compiler
 artifact against independent Python `hashlib` results. The retained session
 adds a one-time compile and open cost; no throughput gain over host `hashlib`
-is claimed. Each retained window now uses one MNCS function that validates the
+is claimed. `manifest_provenance` sends compiler, source, and manifest files up
+to 14,336 bytes through `ArtifactStore`, keeping each provenance hash within a
+single bounded MNCS request. Larger files, including the runner source, retain
+the host hash path. Library directory enumeration and tree hashing stay on the
+host because they may cover many files and do not yet have a useful aggregate
+work bound. Each retained window uses one MNCS function that validates the
 request and advances SHA-256 state together; the final window also finalizes the
 digest in that same call, with no separate initialization or finalization call
 from Python. Larger artifacts encountered
 before warm-up, or any artifact over 512 KiB, retain the host streaming
-fallback. Python still reads
-and writes files, supplies bounded typed values, and hashes source and
-provenance files.
+fallback. Python still reads and writes files, supplies bounded typed values,
+enumerates library directories, hashes library trees, and preserves the host
+compatibility path for other source and provenance hashes.
 
 `mncs.test.lineage_identity_v1` now constructs and hashes per-test execution
 and observation identity JSON from typed index, run, test-case, status, and

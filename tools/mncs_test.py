@@ -91,6 +91,7 @@ TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
 TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES = 14 * 1024
 TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST = 14
+TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES = TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
 TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES = 65_536
 TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES = 512 * 1024
 # The first few artifact hashes measure the native-app compatibility path
@@ -3981,14 +3982,31 @@ def bootstrap_exit_code_for(classification: str, *, allow_unsupported: bool = Fa
     return EXIT_INFRASTRUCTURE_FAILURE
 
 
-def manifest_provenance(manifest: dict[str, Any], source_text: str, mncs: str, library_paths: list[Path]) -> dict[str, Any]:
+def manifest_provenance(
+    manifest: dict[str, Any],
+    source_text: str,
+    mncs: str,
+    library_paths: list[Path],
+    *,
+    artifacts: ArtifactStore,
+) -> dict[str, Any]:
     manifest_path = Path(manifest["manifest_path"])
     source_path = Path(manifest["source_path"])
     compiler_path = Path(mncs)
+
+    def digest_provenance_file(path: Path) -> str:
+        if path.stat().st_size > TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES:
+            return sha256_file(path)
+        with path.open("rb") as handle:
+            payload = handle.read(TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES + 1)
+        if len(payload) > TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES:
+            return sha256_file(path)
+        return artifacts.digest_payload(payload)
+
     compiler: dict[str, Any] = {"requested": mncs}
     if compiler_path.is_file():
         compiler["path"] = str(compiler_path.resolve())
-        compiler["sha256"] = sha256_file(compiler_path)
+        compiler["sha256"] = digest_provenance_file(compiler_path)
         try:
             version = subprocess.run(
                 [str(compiler_path), "--version"],
@@ -4009,12 +4027,12 @@ def manifest_provenance(manifest: dict[str, Any], source_text: str, mncs: str, l
             "name": "mncs-test",
             "version": RUNNER_VERSION,
             "adapter": "python-stdlib-transport-plus-mncs-embed-boundary",
-            "source_sha256": sha256_file(Path(__file__)),
+            "source_sha256": digest_provenance_file(Path(__file__)),
         },
         "language_profile": manifest["profile"],
         "compiler": compiler,
-        "source": {"path": str(source_path), "sha256": sha256_file(source_path)},
-        "manifest": {"path": str(manifest_path), "sha256": sha256_file(manifest_path)},
+        "source": {"path": str(source_path), "sha256": digest_provenance_file(source_path)},
+        "manifest": {"path": str(manifest_path), "sha256": digest_provenance_file(manifest_path)},
         "libraries": [{"path": str(path), "sha256": hash_tree(path)} for path in library_paths],
         "host": {"os": platform.system(), "release": platform.release(), "arch": platform.machine()},
         "source_bytes": len(source_text.encode("utf-8")),
@@ -5421,7 +5439,13 @@ def make_result(
         verdict = "UNKNOWN"
     else:
         verdict = "FAIL"
-    provenance = manifest_provenance(manifest, source_text, mncs, library_paths)
+    provenance = manifest_provenance(
+        manifest,
+        source_text,
+        mncs,
+        library_paths,
+        artifacts=artifacts,
+    )
     run_id = build_run_identity_sha256(
         provenance=provenance,
         profile=manifest["profile"],
