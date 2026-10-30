@@ -404,6 +404,10 @@ class RunnerTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         response = json.loads(completed.stdout)
+        self.assertEqual(
+            completed.stdout.encode("utf-8"),
+            mncs_test.json_bytes(response),
+        )
         self.assertEqual(response["schema_version"], "mncs.family-check-response/1")
         self.assertEqual(response["verdict"], "PASS")
         self.assertEqual(response["runner"], "mncs-test")
@@ -541,6 +545,10 @@ class RunnerTests(unittest.TestCase):
             )
             native_applications: list[str] = []
             original_run_native_app = mncs_test.run_native_app
+            public_json_apps = {
+                "test-public-result-json.json",
+                "test-public-result-json-window.json",
+            }
 
             def observe_native_app(name, native_request, **kwargs):
                 response = original_run_native_app(name, native_request, **kwargs)
@@ -561,13 +569,15 @@ class RunnerTests(unittest.TestCase):
             ):
                 exit_code = mncs_test.run_family_check(arguments)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 0, output.getvalue())
         response = json.loads(output.getvalue())
         self.assertIn("test-check-result-projection.json", native_applications)
-        self.assertTrue(
-            set(native_applications)
-            & {"test-public-result-json.json", "test-public-result-json-window.json"}
+        self.assertGreaterEqual(
+            sum(name in public_json_apps for name in native_applications),
+            2,
+            native_applications,
         )
+        self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(response))
         public_json = mncs_test.json_bytes(response["check_result"])
         self.assertEqual(
             response["execution"]["check_result_sha256"],
