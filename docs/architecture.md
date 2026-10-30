@@ -153,14 +153,17 @@ string object keys, the adapter uses a conservative size preflight and sends
 unsorted compact JSON to `mncs.test.public_result_json_key_order_v1`. That
 application parses the token stream into a bounded native value, compares
 decoded UTF-8 keys, and emits compact JSON in sorted key order. It accepts at
-most 4,096 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
-and 1,024-byte scalar text. The host verifies the packed source digest before
-dispatch. Non-string mapping keys, oversized values, and native unsupported or
-budget outcomes retain Python's sorted compact-JSON compatibility path. MNCS
-then scans the ordered document, enforces token, depth, member, text, and byte
-bounds, and emits the indented public format with a trailing newline. It
-returns output in
-8,192-byte windows while carrying cursor and SHA-256 state. The aggregate
+most 8,192 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
+and 1,024-byte scalar text. The host preflight caps candidates at 128 values
+to stay within the runner's 8,000,000-step budget. The native writer retains
+one active 1,024-byte page and a bounded list of completed pages, avoiding a
+full-document buffer copy for each emitted byte. The host verifies the packed
+source digest before dispatch. Non-string mapping keys, oversized values, and
+native unsupported or budget outcomes retain Python's sorted compact-JSON
+compatibility path. MNCS then scans the ordered document, enforces token,
+depth, member, text, and byte bounds, and emits the indented public format with
+a trailing newline. It returns output in 8,192-byte windows while carrying
+cursor and SHA-256 state. The aggregate
 compact-input and formatted-output limits are each 65,536 bytes; the native
 path accepts at most 512 values, depth 63, 64 children per object, 256-byte
 keys, and 1,024-byte scalar text. Each continuation repeats the bounded source

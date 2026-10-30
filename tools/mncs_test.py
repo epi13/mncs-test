@@ -58,7 +58,8 @@ PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
-PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
+PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 8192
+PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 128
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/2"
@@ -79,7 +80,7 @@ INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.16"
+RUNNER_VERSION = "0.2.17"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -271,6 +272,7 @@ def _native_key_order_candidate_within_bound(value: Any) -> bool:
     """Check native ordering eligibility with a conservative JSON size bound."""
     maximum = PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES
     byte_lower_bound = 0
+    value_count = 0
     active: set[int] = set()
     pending: list[tuple[Any, bool]] = [(value, False)]
 
@@ -279,6 +281,10 @@ def _native_key_order_candidate_within_bound(value: Any) -> bool:
         if leaving:
             active.remove(id(current))
             continue
+
+        value_count += 1
+        if value_count > PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES:
+            return False
 
         if type(current) is str:
             if byte_lower_bound + len(current) + 2 > maximum:
@@ -390,7 +396,7 @@ def _native_public_result_key_order(
     ordered = _decode_public_result_chunks(
         result,
         byte_length=byte_length,
-        maximum_chunks=4,
+        maximum_chunks=8,
     )
     return ordered
 
