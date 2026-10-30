@@ -357,10 +357,10 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
         assert provenance["source"]["sha256"] == expected["source"]
         assert provenance["manifest"]["sha256"] == expected["manifest"]
         assert provenance["libraries"][0]["sha256"] == expected_library
-        assert native_file_hash.call_count == 0
+        assert native_file_hash.call_count == 1
         assert native_payload_hash.call_count == 3
-        assert native_digest.call_count == 3
-        assert host_file_digest.call_count == 2
+        assert native_digest.call_count == 4
+        assert host_file_digest.call_count == 1
         assert host_payload_digest.call_count == 1
 
 

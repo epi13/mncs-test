@@ -91,9 +91,9 @@ TEST_RESULT_IDENTITY_MAX_CHUNKS = 64
 TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES = 14 * 1024
 TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST = 14
-TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES = TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
 TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES = 65_536
 TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES = 512 * 1024
+TEST_PROVENANCE_FILE_ADAPTER_MAX_BYTES = TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES
 # The first few artifact hashes measure the native-app compatibility path
 # without paying the one-time backend compile and retained-session open cost.
 TEST_RESULT_IDENTITY_EMBED_SESSION_AFTER_ARTIFACTS = 3
@@ -3995,12 +3995,12 @@ def manifest_provenance(
     compiler_path = Path(mncs)
 
     def digest_provenance_file(path: Path) -> str:
-        if path.stat().st_size > TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES:
+        if path.stat().st_size > TEST_PROVENANCE_FILE_ADAPTER_MAX_BYTES:
             return sha256_file(path)
         with path.open("rb") as handle:
-            payload = handle.read(TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES + 1)
-        if len(payload) > TEST_PROVENANCE_NATIVE_FILE_MAX_BYTES:
-            return sha256_file(path)
+            payload = handle.read(TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES + 1)
+        if len(payload) > TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES:
+            return artifacts.digest_file(path)
         return artifacts.digest_payload(payload)
 
     compiler: dict[str, Any] = {"requested": mncs}
