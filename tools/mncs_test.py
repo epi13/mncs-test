@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import tomllib
 from family_contract import (
@@ -92,6 +92,10 @@ TEST_RESULT_IDENTITY_MAX_STEP_BUDGET = 8_000_000
 TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES = 12 * 1024
 TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST = 12
 TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES = 65_536
+TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES = 256 * 1024
+# The first few artifact hashes measure the native-app compatibility path
+# without paying the one-time backend compile and retained-session open cost.
+TEST_RESULT_IDENTITY_EMBED_SESSION_AFTER_ARTIFACTS = 3
 TEST_LINEAGE_IDENTITY_REQUEST_SCHEMA = "mncs.test.lineage-identity-request/1"
 TEST_LINEAGE_IDENTITY_RESULT_SCHEMA = "mncs.test.lineage-identity/1"
 TEST_LINEAGE_IDENTITY_MAX_ROWS = 16
@@ -2204,15 +2208,59 @@ class ArtifactStore:
         self.mncs = mncs
         self.cwd = cwd.resolve() if cwd is not None else None
         self.environment = environment
+        self._native_hash_operations = 0
+        self._identity_hasher_attempted = False
+        self._identity_hasher: ResultIdentityEmbedHasher | None = None
+        self._identity_hasher_failure: str | None = None
+        self._closed = False
 
-    def digest_payload(self, payload: bytes) -> str:
-        """Use MNCS for bounded artifacts and hashlib for larger payloads."""
-        if self.mncs is None:
-            return sha256_bytes(payload)
-        if self.cwd is None or self.environment is None:
+    def close(self) -> None:
+        """Release a retained MNCS hash session owned by this artifact store."""
+        if self._identity_hasher is not None:
+            self._identity_hasher.close()
+        self._closed = True
+
+    def __enter__(self) -> "ArtifactStore":
+        return self
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        self.close()
+
+    def _start_identity_hasher(self) -> ResultIdentityEmbedHasher | None:
+        if self._identity_hasher_attempted:
+            return self._identity_hasher
+        self._identity_hasher_attempted = True
+        if self.mncs is None or self.cwd is None or self.environment is None:
+            return None
+        try:
+            self._identity_hasher = ResultIdentityEmbedHasher(
+                mncs=self.mncs,
+                cwd=self.cwd,
+                environment=self.environment,
+            )
+        except AdapterError as error:
+            # The retained path is an optimization. Keep the established
+            # native-app transport available if this toolchain cannot admit
+            # the compiled backend artifact.
+            self._identity_hasher_failure = str(error)
+        return self._identity_hasher
+
+    def _digest_bounded_payload(self, payload: bytes) -> str:
+        if self._closed:
+            raise AdapterError("artifact store is closed")
+        if self._native_hash_operations >= TEST_RESULT_IDENTITY_EMBED_SESSION_AFTER_ARTIFACTS:
+            hasher = self._start_identity_hasher()
+            if hasher is not None:
+                try:
+                    return hasher.digest(payload)
+                except AdapterError as error:
+                    self._identity_hasher_failure = str(error)
+                    hasher.close()
+                    self._identity_hasher = None
+
+        self._native_hash_operations += 1
+        if self.mncs is None or self.cwd is None or self.environment is None:
             raise AdapterError("native artifact hashing context is incomplete")
-        if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
-            return sha256_bytes(payload)
         if (
             len(payload) <= TEST_RESULT_IDENTITY_MAX_BYTES
             and result_identity_step_budget([payload])
@@ -2231,31 +2279,75 @@ class ArtifactStore:
             environment=self.environment,
         )
 
+    def _retained_identity_hasher(self) -> ResultIdentityEmbedHasher | None:
+        if self._native_hash_operations < TEST_RESULT_IDENTITY_EMBED_SESSION_AFTER_ARTIFACTS:
+            return None
+        return self._start_identity_hasher()
+
+    def _digest_retained_payload(
+        self,
+        payload: bytes,
+        *,
+        fallback: Callable[[], str],
+    ) -> str:
+        hasher = self._retained_identity_hasher()
+        if hasher is None:
+            return fallback()
+        try:
+            return hasher.digest(payload)
+        except AdapterError as error:
+            self._identity_hasher_failure = str(error)
+            hasher.close()
+            self._identity_hasher = None
+            return fallback()
+
+    def digest_payload(self, payload: bytes) -> str:
+        """Use MNCS sessions for bounded artifacts after repeated app invocations."""
+        if self._closed:
+            raise AdapterError("artifact store is closed")
+        if self.mncs is None:
+            return sha256_bytes(payload)
+        if self.cwd is None or self.environment is None:
+            raise AdapterError("native artifact hashing context is incomplete")
+        if len(payload) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+            return sha256_bytes(payload)
+        if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+            return self._digest_retained_payload(
+                payload,
+                fallback=lambda: sha256_bytes(payload),
+            )
+        return self._digest_bounded_payload(payload)
+
     def digest_file(self, path: Path) -> str:
-        """Use MNCS for bounded files and the host streaming hash for larger files."""
+        """Use MNCS for bounded files and the host path for larger files."""
+        if self._closed:
+            raise AdapterError("artifact store is closed")
         if self.mncs is None:
             return sha256_file(path)
         if self.cwd is None or self.environment is None:
             raise AdapterError("native artifact hashing context is incomplete")
-        if path.stat().st_size > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+        file_size = path.stat().st_size
+        if file_size > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
             return sha256_file(path)
-        with path.open("rb") as handle:
-            payload = handle.read(TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES + 1)
-            if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+        if file_size > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+            with path.open("rb") as handle:
+                payload = handle.read(TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
+            if len(payload) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
                 return sha256_file(path)
-            if (
-                len(payload) <= TEST_RESULT_IDENTITY_MAX_BYTES
-                and result_identity_step_budget([payload])
-                <= TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
-            ):
-                return self.digest_payload(payload)
-
-            return _native_result_identity_stream_digest(
-                [payload],
-                mncs=self.mncs,
-                cwd=self.cwd,
-                environment=self.environment,
+            return self._digest_retained_payload(
+                payload,
+                fallback=lambda: sha256_file(path),
             )
+        with path.open("rb") as handle:
+            payload = handle.read(TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
+            if len(payload) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+                return sha256_file(path)
+        if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
+            return self._digest_retained_payload(
+                payload,
+                fallback=lambda: sha256_file(path),
+            )
+        return self._digest_bounded_payload(payload)
 
     def write(self, relative: str, payload: bytes, kind: str) -> str:
         path = (self.root / relative).resolve()
@@ -2484,6 +2576,418 @@ class EmbedSession:
 
     def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
         self.close()
+
+
+def _host_integer(value: int) -> dict[str, Any]:
+    return {"integer": {"value": int(value)}}
+
+
+def _host_byte(value: int) -> dict[str, Any]:
+    return {"byte": {"value": int(value)}}
+
+
+def _host_boolean(value: bool) -> dict[str, Any]:
+    return {"boolean": {"value": bool(value)}}
+
+
+def _host_sequence(values: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"sequence": {"values": values}}
+
+
+def _host_record(name: str, fields: dict[str, Any]) -> dict[str, Any]:
+    record: dict[str, Any] = {"fields": fields}
+    if name:
+        record["type"] = name
+    return {"record": record}
+
+
+def _host_value_from_execution(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or len(value) != 1:
+        raise AdapterError("mncs-embed returned a malformed execution value")
+    kind, body = next(iter(value.items()))
+    if not isinstance(body, dict):
+        raise AdapterError("mncs-embed returned a malformed tagged execution value")
+    if kind == "record":
+        raw_fields = body.get("fields")
+        if not isinstance(raw_fields, list):
+            raise AdapterError("mncs-embed returned a malformed record value")
+        fields: dict[str, Any] = {}
+        for pair in raw_fields:
+            if not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str):
+                raise AdapterError("mncs-embed returned a malformed record field")
+            fields[pair[0]] = _host_value_from_execution(pair[1])
+        name = body.get("name", "")
+        if not isinstance(name, str):
+            raise AdapterError("mncs-embed returned a malformed record name")
+        return _host_record(name, fields)
+    if kind == "sequence":
+        values = body.get("values")
+        if not isinstance(values, list):
+            raise AdapterError("mncs-embed returned a malformed sequence value")
+        return _host_sequence([_host_value_from_execution(item) for item in values])
+    if kind in ("integer", "byte", "boolean", "float") and "value" in body:
+        return {kind: {"value": body["value"]}}
+    raise AdapterError(f"mncs-embed returned an unsupported execution value: {kind}")
+
+
+class ResultIdentityEmbedHasher:
+    """Reuse one admitted MNCS backend session for bounded ArtifactStore hashes."""
+
+    def __init__(
+        self,
+        *,
+        mncs: str,
+        cwd: Path,
+        environment: dict[str, str],
+    ):
+        self.mncs = mncs
+        self.cwd = cwd
+        self.environment = environment
+        self.session: EmbedSession | None = None
+        self._closed = False
+
+        libraries = [
+            candidate
+            for candidate in embed_library_candidates(mncs, None)
+            if candidate.is_file()
+        ]
+        if not libraries:
+            raise AdapterError("mncs-embed library is unavailable for a retained hash session")
+
+        source_path = Path(__file__).resolve().parents[1] / "native/mncs/test/result_identity_v1.mncs"
+        if not source_path.is_file():
+            raise AdapterError(f"MNCS result identity source is unavailable: {source_path}")
+        compile_command = [
+            mncs,
+            "compile",
+            str(source_path),
+            "--emit",
+            "backend",
+            "--target",
+            "research-bytecode",
+            "--include-tests",
+            "--output-dir",
+        ]
+        try:
+            with tempfile.TemporaryDirectory(prefix="mncs-test-identity-backend-") as directory:
+                compile_result = subprocess.run(
+                    [*compile_command, directory],
+                    cwd=str(cwd),
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=120,
+                )
+                if compile_result.returncode != 0:
+                    detail = (compile_result.stderr or compile_result.stdout).strip()
+                    raise AdapterError(
+                        "MNCS result identity backend compilation failed: "
+                        + (detail[-1200:] if detail else f"exit {compile_result.returncode}")
+                    )
+                artifact_path = Path(directory) / "backend.json"
+                try:
+                    artifact_bytes = artifact_path.read_bytes()
+                except OSError as error:
+                    raise AdapterError(
+                        f"MNCS result identity backend artifact is unavailable: {error}"
+                    ) from error
+                last_error: str | None = None
+                for library in libraries:
+                    try:
+                        self.session = EmbedSession(library, artifact_bytes)
+                        info = self.session.info()
+                        if not isinstance(info.get("artifact_identity"), str):
+                            raise AdapterError("mncs-embed omitted the compiled artifact identity")
+                        return
+                    except AdapterError as error:
+                        if self.session is not None:
+                            self.session.close()
+                            self.session = None
+                        last_error = str(error)
+                raise AdapterError(
+                    "mncs-embed could not admit the result identity backend: "
+                    + (last_error or "no compatible library candidate")
+                )
+        except subprocess.TimeoutExpired as error:
+            raise AdapterError("MNCS result identity backend compilation timed out") from error
+        except OSError as error:
+            raise AdapterError(f"MNCS result identity backend compilation failed: {error}") from error
+
+    def _returned(self, output: dict[str, Any], label: str) -> Any:
+        if output.get("status") != "returned":
+            detail = json.dumps(output, ensure_ascii=False, separators=(",", ":"))[:800]
+            raise AdapterError(f"MNCS {label} call failed: {detail}")
+        values = output.get("returned")
+        if not isinstance(values, list) or len(values) != 1:
+            raise AdapterError(f"MNCS {label} call returned a malformed value list")
+        return values[0]
+
+    def _require_valid(self, output: dict[str, Any], label: str) -> None:
+        value = self._returned(output, label)
+        if not isinstance(value, dict) or value.get("boolean", {}).get("value") is not True:
+            raise AdapterError(f"MNCS {label} rejected the bounded hash request")
+
+    def _digest_bytes(self, value: Any, label: str) -> str:
+        if not isinstance(value, dict):
+            raise AdapterError(f"MNCS {label} returned no digest record")
+        record = value.get("record")
+        raw_fields = record.get("fields") if isinstance(record, dict) else None
+        if not isinstance(raw_fields, list):
+            raise AdapterError(f"MNCS {label} returned a malformed digest record")
+        fields = {
+            pair[0]: pair[1]
+            for pair in raw_fields
+            if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)
+        }
+        digest_value = fields.get("digest")
+        sequence = digest_value.get("sequence") if isinstance(digest_value, dict) else None
+        raw_bytes = sequence.get("values") if isinstance(sequence, dict) else None
+        if not isinstance(raw_bytes, list) or len(raw_bytes) != 32:
+            raise AdapterError(f"MNCS {label} returned a malformed SHA-256 digest")
+        digest: list[int] = []
+        for item in raw_bytes:
+            byte_value = item.get("byte") if isinstance(item, dict) else None
+            byte = byte_value.get("value") if isinstance(byte_value, dict) else None
+            if type(byte) is not int or byte < 0 or byte > 255:
+                raise AdapterError(f"MNCS {label} returned a malformed digest byte")
+            digest.append(byte)
+        return bytes(digest).hex()
+
+    def _request_value(self, payload: bytes) -> dict[str, Any]:
+        chunks = [
+            _host_sequence([_host_byte(byte) for byte in payload[offset : offset + 1024]])
+            for offset in range(0, len(payload), 1024)
+        ]
+        return _host_record(
+            "ResultIdentityRequestV1",
+            {
+                "schema_version": _host_sequence(
+                    [_host_byte(byte) for byte in TEST_RESULT_IDENTITY_REQUEST_SCHEMA.encode()]
+                ),
+                "payload_count": _host_integer(1),
+                "chunk_count": _host_integer(len(chunks)),
+                "payloads": _host_sequence(
+                    [
+                        _host_record(
+                            "IdentityPayloadSliceV1",
+                            {
+                                "first_chunk": _host_integer(0),
+                                "chunk_count": _host_integer(len(chunks)),
+                            },
+                        )
+                    ]
+                ),
+                "chunks": _host_sequence(chunks),
+            },
+        )
+
+    def _hash_batch(self, payload: bytes) -> str:
+        if self.session is None:
+            raise AdapterError("MNCS result identity session is closed")
+        budget = result_identity_step_budget([payload])
+        request = self._request_value(payload)
+        outputs = self.session.call_batch(
+            [
+                {
+                    "module": "mncs.test.result_identity_v1",
+                    "function": "valid_request",
+                    "typed_args": [request],
+                    "step_budget": budget,
+                },
+                {
+                    "module": "mncs.test.result_identity_v1",
+                    "function": "hash_payloads",
+                    "typed_args": [request],
+                    "step_budget": budget,
+                },
+            ]
+        )
+        if len(outputs) != 2:
+            raise AdapterError("MNCS result identity batch returned the wrong result count")
+        valid, hashed = outputs
+        self._require_valid(valid, "result identity validation")
+        hashes = self._returned(hashed, "result identity")
+        if not isinstance(hashes, dict):
+            raise AdapterError("MNCS result identity returned no payload list")
+        records = hashes.get("sequence", {}).get("values")
+        if not isinstance(records, list) or len(records) != 1:
+            raise AdapterError("MNCS result identity returned the wrong payload count")
+        return self._digest_bytes(records[0], "result identity")
+
+    def _empty_stream_state(self) -> dict[str, Any]:
+        return _host_record(
+            "ResultIdentityHashStateV1",
+            {
+                "h": _host_sequence([_host_integer(0) for _ in range(8)]),
+                "total": _host_integer(0),
+                "buf": _host_sequence([_host_byte(0) for _ in range(64)]),
+                "buffered": _host_integer(0),
+            },
+        )
+
+    def _state_fields(self, state: dict[str, Any]) -> dict[str, Any]:
+        record = state.get("record")
+        fields = record.get("fields") if isinstance(record, dict) else None
+        if not isinstance(fields, dict):
+            raise AdapterError("MNCS stream hash returned a malformed continuation state")
+        return fields
+
+    def _update_stream_window(
+        self,
+        state: dict[str, Any],
+        window: bytes,
+        *,
+        total_before: int,
+    ) -> dict[str, Any]:
+        if self.session is None:
+            raise AdapterError("MNCS result identity session is closed")
+        has_state = total_before > 0
+        request_state = (
+            _host_record("ResultIdentityHashStateV1", self._state_fields(state))
+            if has_state
+            else self._empty_stream_state()
+        )
+        chunks = [
+            _host_sequence([_host_byte(byte) for byte in window[offset : offset + 1024]])
+            for offset in range(0, len(window), 1024)
+        ]
+        request = _host_record(
+            "ResultIdentityStreamRequestV1",
+            {
+                "schema_version": _host_sequence(
+                    [
+                        _host_byte(byte)
+                        for byte in TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA.encode()
+                    ]
+                ),
+                "has_state": _host_boolean(has_state),
+                "state": request_state,
+                "chunks": _host_sequence(chunks),
+                "finalize": _host_boolean(False),
+            },
+        )
+        budget = result_identity_step_budget([window])
+        if budget > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET:
+            raise AdapterError("MNCS result identity stream window exceeds its step budget")
+        outputs = self.session.call_batch(
+            [
+                {
+                    "module": "mncs.test.result_identity_v1",
+                    "function": "valid_stream_request",
+                    "typed_args": [request],
+                    "step_budget": budget,
+                },
+                {
+                    "module": "mncs.test.result_identity_v1",
+                    "function": "update_stream_state",
+                    "typed_args": [state, request],
+                    "step_budget": budget,
+                },
+            ]
+        )
+        if len(outputs) != 2:
+            raise AdapterError("MNCS result identity stream returned the wrong result count")
+        valid, updated = outputs
+        self._require_valid(valid, "result identity stream validation")
+        state = _host_value_from_execution(self._returned(updated, "result identity stream"))
+        total = total_before + len(window)
+        fields = self._state_fields(state)
+        total_value = fields.get("total", {}).get("integer", {}).get("value")
+        buffered_value = fields.get("buffered", {}).get("integer", {}).get("value")
+        if total_value != total or buffered_value != total % 64:
+            raise AdapterError("MNCS result identity stream returned inconsistent SHA-256 state")
+        return state
+
+    def digest_chunks(self, source_chunks: Iterable[bytes]) -> str:
+        """Hash a byte stream through MNCS with bounded, reusable session calls."""
+        if self.session is None or self._closed:
+            raise AdapterError("MNCS result identity session is closed")
+        initialized = self.session.call_batch(
+            [
+                {
+                    "module": "mncs.std.sha256.v1",
+                    "function": "init",
+                    "args": [],
+                    "step_budget": 2_097_152,
+                }
+            ]
+        )[0]
+        state = _host_value_from_execution(self._returned(initialized, "SHA-256 init"))
+        if state.get("record", {}).get("type") != "DigestState":
+            raise AdapterError("MNCS SHA-256 init returned the wrong state type")
+
+        total = 0
+        pending = bytearray()
+        for source_chunk in source_chunks:
+            if not isinstance(source_chunk, bytes):
+                raise AdapterError("MNCS result identity stream requires byte chunks")
+            if total + len(pending) + len(source_chunk) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+                raise AdapterError("MNCS retained hash session input exceeds its bounded byte limit")
+            offset = 0
+            while offset < len(source_chunk):
+                take = min(
+                    TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - len(pending),
+                    len(source_chunk) - offset,
+                )
+                pending.extend(source_chunk[offset : offset + take])
+                offset += take
+                if len(pending) == TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES:
+                    state = self._update_stream_window(
+                        state, bytes(pending), total_before=total
+                    )
+                    total += len(pending)
+                    pending.clear()
+        if pending:
+            state = self._update_stream_window(state, bytes(pending), total_before=total)
+
+        finalized = self.session.call_batch(
+            [
+                {
+                    "module": "mncs.std.sha256.v1",
+                    "function": "finalize_standard",
+                    "typed_args": [state],
+                    "step_budget": 2_097_152,
+                }
+            ]
+        )[0]
+        value = self._returned(finalized, "SHA-256 finalization")
+        if not isinstance(value, dict):
+            raise AdapterError("MNCS SHA-256 finalization returned a malformed digest")
+        raw_bytes = value.get("sequence", {}).get("values")
+        if not isinstance(raw_bytes, list) or len(raw_bytes) != 32:
+            raise AdapterError("MNCS SHA-256 finalization returned a malformed digest")
+        digest: list[int] = []
+        for item in raw_bytes:
+            byte_value = item.get("byte") if isinstance(item, dict) else None
+            byte = byte_value.get("value") if isinstance(byte_value, dict) else None
+            if type(byte) is not int or byte < 0 or byte > 255:
+                raise AdapterError("MNCS SHA-256 finalization returned a malformed digest byte")
+            digest.append(byte)
+        return bytes(digest).hex()
+
+    def _hash_stream(self, payload: bytes) -> str:
+        return self.digest_chunks(
+            payload[offset : offset + TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES]
+            for offset in range(0, len(payload), TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES)
+        )
+
+    def digest(self, payload: bytes) -> str:
+        if self._closed:
+            raise AdapterError("MNCS result identity session is closed")
+        if len(payload) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+            raise AdapterError("payload exceeds the retained MNCS hash-session bound")
+        if (
+            len(payload) <= TEST_RESULT_IDENTITY_MAX_BYTES
+            and result_identity_step_budget([payload]) <= TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
+        ):
+            return self._hash_batch(payload)
+        return self._hash_stream(payload)
+
+    def close(self) -> None:
+        if self.session is not None:
+            self.session.close()
+        self._closed = True
 
 
 def embed_library_candidates(mncs: str, requested: str | None) -> list[Path]:
@@ -5872,6 +6376,7 @@ def run_manifest(args: argparse.Namespace) -> int:
     cwd = Path.cwd().resolve()
     result_path, check_path, artifact_root = result_paths(args, cwd)
     manifest_path = resolve_path(args.manifest, cwd)
+    artifacts: ArtifactStore | None = None
     try:
         manifest = load_manifest(manifest_path)
         source_text = read_source(Path(manifest["source_path"]))
@@ -6480,6 +6985,9 @@ def run_manifest(args: argparse.Namespace) -> int:
         result = minimal_result(classification="invalid_invocation", message=str(error), cwd=cwd)
     except AdapterError as error:
         result = minimal_result(classification="infrastructure_failure", message=str(error), cwd=cwd)
+    finally:
+        if artifacts is not None:
+            artifacts.close()
     result.setdefault("timing", {})["total_wall_time_ms"] = round((time.perf_counter() - run_started) * 1000, 3)
     result["timing"]["attribution"] = {
         "process_wall_time": "execution.process.timing.wall_time_ms when a compiler/provider process ran",
@@ -6562,19 +7070,23 @@ def discover_command(args: argparse.Namespace) -> int:
                         if component:
                             libraries.append(resolve_path(component, Path.cwd(), must_exist=True))
                 with tempfile.TemporaryDirectory(prefix="mncs-test-discover-") as directory:
-                    inventory, transport = compiler_inventory(
-                        source_path=Path(manifest["source_path"]),
+                    artifacts = ArtifactStore(
+                        Path(directory),
                         mncs=mncs,
                         cwd=Path.cwd(),
                         environment=command_environment(libraries),
-                        timeout_seconds=manifest["timeout_seconds"],
-                        artifacts=ArtifactStore(
-                            Path(directory),
+                    )
+                    try:
+                        inventory, transport = compiler_inventory(
+                            source_path=Path(manifest["source_path"]),
                             mncs=mncs,
                             cwd=Path.cwd(),
                             environment=command_environment(libraries),
-                        ),
-                    )
+                            timeout_seconds=manifest["timeout_seconds"],
+                            artifacts=artifacts,
+                        )
+                    finally:
+                        artifacts.close()
                 if inventory is None:
                     errors.append(
                         {

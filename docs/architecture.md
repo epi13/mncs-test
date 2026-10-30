@@ -130,14 +130,17 @@ toolchain's 8,000,000-step ceiling per request. `ArtifactStore` uses the
 streaming identity application when a payload or file exceeds the batch's
 step limit but is at most 65,536 bytes. It carries native SHA-256 state between
 calls, with at most twelve 1,024-byte chunks (12,288 bytes) per call, so the
-continuation is bounded to six application executions. The first integrated
-self-suite attempt showed excessive process fan-out for its roughly 13 MB
-compiler artifacts and was stopped after 5:43. After capping native
-continuation and retaining the host's streaming `hashlib` path for larger
-artifacts, the integrated self-suite passed in 184.69 seconds. Python reads
-and writes files and sends bounded native chunks. Filesystem access, larger
-artifact compatibility hashes, and source and provenance hashes remain host
-operations.
+continuation is bounded to six application executions. After three native
+application hashes in one store, it compiles the same MNCS module to a backend
+artifact and retains an `mncs-embed` session. That session calls the pure MNCS
+identity and SHA-256 functions in bounded windows for payloads and files up to
+256 KiB. A differential test covers a 131,073-byte payload and a 196,619-byte
+compiler artifact against independent Python `hashlib` results. The retained
+session adds a one-time compile and open cost; no throughput gain over host
+`hashlib` is claimed. Larger artifacts encountered before warm-up, or any
+artifact over 256 KiB, retain the host streaming fallback. Python still reads
+and writes files, supplies bounded typed values, and hashes source and
+provenance files.
 
 `mncs.test.lineage_identity_v1` now constructs and hashes per-test execution
 and observation identity JSON from typed index, run, test-case, status, and

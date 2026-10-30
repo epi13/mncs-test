@@ -138,6 +138,58 @@ def test_artifact_store_streams_medium_payload_and_file_hashes_in_mncs(
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
+def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    store = mncs_test.ArtifactStore(
+        artifact_root,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+    payload = bytes((index * 37 + 5) % 256 for index in range(131_073))
+    file_payload = bytes((index * 41 + 13) % 256 for index in range(196_619))
+    path = artifact_root / "compiler" / "large.bin"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(file_payload)
+
+    with (
+        store,
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+        mock.patch.object(
+            mncs_test, "sha256_file", wraps=mncs_test.sha256_file
+        ) as host_file_digest,
+        mock.patch.object(
+            mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
+        ) as host_bytes_digest,
+    ):
+        for index, small_payload in enumerate((b"first", b"second", b"third")):
+            store.write(f"stdout/{index}.bin", small_payload, "stdout")
+        store.write("stdout/large.bin", payload, "stdout")
+        store.record_existing(path, "compiler-output")
+
+        assert store._identity_hasher is not None
+        assert store._identity_hasher.session is not None
+        assert [item["sha256"] for item in store.items] == [
+            hashlib.sha256(b"first").hexdigest(),
+            hashlib.sha256(b"second").hexdigest(),
+            hashlib.sha256(b"third").hexdigest(),
+            hashlib.sha256(payload).hexdigest(),
+            hashlib.sha256(file_payload).hexdigest(),
+        ]
+        assert native_app.call_count == 3
+        assert host_file_digest.call_count == 0
+        assert host_bytes_digest.call_count == 0
+
+    assert store._identity_hasher is not None
+    assert store._identity_hasher.session is not None
+    assert store._identity_hasher.session.handle is None
+
+
+@pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
 def test_artifact_store_bounds_native_streaming_to_64_kib(
     tmp_path: Path,
 ) -> None:
@@ -177,6 +229,39 @@ def test_artifact_store_bounds_native_streaming_to_64_kib(
     assert native_app.call_count == 0
     assert host_bytes_digest.call_count == 1
     assert host_file_digest.call_count == 1
+
+
+@pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
+def test_artifact_store_keeps_large_files_on_host_after_session_warmup(
+    tmp_path: Path,
+) -> None:
+    store = mncs_test.ArtifactStore(
+        tmp_path / "artifacts",
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+    payload = bytes(
+        (index * 47 + 19) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
+    )
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+        mock.patch.object(
+            mncs_test, "sha256_bytes", wraps=mncs_test.sha256_bytes
+        ) as host_digest,
+    ):
+        for index, small_payload in enumerate((b"first", b"second", b"third")):
+            store.digest_payload(small_payload)
+        digest = store.digest_payload(payload)
+
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert native_app.call_count == 3
+    assert host_digest.call_count == 1
+    assert store._identity_hasher is None
 
 
 def test_artifact_store_requires_a_complete_native_context(tmp_path: Path) -> None:
