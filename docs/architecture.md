@@ -108,28 +108,24 @@ supplies bounded fields and preserves the opaque `selection` object. Failure
 messages cross the 1,024-byte native field bound as UTF-8-safe chunks; the
 adapter rejoins those chunks when it writes the public JSON document. The
 compact count text reuses `mncs.std.json_emit.v1::put_u64`.
-`mncs.test.public_result_json_v1` sorts object keys and emits the public JSON
-format, indentation, escaping, and final newline in MNCS. The original
-single-call application handles values with a conservative output bound of at
-most 8,192 bytes. Larger documents use up to 32 continuation calls, each
-carrying at most 8,192 JSON bytes plus a
-bounded traversal stack and SHA-256 state. A page can stop before a whole value
-when its conservative size bound would cross the page limit, so some page
-capacity may remain unused. The aggregate document limit is 65,536 bytes. The
-same window application updates `mncs.std.sha256.v1` as it emits each page and
-returns the final digest with the completed document. An independent host
-SHA-256 check validates the result. The native path accepts at most 512 values,
-depth 63,
-64 children per object, 256-byte keys, 1,024-byte scalar text, and 65,536 output
-bytes. Python still projects arbitrary runtime values into that request,
-reassembles output pages, writes files, and keeps the compatibility serializer
-for values outside the native bounds or when a bounded MNCS serialization
-reports `budget_exhausted`. The structured application transport also caps an
-input artifact at 32,768 nodes. The adapter encodes bounded byte fields as
-UTF-8 JSON strings, so text no longer expands into one structured input node
-per byte; the 33 KB differential case now completes through native windows.
-Genuinely oversized structured requests retain compatibility output, while
-native application and runtime errors remain errors.
+`mncs.test.public_result_json_token_v1` consumes one compact JSON document in
+UTF-8-safe chunks and uses `mncs.std.json_cursor.v1` to validate and traverse
+its native token stream. The adapter no longer recursively projects Python
+values into a typed-value node/edge tree. The host still encodes the already
+available runtime value as key-sorted compact JSON for structured transport,
+and verifies the packed source digest before dispatch. MNCS scans the JSON,
+enforces token, depth, member, text, and byte bounds, and emits the indented
+public format with a trailing newline. It returns output in
+8,192-byte windows while carrying cursor and SHA-256 state. The aggregate
+compact-input and formatted-output limits are each 65,536 bytes; the native
+path accepts at most 512 values, depth 63, 64 children per object, 256-byte
+keys, and 1,024-byte scalar text. Each continuation repeats the bounded source
+document and MNCS recomputes its SHA-256 before accepting the carried cursor
+and output-hash state. Python rejoins returned UTF-8-safe pages, writes files,
+and independently checks the final output digest. Values outside native
+bounds and native budget exhaustion retain the host compatibility serializer;
+native transport and runtime errors remain errors. The 33 KB differential
+case stays on the native path without per-byte structured-input node growth.
 
 The family-check response records `execution.check_result_sha256` from the
 serialized `mncs.check-result/1` document produced by this same public-result

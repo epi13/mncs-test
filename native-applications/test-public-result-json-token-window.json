@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.public-result-json-token-window",
+  "source": "../native/mncs/test/public_result_json_token_v1.mncs",
+  "module": "mncs.test.public_result_json_token_v1",
+  "entry_function": "public_result_json_token_window_app_v1",
+  "profile": "0.18",
+  "interface_identity": "72c1d59801c5c6f2a9b1aa19de0bd6ef715116b180f07cbc4da5249a80d3342c",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

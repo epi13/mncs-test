@@ -55,18 +55,73 @@ def _sample_result() -> dict[str, object]:
     }
 
 
-def test_native_request_keeps_byte_fields_as_packed_utf8_strings() -> None:
+def test_native_request_transports_one_compact_json_document() -> None:
     prepared = mncs_test._native_public_result_request(
         {"κλειδί": 'Lúna 東京\n"'}
     )
     assert prepared is not None
-    request, _output_bound = prepared
+    request, source_length = prepared
 
-    assert request["nodes"][0]["key"] == ""
-    assert request["nodes"][1]["key"] == "κλειδί"
-    assert request["nodes"][1]["text"] == 'Lúna 東京\n"'
-    assert isinstance(request["nodes"][1]["key"], str)
-    assert isinstance(request["nodes"][1]["text"], str)
+    compact = mncs_test.compact_json({"κλειδί": 'Lúna 東京\n"'})
+    assert "".join(chunk["bytes"] for chunk in request["document"]["chunks"]) == compact
+    assert source_length == request["document"]["byte_length"]
+    assert request["input_sha256"] == hashlib.sha256(compact.encode("utf-8")).hexdigest()
+    assert "nodes" not in request
+    assert "edges" not in request
+
+
+def test_native_continuation_rejects_a_changed_source_document(tmp_path: Path) -> None:
+    prepared = mncs_test._native_public_result_request(
+        {"payload": ["x" * 500 for _ in range(20)]}
+    )
+    assert prepared is not None
+    start_request, _source_length = prepared
+    first = mncs_test.run_native_app(
+        "test-public-result-json-token.json",
+        start_request,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+    assert first["supported"] is True
+    assert first["done"] is False
+
+    document = json.loads(json.dumps(start_request["document"]))
+    first_chunk = document["chunks"][0]["bytes"]
+    replacement = "X" if first_chunk[0] != "X" else "Y"
+    document["chunks"][0]["bytes"] = replacement + first_chunk[1:]
+    window_request = {
+        "schema_version": mncs_test.PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
+        "document": document,
+        "input_sha256": start_request["input_sha256"],
+        "scan_state": first["scan_state"],
+        "input_offset": first["input_offset"],
+        "input_chunk_index": first["input_chunk_index"],
+        "input_chunk_offset": first["input_chunk_offset"],
+        "window_start": first["next_offset"],
+        "cursor_state": first["cursor_state"],
+        "pending_open": first["pending_open"],
+        "value_count": first["value_count"],
+        "child_counts": first["child_counts"],
+        "key_counts": first["key_counts"],
+        "hash_state": first["hash_state"],
+        "hash_buffer": first["hash_buffer"],
+        "hash_buffered": first["hash_buffered"],
+    }
+    continued = mncs_test.run_native_app(
+        "test-public-result-json-token-window.json",
+        window_request,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+    assert continued["supported"] is False
 
 
 def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path) -> None:
@@ -87,7 +142,7 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert native_app.call_count == 1
-    assert native_app.call_args.args[0] == "test-public-result-json.json"
+    assert native_app.call_args.args[0] == "test-public-result-json-token.json"
 
 
 def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> None:
@@ -109,7 +164,9 @@ def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> N
     assert len(expected) > 1024
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_count == 1
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-token.json",
+    ]
 
 
 def _large_result_splitting_utf8_at_native_chunk() -> list[str]:
@@ -145,9 +202,9 @@ def test_native_json_supports_results_larger_than_legacy_window(tmp_path: Path) 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    window_calls = [name for name in calls if name == "test-public-result-json-window.json"]
-    assert 1 < len(window_calls) <= 32
-    assert calls == window_calls
+    assert calls[0] == "test-public-result-json-token.json"
+    assert all(name == "test-public-result-json-token-window.json" for name in calls[1:])
+    assert 1 < len(calls) <= 6
 
 
 def test_results_through_expanded_native_window_use_native_json(
@@ -173,8 +230,9 @@ def test_results_through_expanded_native_window_use_native_json(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert 1 < len(calls) <= 32
-    assert set(calls) == {"test-public-result-json-window.json"}
+    assert 1 < len(calls) <= 8
+    assert calls[0] == "test-public-result-json-token.json"
+    assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
 
 
 def test_packed_text_keeps_large_public_result_on_native_windows(
@@ -198,8 +256,9 @@ def test_packed_text_keeps_large_public_result_on_native_windows(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert 1 < len(calls) <= 32
-    assert set(calls) == {"test-public-result-json-window.json"}
+    assert 1 < len(calls) <= 6
+    assert calls[0] == "test-public-result-json-token.json"
+    assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(
@@ -209,7 +268,9 @@ def test_results_above_expanded_native_window_keep_compatibility_json(
     expected = mncs_test.json_bytes(value)
     assert len(expected) > mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
 
-    with mock.patch.object(mncs_test, "run_native_app") as native_app:
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
         actual, digest = mncs_test._public_result_json_payload(
             value,
             mncs=str(MNCS),
@@ -222,13 +283,15 @@ def test_results_above_expanded_native_window_keep_compatibility_json(
     native_app.assert_not_called()
 
 
-def test_out_of_bound_result_keeps_compatibility_json_without_native_call(
+def test_out_of_bound_string_falls_back_after_native_cursor_rejects_it(
     tmp_path: Path,
 ) -> None:
     value = {"text": "outside-native-string-bound-" * 40}
     path = tmp_path / "compatibility.json"
     expected = mncs_test.json_bytes(value)
-    with mock.patch.object(mncs_test, "run_native_app") as native_app:
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
         digest = mncs_test.write_output(
             path,
             value,
@@ -239,7 +302,8 @@ def test_out_of_bound_result_keeps_compatibility_json_without_native_call(
 
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    native_app.assert_not_called()
+    assert native_app.call_count == 1
+    assert native_app.call_args.args[0] == "test-public-result-json-token.json"
 
 
 def test_native_budget_exhaustion_is_classified_separately(tmp_path: Path) -> None:
@@ -250,7 +314,7 @@ def test_native_budget_exhaustion_is_classified_separately(tmp_path: Path) -> No
 
     with pytest.raises(NativeBudgetExhaustedError, match="exhausted its execution budget"):
         mncs_test.run_native_app(
-            "test-public-result-json.json",
+            "test-public-result-json-token.json",
             request,
             request_schema=mncs_test.PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
             result_schema=mncs_test.PUBLIC_RESULT_JSON_RESULT_SCHEMA,
@@ -269,8 +333,8 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
-        "test-public-result-json.json",
-        "test-public-result-json-window.json",
+        "test-public-result-json-token.json",
+        "test-public-result-json-token.json",
     ]
 
     with mock.patch.object(
@@ -316,9 +380,10 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
 
     def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
         call: dict[str, object] = {"application": name, "status": "running"}
-        nodes = request.get("nodes")
-        if isinstance(nodes, list):
-            call["node_count"] = len(nodes)
+        document = request.get("document")
+        if isinstance(document, dict):
+            call["document_bytes"] = document.get("byte_length", 0)
+        call["has_typed_tree"] = "nodes" in request or "edges" in request
         app_calls.append(call)
         try:
             result = original_run_native_app(name, request, **kwargs)
@@ -382,6 +447,7 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
     assert result_path.read_bytes() == _python_result_bytes(document)
     assert public_calls
     assert all(call["status"] == "success" for call in public_calls)
-    assert any(call.get("node_count", 0) >= 128 for call in public_calls)
+    assert all(call.get("document_bytes", 0) > 0 for call in public_calls)
+    assert all(not call.get("has_typed_tree") for call in public_calls)
     assert compatibility_documents == []
 

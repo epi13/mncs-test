@@ -450,7 +450,10 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(
             serializer_applications
             and set(serializer_applications)
-            <= {"test-public-result-json.json", "test-public-result-json-window.json"}
+            <= {
+                "test-public-result-json-token.json",
+                "test-public-result-json-token-window.json",
+            }
         )
         independent_check_result = mncs_test.json_bytes(response["check_result"])
         self.assertEqual(check_result_payload, independent_check_result)
@@ -551,8 +554,8 @@ class RunnerTests(unittest.TestCase):
             native_applications: list[str] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
-                "test-public-result-json.json",
-                "test-public-result-json-window.json",
+                "test-public-result-json-token.json",
+                "test-public-result-json-token-window.json",
             }
 
             def observe_native_app(name, native_request, **kwargs):

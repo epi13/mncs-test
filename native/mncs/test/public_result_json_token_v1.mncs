@@ -1,0 +1,782 @@
+mncs 0.18;
+
+// Deterministic public-result formatting over a compact JSON transport value.
+// The host carries one JSON document. Test validates it with json.v1, consumes
+// native cursor events, and returns bounded pretty-JSON windows without a
+// host-built value tree or token table.
+module mncs.test.public_result_json_token_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json.v1 as json;
+use mncs.std.json_cursor.v1 as cursor;
+use mncs.std.sha256.v1 as sha256;
+
+record JsonTokenInputChunkV1 {
+    bytes: [byte; up_to 1024],
+    length: u64
+}
+
+record JsonTokenDocumentV1 {
+    chunks: [JsonTokenInputChunkV1; up_to 64],
+    byte_length: u64
+}
+
+record JsonTokenStartRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: JsonTokenDocumentV1,
+    input_sha256: [byte; up_to 64]
+}
+
+record JsonTokenWindowRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: JsonTokenDocumentV1,
+    input_sha256: [byte; up_to 64],
+    scan_state: json.ScanState,
+    input_offset: u64,
+    input_chunk_index: u64,
+    input_chunk_offset: u64,
+    window_start: u64,
+    cursor_state: cursor.Cursor,
+    pending_open: bool,
+    value_count: u64,
+    child_counts: [u64; 64],
+    key_counts: [u64; 64],
+    hash_state: sha256.DigestState,
+    hash_buffer: [byte; 64],
+    hash_buffered: u64
+}
+
+record JsonTokenChunkV1 {
+    bytes: [byte; 1024],
+    length: u64
+}
+
+record JsonTokenChunkBuilderV1 {
+    chunks: [JsonTokenChunkV1; 16],
+    count: u64
+}
+
+record JsonTokenWriterV1 {
+    bytes: [[byte; 1024]; 16],
+    length: u64,
+    total_length: u64,
+    window_start: u64,
+    hash_state: sha256.DigestState,
+    hash_buffer: [byte; 64],
+    hash_buffered: u64,
+    ok: bool
+}
+
+record JsonTokenFormattedByteV1 {
+    writer: JsonTokenWriterV1,
+    pending_open: bool
+}
+
+record JsonTokenStateV1 {
+    writer: JsonTokenWriterV1,
+    cursor_state: cursor.Cursor,
+    scan_state: json.ScanState,
+    input_sha256: [byte; up_to 64],
+    input_offset: u64,
+    input_chunk_index: u64,
+    input_chunk_offset: u64,
+    value_count: u64,
+    child_counts: [u64; 64],
+    key_counts: [u64; 64],
+    pending_open: bool,
+    stopped: bool,
+    done: bool,
+    valid: bool
+}
+
+record JsonTokenResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    document_length: u64,
+    window_start: u64,
+    byte_length: u64,
+    next_offset: u64,
+    done: bool,
+    sha256: [byte; up_to 64],
+    input_sha256: [byte; up_to 64],
+    input_offset: u64,
+    input_chunk_index: u64,
+    input_chunk_offset: u64,
+    cursor_state: cursor.Cursor,
+    scan_state: json.ScanState,
+    pending_open: bool,
+    value_count: u64,
+    child_counts: [u64; 64],
+    key_counts: [u64; 64],
+    hash_state: sha256.DigestState,
+    hash_buffer: [byte; 64],
+    hash_buffered: u64,
+    chunk_count: u64,
+    chunks: [JsonTokenChunkV1; up_to 16]
+}
+
+fn start_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 45, 115, 116, 97, 114, 116, 47, 50];
+}
+
+fn window_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 45, 119, 105, 110, 100, 111, 119, 47, 50];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 47, 50];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn is_space(value: byte) -> (result: bool) {
+    return value == 9 || value == 10 || value == 13 || value == 32;
+}
+
+record JsonTokenDocumentShapeV1 { total: u64, valid: bool }
+
+fn document_shape(document: JsonTokenDocumentV1) -> (result: JsonTokenDocumentShapeV1) {
+    let seed: JsonTokenDocumentShapeV1 = JsonTokenDocumentShapeV1 { total: 0, valid: true };
+    iterate i over document.chunks carrying shape: JsonTokenDocumentShapeV1 = seed {
+        let chunk: JsonTokenInputChunkV1 = document.chunks[i];
+        let valid_chunk: bool = chunk.length > 0 && chunk.length <= 1024
+            && chunk.length == chunk.bytes.len
+            && shape.total +% chunk.length <= 65536;
+        next shape = JsonTokenDocumentShapeV1 {
+            total: shape.total +% chunk.length,
+            valid: shape.valid && valid_chunk
+        };
+    }
+    return JsonTokenDocumentShapeV1 {
+        total: shape.total,
+        valid: shape.valid && document.chunks.len > 0 && document.chunks.len <= 64
+            && document.byte_length == shape.total && document.byte_length <= 65536
+    };
+}
+
+fn document_offset_at(document: JsonTokenDocumentV1, chunk_index: u64, chunk_offset: u64) -> (result: u64) {
+    iterate i over document.chunks carrying total: u64 = 0 {
+        next total = offset_step(total, document.chunks[i], i, chunk_index);
+    }
+    if chunk_index >= document.chunks.len { return total; }
+    return total +% chunk_offset;
+}
+
+fn offset_step(total: u64, chunk: JsonTokenInputChunkV1, index: u64, target: u64) -> (result: u64) {
+    if index < target { return total +% chunk.length; }
+    return total;
+}
+
+fn scan_document_chunk(
+    scanned: json.ScanState,
+    document: JsonTokenInputChunkV1,
+    start: u64
+) -> (result: json.ScanState) {
+    if start >= document.length { return scanned; }
+    let remaining: u64 = document.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    let part: [byte; up_to 64] = document.bytes[start..start +% size];
+    return json.feed_chunk(scanned, part);
+}
+
+fn scan_one_document_chunk(scanned: json.ScanState, chunk: JsonTokenInputChunkV1) -> (result: json.ScanState) {
+    iterate i up_to 16 carrying current: json.ScanState = scanned {
+        next current = scan_document_chunk(current, chunk, i *% 64);
+    }
+    return current;
+}
+
+fn scan_document(scanned: json.ScanState, document: JsonTokenDocumentV1) -> (result: json.ScanState) {
+    iterate i over document.chunks carrying current: json.ScanState = scanned {
+        next current = scan_one_document_chunk(current, document.chunks[i]);
+    }
+    return json.finish(current);
+}
+
+fn hash_input_chunk(hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1) -> (result: sha256.DigestState) {
+    iterate i up_to 16 carrying current: sha256.DigestState = hashed {
+        next current = hash_input_part(current, chunk, i *% 64);
+    }
+    return current;
+}
+
+fn hash_input_part(hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1, start: u64) -> (result: sha256.DigestState) {
+    if start >= chunk.length { return hashed; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    let part: [byte; up_to 64] = chunk.bytes[start..start +% size];
+    return sha256.update_standard(hashed, part, size);
+}
+
+fn document_digest(document: JsonTokenDocumentV1) -> (result: [byte; up_to 64]) {
+    let initial: sha256.DigestState = sha256.init();
+    iterate i over document.chunks carrying hashed: sha256.DigestState = initial {
+        next hashed = hash_input_chunk(hashed, document.chunks[i]);
+    }
+    return hex_digest(sha256.finalize_standard(hashed));
+}
+
+fn count_value_token(
+    state: JsonTokenStateV1,
+    before: cursor.Cursor,
+    after: cursor.Cursor
+) -> (result: JsonTokenStateV1) {
+    if state.value_count >= 512 || after.token_depth > 63 {
+        return JsonTokenStateV1 { ..state, valid: false };
+    }
+    let depth: u64 = after.token_depth as u64;
+    if depth > before.depth as u64 {
+        return JsonTokenStateV1 { ..state, valid: false };
+    }
+    let child_counts: [u64; 64] = state.child_counts;
+    if depth > 0 {
+        let parent_index: u64 = depth -% 1;
+        let parent_kind: byte = before.stack[parent_index];
+        let child_count: u64 = state.child_counts[parent_index] +% 1;
+        if parent_kind == 1 && child_count > 64 {
+            return JsonTokenStateV1 { ..state, valid: false };
+        }
+        let incremented: [u64; 64] = replace(state.child_counts, parent_index, child_count);
+        if after.token_kind == 7 || after.token_kind == 8 {
+            let reset_child: [u64; 64] = replace(incremented, depth, 0);
+            let reset_keys: [u64; 64] = replace(state.key_counts, depth, 0);
+            return JsonTokenStateV1 {
+                ..state,
+                value_count: state.value_count +% 1,
+                child_counts: reset_child,
+                key_counts: reset_keys
+            };
+        }
+        return JsonTokenStateV1 {
+            ..state,
+            value_count: state.value_count +% 1,
+            child_counts: incremented
+        };
+    }
+    if after.token_kind == 7 || after.token_kind == 8 {
+        let reset_child: [u64; 64] = replace(child_counts, depth, 0);
+        let reset_keys: [u64; 64] = replace(state.key_counts, depth, 0);
+        return JsonTokenStateV1 {
+            ..state,
+            value_count: state.value_count +% 1,
+            child_counts: reset_child,
+            key_counts: reset_keys
+        };
+    }
+    return JsonTokenStateV1 { ..state, value_count: state.value_count +% 1 };
+}
+
+fn bound_token(
+    state: JsonTokenStateV1,
+    before: cursor.Cursor,
+    after: cursor.Cursor
+) -> (result: JsonTokenStateV1) {
+    if !after.token_event { return state; }
+    let kind: u64 = after.token_kind as u64;
+    if kind == 1 {
+        if after.string_length > 256 || after.token_depth == 0 || after.token_depth > 64 {
+            return JsonTokenStateV1 { ..state, valid: false };
+        }
+        let index: u64 = (after.token_depth as u64) -% 1;
+        let count: u64 = state.key_counts[index] +% 1;
+        if count > 64 { return JsonTokenStateV1 { ..state, valid: false }; }
+        return JsonTokenStateV1 {
+            ..state,
+            key_counts: replace(state.key_counts, index, count)
+        };
+    }
+    if kind == 2 && after.string_length > 1024 {
+        return JsonTokenStateV1 { ..state, valid: false };
+    }
+    if kind >= 2 && kind <= 8 {
+        return count_value_token(state, before, after);
+    }
+    return state;
+}
+
+fn token_writer_empty(window_start: u64) -> (result: JsonTokenWriterV1) {
+    return JsonTokenWriterV1 {
+        bytes: [[0; 1024]; 16],
+        length: 0,
+        total_length: window_start,
+        window_start: window_start,
+        hash_state: sha256.init(),
+        hash_buffer: [0; 64],
+        hash_buffered: 0,
+        ok: true
+    };
+}
+
+fn token_writer_from_window(request: JsonTokenWindowRequestV1) -> (result: JsonTokenWriterV1) {
+    return JsonTokenWriterV1 {
+        bytes: [[0; 1024]; 16],
+        length: 0,
+        total_length: request.window_start,
+        window_start: request.window_start,
+        hash_state: request.hash_state,
+        hash_buffer: request.hash_buffer,
+        hash_buffered: request.hash_buffered,
+        ok: true
+    };
+}
+
+fn token_writer_store(writer: JsonTokenWriterV1, value: byte) -> (result: JsonTokenWriterV1) {
+    if !writer.ok || writer.total_length >= 65536 {
+        return JsonTokenWriterV1 { ..writer, ok: false };
+    }
+    let absolute: u64 = writer.total_length;
+    let next_total: u64 = absolute +% 1;
+    if absolute < writer.window_start || absolute >= writer.window_start +% 8192 {
+        return JsonTokenWriterV1 {
+            ..writer,
+            total_length: next_total
+        };
+    }
+    if writer.length >= 8192 {
+        return JsonTokenWriterV1 { ..writer, ok: false };
+    }
+    let local: u64 = absolute -% writer.window_start;
+    let block: u64 = local / 1024;
+    let offset: u64 = local % 1024;
+    let original: [byte; 1024] = writer.bytes[block];
+    let updated: [byte; 1024] = replace(original, offset, value);
+    let chunks: [[byte; 1024]; 16] = replace(writer.bytes, block, updated);
+    return JsonTokenWriterV1 {
+        ..writer,
+        bytes: chunks,
+        length: writer.length +% 1,
+        total_length: next_total
+    };
+}
+
+fn token_writer_byte(writer: JsonTokenWriterV1, value: byte) -> (result: JsonTokenWriterV1) {
+    if !writer.ok || writer.total_length >= 65536 || writer.hash_buffered >= 64 {
+        return JsonTokenWriterV1 { ..writer, ok: false };
+    }
+    let buffered: u64 = writer.hash_buffered;
+    let updated: [byte; 64] = replace(writer.hash_buffer, buffered, value);
+    if buffered == 63 {
+        let hashed: sha256.DigestState = sha256.update_standard(writer.hash_state, updated, 64);
+        let reset: JsonTokenWriterV1 = JsonTokenWriterV1 {
+            ..writer,
+            hash_state: hashed,
+            hash_buffer: [0; 64],
+            hash_buffered: 0
+        };
+        return token_writer_store(reset, value);
+    }
+    let continued: JsonTokenWriterV1 = JsonTokenWriterV1 {
+        ..writer,
+        hash_buffer: updated,
+        hash_buffered: buffered +% 1
+    };
+    return token_writer_store(continued, value);
+}
+
+fn token_writer_indent(writer: JsonTokenWriterV1, depth: u64) -> (result: JsonTokenWriterV1) {
+    iterate i up_to 126 carrying output: JsonTokenWriterV1 = writer {
+        next output = indent_step(output, i, depth);
+    }
+    return output;
+}
+
+fn indent_step(output: JsonTokenWriterV1, index: u64, depth: u64) -> (result: JsonTokenWriterV1) {
+    if index < depth *% 2 { return token_writer_byte(output, 32); }
+    return output;
+}
+
+fn format_current_byte(
+    writer: JsonTokenWriterV1,
+    empty_close: bool,
+    before: cursor.Cursor,
+    value: byte
+) -> (result: JsonTokenFormattedByteV1) {
+    if !before.in_string && is_space(value) {
+        return JsonTokenFormattedByteV1 { writer: writer, pending_open: false };
+    }
+    if before.in_string {
+        let output: JsonTokenWriterV1 = token_writer_byte(writer, value);
+        return JsonTokenFormattedByteV1 { writer: output, pending_open: false };
+    }
+    if value == 123 || value == 91 {
+        let output: JsonTokenWriterV1 = token_writer_byte(writer, value);
+        return JsonTokenFormattedByteV1 { writer: output, pending_open: true };
+    }
+    if value == 125 || value == 93 {
+        if empty_close {
+            let output: JsonTokenWriterV1 = token_writer_byte(writer, value);
+            return JsonTokenFormattedByteV1 { writer: output, pending_open: false };
+        }
+        if before.depth == 0 {
+            let invalid: JsonTokenWriterV1 = JsonTokenWriterV1 { ..writer, ok: false };
+            return JsonTokenFormattedByteV1 { writer: invalid, pending_open: false };
+        }
+        let newline: JsonTokenWriterV1 = token_writer_byte(writer, 10);
+        let indented: JsonTokenWriterV1 = token_writer_indent(newline, (before.depth as u64) -% 1);
+        let output: JsonTokenWriterV1 = token_writer_byte(indented, value);
+        return JsonTokenFormattedByteV1 { writer: output, pending_open: false };
+    }
+    if value == 44 {
+        let comma: JsonTokenWriterV1 = token_writer_byte(writer, value);
+        let newline: JsonTokenWriterV1 = token_writer_byte(comma, 10);
+        let output: JsonTokenWriterV1 = token_writer_indent(newline, before.depth as u64);
+        return JsonTokenFormattedByteV1 { writer: output, pending_open: false };
+    }
+    if value == 58 {
+        let colon: JsonTokenWriterV1 = token_writer_byte(writer, value);
+        let output: JsonTokenWriterV1 = token_writer_byte(colon, 32);
+        return JsonTokenFormattedByteV1 { writer: output, pending_open: false };
+    }
+    let output: JsonTokenWriterV1 = token_writer_byte(writer, value);
+    return JsonTokenFormattedByteV1 { writer: output, pending_open: false };
+}
+
+fn format_input_byte(
+    writer: JsonTokenWriterV1,
+    pending_open: bool,
+    before: cursor.Cursor,
+    value: byte
+) -> (result: JsonTokenFormattedByteV1) {
+    if !before.in_string && is_space(value) {
+        return JsonTokenFormattedByteV1 { writer: writer, pending_open: pending_open };
+    }
+    if !pending_open {
+        return format_current_byte(writer, false, before, value);
+    }
+    if value == 125 || value == 93 {
+        return format_current_byte(writer, true, before, value);
+    }
+    let newline: JsonTokenWriterV1 = token_writer_byte(writer, 10);
+    let indented: JsonTokenWriterV1 = token_writer_indent(newline, before.depth as u64);
+    return format_current_byte(indented, false, before, value);
+}
+
+fn token_hash_hex(writer: JsonTokenWriterV1) -> (result: [byte; up_to 64]) {
+    let completed: sha256.DigestState = sha256.update_standard(
+        writer.hash_state,
+        writer.hash_buffer,
+        writer.hash_buffered
+    );
+    return hex_digest(sha256.finalize_standard(completed));
+}
+
+fn hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (value +% 48) as byte; }
+    return (value -% 10 +% 97) as byte;
+}
+
+fn hex_digest(raw: [byte; 32]) -> (result: [byte; up_to 64]) {
+    let seed: [byte; 64] = [0; 64];
+    iterate i over raw carrying encoded: [byte; 64] = seed {
+        let value: u64 = raw[i] as u64;
+        let high: byte = hex_digit(value / 16);
+        let low: byte = hex_digit(value % 16);
+        let first: [byte; 64] = replace(encoded, i *% 2, high);
+        next encoded = replace(first, i *% 2 +% 1, low);
+    }
+    return encoded;
+}
+
+fn output_chunks(writer: JsonTokenWriterV1) -> (result: JsonTokenChunkBuilderV1) {
+    let empty: JsonTokenChunkV1 = JsonTokenChunkV1 { bytes: [0; 1024], length: 0 };
+    let seed: JsonTokenChunkBuilderV1 = JsonTokenChunkBuilderV1 {
+        chunks: [empty; 16],
+        count: 0
+    };
+    iterate i up_to 16 carrying builder: JsonTokenChunkBuilderV1 = seed {
+        next builder = output_chunk_step(builder, writer, i);
+    }
+    return builder;
+}
+
+fn output_chunk_step(
+    builder: JsonTokenChunkBuilderV1,
+    writer: JsonTokenWriterV1,
+    index: u64
+) -> (result: JsonTokenChunkBuilderV1) {
+    let start: u64 = index *% 1024;
+    if start >= writer.length { return builder; }
+    let remaining: u64 = writer.length -% start;
+    let size: u64 = select(remaining < 1024, remaining, 1024);
+    let chunk: JsonTokenChunkV1 = JsonTokenChunkV1 { bytes: writer.bytes[index], length: size };
+    return JsonTokenChunkBuilderV1 {
+        chunks: replace(builder.chunks, builder.count, chunk),
+        count: builder.count +% 1
+    };
+}
+
+fn result_digest(state: JsonTokenStateV1) -> (result: [byte; up_to 64]) {
+    if state.valid && state.done && state.writer.ok {
+        return token_hash_hex(state.writer);
+    }
+    return [0; 64];
+}
+
+fn public_result(
+    supported: bool,
+    state: JsonTokenStateV1
+) -> (result: JsonTokenResultV1) {
+    let chunks: JsonTokenChunkBuilderV1 = output_chunks(state.writer);
+    let digest: [byte; up_to 64] = result_digest(state);
+    return JsonTokenResultV1 {
+        schema_version: result_schema(),
+        supported: supported && state.valid && state.writer.ok,
+        document_length: select(state.done && state.valid && state.writer.ok, state.writer.total_length, 0),
+        window_start: state.writer.window_start,
+        byte_length: state.writer.length,
+        next_offset: state.writer.total_length,
+        done: state.done && state.valid && state.writer.ok,
+        sha256: digest,
+        input_sha256: state.input_sha256,
+        input_offset: state.input_offset,
+        input_chunk_index: state.input_chunk_index,
+        input_chunk_offset: state.input_chunk_offset,
+        cursor_state: state.cursor_state,
+        scan_state: state.scan_state,
+        pending_open: state.pending_open,
+        value_count: state.value_count,
+        child_counts: state.child_counts,
+        key_counts: state.key_counts,
+        hash_state: state.writer.hash_state,
+        hash_buffer: state.writer.hash_buffer,
+        hash_buffered: state.writer.hash_buffered,
+        chunk_count: chunks.count,
+        chunks: chunks.chunks[0..chunks.count]
+    };
+}
+
+fn empty_state(
+    window_start: u64,
+    scan_state: json.ScanState,
+    input_sha256: [byte; up_to 64]
+) -> (result: JsonTokenStateV1) {
+    return JsonTokenStateV1 {
+        writer: token_writer_empty(window_start),
+        cursor_state: cursor.init(),
+        scan_state: scan_state,
+        input_sha256: input_sha256,
+        input_offset: 0,
+        input_chunk_index: 0,
+        input_chunk_offset: 0,
+        value_count: 0,
+        child_counts: [0; 64],
+        key_counts: [0; 64],
+        pending_open: false,
+        stopped: false,
+        done: false,
+        valid: true
+    };
+}
+
+fn state_from_window(request: JsonTokenWindowRequestV1) -> (result: JsonTokenStateV1) {
+    return JsonTokenStateV1 {
+        writer: token_writer_from_window(request),
+        cursor_state: request.cursor_state,
+        scan_state: request.scan_state,
+        input_sha256: request.input_sha256,
+        input_offset: request.input_offset,
+        input_chunk_index: request.input_chunk_index,
+        input_chunk_offset: request.input_chunk_offset,
+        value_count: request.value_count,
+        child_counts: request.child_counts,
+        key_counts: request.key_counts,
+        pending_open: request.pending_open,
+        stopped: false,
+        done: false,
+        valid: true
+    };
+}
+
+fn format_window(
+    document: JsonTokenDocumentV1,
+    initial: JsonTokenStateV1
+) -> (result: JsonTokenStateV1) {
+    let remaining: [JsonTokenInputChunkV1; up_to 64] = document.chunks[initial.input_chunk_index..document.chunks.len];
+    iterate i over remaining carrying formatted: JsonTokenStateV1 = initial {
+        next formatted = format_input_chunk(
+            formatted,
+            document,
+            initial.input_chunk_index +% i
+        );
+    }
+    return formatted;
+}
+
+fn format_input_chunk(
+    state: JsonTokenStateV1,
+    document: JsonTokenDocumentV1,
+    chunk_index: u64
+) -> (result: JsonTokenStateV1) {
+    if state.stopped || state.done || !state.valid { return state; }
+    if state.writer.length > 8062 { return JsonTokenStateV1 { ..state, stopped: true }; }
+    let chunk: JsonTokenInputChunkV1 = document.chunks[chunk_index];
+    let start: u64 = select(state.input_chunk_index == chunk_index, state.input_chunk_offset, 0);
+    let remaining: [byte; up_to 1024] = chunk.bytes[start..chunk.length];
+    iterate i over remaining carrying current: JsonTokenStateV1 = state {
+        next current = format_input_step(current, document, chunk_index);
+    }
+    return advance_input_chunk(current, chunk, chunk_index);
+}
+
+fn advance_input_chunk(
+    state: JsonTokenStateV1,
+    chunk: JsonTokenInputChunkV1,
+    chunk_index: u64
+) -> (result: JsonTokenStateV1) {
+    if state.stopped || state.done || !state.valid { return state; }
+    if state.input_chunk_index == chunk_index && state.input_chunk_offset >= chunk.length {
+        return JsonTokenStateV1 {
+            ..state,
+            input_chunk_index: chunk_index +% 1,
+            input_chunk_offset: 0
+        };
+    }
+    return state;
+}
+
+fn format_input_step(
+    state: JsonTokenStateV1,
+    document: JsonTokenDocumentV1,
+    chunk_index: u64
+) -> (result: JsonTokenStateV1) {
+    if state.stopped || state.done || !state.valid { return state; }
+    if state.writer.length > 8062 { return JsonTokenStateV1 { ..state, stopped: true }; }
+    let chunk: JsonTokenInputChunkV1 = document.chunks[chunk_index];
+    let local_position: u64 = state.input_chunk_offset;
+    let value: byte = chunk.bytes[local_position];
+    let before: cursor.Cursor = state.cursor_state;
+    let advanced: cursor.Cursor = cursor.feed_byte(before, value);
+    let counted: JsonTokenStateV1 = bound_token(
+        JsonTokenStateV1 { ..state, cursor_state: advanced }, before, advanced
+    );
+    let formatted_byte: JsonTokenFormattedByteV1 = format_input_byte(
+        counted.writer, counted.pending_open, before, value
+    );
+    let position_after: u64 = state.input_offset +% 1;
+    let local_after: u64 = local_position +% 1;
+    let final_byte: bool = chunk_index +% 1 == document.chunks.len
+        && local_after == chunk.length;
+    if !final_byte {
+        return JsonTokenStateV1 {
+            ..counted,
+            writer: formatted_byte.writer,
+            input_offset: position_after,
+            input_chunk_offset: local_after,
+            pending_open: formatted_byte.pending_open,
+            valid: counted.valid && advanced.valid
+        };
+    }
+    let finished_cursor: cursor.Cursor = cursor.finish(advanced);
+    let finished_counts: JsonTokenStateV1 = bound_token(
+        JsonTokenStateV1 { ..counted, cursor_state: finished_cursor },
+        advanced,
+        finished_cursor
+    );
+    let with_newline: JsonTokenWriterV1 = token_writer_byte(formatted_byte.writer, 10);
+    let cursor_valid: bool = cursor.is_valid(finished_cursor);
+    return JsonTokenStateV1 {
+        ..finished_counts,
+        writer: with_newline,
+        input_offset: position_after,
+        input_chunk_index: chunk_index +% 1,
+        input_chunk_offset: 0,
+        cursor_state: finished_cursor,
+        pending_open: formatted_byte.pending_open,
+        done: cursor_valid && finished_counts.valid,
+        valid: cursor_valid && finished_counts.valid
+    };
+}
+
+fn valid_window_request(request: JsonTokenWindowRequestV1) -> (result: bool) {
+    let shape: JsonTokenDocumentShapeV1 = document_shape(request.document);
+    let hash_length_ok: bool = request.hash_state.total +% request.hash_buffered == request.window_start
+        && request.hash_buffered == request.window_start % 64
+        && request.hash_state.buffered == 0;
+    return same_bytes(request.schema_version, window_request_schema())
+        && shape.valid
+        && request.input_offset < request.document.byte_length
+        && valid_document_position(request.document, request.input_chunk_index, request.input_chunk_offset, request.input_offset)
+        && request.input_sha256.len == 64
+        && same_bytes(request.input_sha256, document_digest(request.document))
+        && request.window_start < 65536
+        && json.is_valid(request.scan_state)
+        && request.cursor_state.valid
+        && request.cursor_state.depth <= 63
+        && request.cursor_state.position == request.input_offset
+        && request.value_count <= 512
+        && request.hash_buffered < 64
+        && hash_length_ok;
+}
+
+fn valid_document_position(
+    document: JsonTokenDocumentV1,
+    chunk_index: u64,
+    chunk_offset: u64,
+    input_offset: u64
+) -> (result: bool) {
+    if chunk_index >= document.chunks.len { return false; }
+    let chunk: JsonTokenInputChunkV1 = document.chunks[chunk_index];
+    if chunk_offset >= chunk.length { return false; }
+    return document_offset_at(document, chunk_index, chunk_offset) == input_offset;
+}
+
+fn public_result_json_token_start_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: JsonTokenStartRequestV1 = structured_read(context.argv[0], start_request_schema());
+    let shape: JsonTokenDocumentShapeV1 = document_shape(request.document);
+    if !same_bytes(request.schema_version, start_request_schema()) || !shape.valid {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    let scanned: json.ScanState = scan_document(json.init(), request.document);
+    let syntax_valid: bool = json.is_valid(scanned);
+    let initial: JsonTokenStateV1 = JsonTokenStateV1 {
+        ..empty_state(0, scanned, request.input_sha256),
+        valid: syntax_valid
+    };
+    let output: JsonTokenStateV1 = format_window(request.document, initial);
+    let supported: bool = output.valid && output.writer.ok;
+    let result: JsonTokenResultV1 = public_result(supported, output);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 { return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3); }
+    return success([]);
+}
+
+fn public_result_json_token_window_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 32, 50, 32, 112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 119, 105, 110, 100, 111, 119, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: JsonTokenWindowRequestV1 = structured_read(context.argv[0], window_request_schema());
+    if !same_bytes(request.schema_version, window_request_schema()) {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 119, 105, 110, 100, 111, 119, 32, 114, 101, 113, 117, 101, 115, 116], 4);
+    }
+    if !valid_window_request(request) {
+        let invalid: JsonTokenStateV1 = JsonTokenStateV1 { ..state_from_window(request), valid: false };
+        let result: JsonTokenResultV1 = public_result(false, invalid);
+        let published: u64 = structured_write(context.argv[1], result_schema(), result);
+        if published == 0 { return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3); }
+        return success([]);
+    }
+    let initial: JsonTokenStateV1 = state_from_window(request);
+    let output: JsonTokenStateV1 = format_window(request.document, initial);
+    let supported: bool = output.valid && output.writer.ok;
+    let result: JsonTokenResultV1 = public_result(supported, output);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 { return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3); }
+    return success([]);
+}
