@@ -57,6 +57,17 @@ not silently included in the root module's inventory. A package tool can
 enumerate its explicit module targets without asking Python to recursively
 scan source text.
 
+For bounded explicit-manifest test declarations, the host decodes TOML and
+projects typed fields into `mncs.test.manifest_test_validation_v1`. MNCS owns
+test-id uniqueness, entry/kind policy, tags and argument shape, numeric
+constraints, expected statuses, and diagnostic-prefix checks, preserving the
+validator's first-error order. The host still owns TOML parsing, source and
+library path resolution, and the compatibility validator for declarations
+outside the native request bounds (16 tests, 32 tags per test, 256 diagnostic
+codes per test, 512 UTF-8 bytes per projected string, and a 65,536-byte
+request). The `validate-manifest`, `discover`, and `run` commands use the
+native validator when the selected Stage-0 executable is available.
+
 ## Execution sequence
 
 For a first-class source, `mncs test` obtains the generic

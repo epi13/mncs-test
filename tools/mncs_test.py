@@ -60,12 +60,19 @@ PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 4096
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
+MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/1"
+MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/1"
+MANIFEST_TEST_VALIDATION_MAX_TESTS = 16
+MANIFEST_TEST_VALIDATION_MAX_TEXT_BYTES = 512
+MANIFEST_TEST_VALIDATION_MAX_TAGS = 32
+MANIFEST_TEST_VALIDATION_MAX_DIAGNOSTIC_CODES = 256
+MANIFEST_TEST_VALIDATION_MAX_REQUEST_BYTES = 65_536
 DISCOVERY_SCHEMA = "mncs.test-discovery/1"
 INVENTORY_SCHEMA = "mncs.test-inventory/1"
 EXPERIMENT_PROJECTION_SCHEMA = "mncs.test-experiment/1"
 VERIFICATION_PLAN_SCHEMA = "mncs.verification-plan/1"
 OBLIGATION_PLAN_SCHEMA = "mncs.verification-obligation-plan/1"
-RUNNER_VERSION = "0.2.11"
+RUNNER_VERSION = "0.2.12"
 SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 FAMILY_CHECK_MAX_SELECTOR_LENGTH = 4096
 FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH = 512
@@ -2156,7 +2163,243 @@ def resolve_run_mncs(binary: str | None, execution: str, cwd: Path) -> str:
     return resolve_mncs(binary, cwd)
 
 
-def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
+def _manifest_text_value(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, str):
+        return {"is_string": False, "blank": False, "bytes": ""}
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > MANIFEST_TEST_VALIDATION_MAX_TEXT_BYTES:
+        return None
+    return {"is_string": True, "blank": not value.strip(), "bytes": value}
+
+
+def _manifest_integer_value(value: Any, present: bool) -> dict[str, bool]:
+    return {
+        "present": present,
+        "is_integer": isinstance(value, int),
+        "is_boolean": isinstance(value, bool),
+        "negative": isinstance(value, int) and value < 0,
+    }
+
+
+def _manifest_test_validation_request(tests: list[Any]) -> dict[str, Any] | None:
+    if len(tests) > MANIFEST_TEST_VALIDATION_MAX_TESTS:
+        return None
+    rows: list[dict[str, Any]] = []
+    for item in tests:
+        if not isinstance(item, dict):
+            rows.append({
+                "is_table": False,
+                "id": _manifest_text_value(None), "entry": _manifest_text_value(None),
+                "kind": _manifest_text_value(None), "tags_are_array": False, "tags": [],
+                "arguments_are_array": False,
+                "step_budget": _manifest_integer_value(None, False),
+                "timeout_seconds": _manifest_integer_value(None, False),
+                "seed": _manifest_integer_value(None, False),
+                "case_index": _manifest_integer_value(None, False),
+                "expected_status_present": False,
+                "expected_status": _manifest_text_value(None),
+                "diagnostic_codes_are_array": False, "diagnostic_codes": [],
+            })
+            continue
+
+        kind = item.get("kind", "unit")
+        if not isinstance(kind, str):
+            try:
+                hash(kind)
+            except TypeError:
+                return None  # Keep the legacy unhashable-value exception path.
+        tags_value = item.get("tags", [])
+        tags_are_array = isinstance(tags_value, list)
+        tags = tags_value if tags_are_array else []
+        if len(tags) > MANIFEST_TEST_VALIDATION_MAX_TAGS:
+            return None
+        tag_values = [_manifest_text_value(tag) for tag in tags]
+        if any(value is None for value in tag_values):
+            return None
+
+        expected_status = item.get("expected_status")
+        if expected_status is not None and not isinstance(expected_status, str):
+            try:
+                hash(expected_status)
+            except TypeError:
+                return None
+        expected_value = _manifest_text_value(expected_status)
+        if expected_value is None:
+            return None
+
+        diagnostics_value = item.get("diagnostic_codes", [])
+        diagnostics_are_array = isinstance(diagnostics_value, list)
+        diagnostics = diagnostics_value if diagnostics_are_array else []
+        if len(diagnostics) > MANIFEST_TEST_VALIDATION_MAX_DIAGNOSTIC_CODES:
+            return None
+        diagnostic_values = [_manifest_text_value(code) for code in diagnostics]
+        if any(value is None for value in diagnostic_values):
+            return None
+
+        id_value = _manifest_text_value(item.get("id"))
+        entry_value = _manifest_text_value(item.get("entry"))
+        kind_value = _manifest_text_value(kind)
+        if id_value is None or entry_value is None or kind_value is None:
+            return None
+        rows.append({
+            "is_table": True,
+            "id": id_value, "entry": entry_value, "kind": kind_value,
+            "tags_are_array": tags_are_array, "tags": tag_values,
+            "arguments_are_array": isinstance(item.get("arguments", []), list),
+            "step_budget": _manifest_integer_value(item.get("step_budget"), "step_budget" in item),
+            "timeout_seconds": _manifest_integer_value(item.get("timeout_seconds"), "timeout_seconds" in item),
+            "seed": _manifest_integer_value(item.get("seed"), "seed" in item),
+            "case_index": _manifest_integer_value(item.get("case_index"), "case_index" in item),
+            "expected_status_present": expected_status is not None,
+            "expected_status": expected_value,
+            "diagnostic_codes_are_array": diagnostics_are_array,
+            "diagnostic_codes": diagnostic_values,
+        })
+
+    request = {
+        "schema_version": MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA,
+        "test_count": len(rows),
+        "tests": rows,
+    }
+    try:
+        wire_bytes = len(json.dumps(request, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError, UnicodeEncodeError):
+        return None
+    return request if wire_bytes <= MANIFEST_TEST_VALIDATION_MAX_REQUEST_BYTES else None
+
+
+def _native_manifest_test_validation(
+    tests: list[Any], *, mncs: str | None, cwd: Path | None,
+    environment: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    if mncs is None or cwd is None or environment is None:
+        return None
+    binary = resolve_mncs(mncs, cwd)
+    if not Path(binary).is_file() or not os.access(binary, os.X_OK):
+        return None
+    request = _manifest_test_validation_request(tests)
+    if request is None:
+        return None
+    try:
+        result = run_native_app(
+            "test-manifest-test-validation.json", request,
+            request_schema=MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA,
+            result_schema=MANIFEST_TEST_VALIDATION_RESULT_SCHEMA,
+            mncs=binary, cwd=cwd, environment=environment,
+            step_budget=8_000_000,
+        )
+    except NativeInputBoundError:
+        return None
+    except (NativeBudgetExhaustedError, NativeTransportError) as error:
+        raise AdapterError(f"native Test manifest declaration validation failed: {error}") from error
+    if (
+        result.get("schema_version") != MANIFEST_TEST_VALIDATION_RESULT_SCHEMA
+        or type(result.get("supported")) is not bool or not result["supported"]
+        or type(result.get("valid")) is not bool
+        or any(type(result.get(field)) is not int for field in (
+            "issue_code", "test_index", "field_index", "item_index"))
+    ):
+        raise AdapterError("MNCS manifest declaration validator returned malformed result metadata")
+    if result["valid"] != (result["issue_code"] == 0):
+        raise AdapterError("MNCS manifest declaration validator returned inconsistent validity metadata")
+    if not result["valid"] and not 0 <= result["test_index"] < len(tests):
+        raise AdapterError("MNCS manifest declaration validator returned an out-of-range test index")
+    if result["issue_code"] == 8 and result["field_index"] not in range(4):
+        raise AdapterError("MNCS manifest declaration validator returned an unknown numeric field")
+    return result
+
+
+def _manifest_test_validation_error(result: dict[str, Any], tests: list[Any]) -> str:
+    code, index = result["issue_code"], result["test_index"]
+    if code == 2:
+        return f"tests[{index}] must be a table"
+    if code == 3:
+        return f"tests[{index}].id must be unique and non-empty"
+    if code == 4:
+        return f"tests[{index}].entry must be a non-empty string"
+    if code == 5:
+        return f"tests[{index}].kind is unsupported: {tests[index].get('kind', 'unit')!r}"
+    if code == 6:
+        return f"tests[{index}].tags must be an array of strings"
+    if code == 7:
+        return f"tests[{index}].arguments must be an array"
+    if code == 8:
+        field = ("step_budget", "timeout_seconds", "seed", "case_index")[result["field_index"]]
+        return f"tests[{index}].{field} must be a non-negative integer"
+    if code == 9:
+        return f"tests[{index}].expected_status is invalid: {tests[index].get('expected_status')!r}"
+    if code == 10:
+        return f"tests[{index}].diagnostic_codes must contain diagnostic code prefixes"
+    if code == 11:
+        return f"tests[{index}].diagnostic_codes may contain at most {MAX_DIAGNOSTIC_EXPECTATIONS} prefixes"
+    if code == 12:
+        return f"tests[{index}].diagnostic_codes prefixes must be at most {MAX_DIAGNOSTIC_CODE_BYTES} UTF-8 bytes"
+    raise AdapterError(f"MNCS manifest declaration validator returned unknown issue code {code}")
+
+
+def _validate_manifest_tests_host(tests: list[Any]) -> list[dict[str, Any]]:
+    """Compatibility oracle for test declarations outside the native bound."""
+    seen: set[str] = set()
+    normalized_tests: list[dict[str, Any]] = []
+    for index, item in enumerate(tests):
+        if not isinstance(item, dict):
+            raise ManifestError(f"tests[{index}] must be a table")
+        test_id, entry = item.get("id"), item.get("entry")
+        kind = item.get("kind", "unit")
+        if not isinstance(test_id, str) or not test_id.strip() or test_id in seen:
+            raise ManifestError(f"tests[{index}].id must be unique and non-empty")
+        if not isinstance(entry, str) or not entry.strip():
+            raise ManifestError(f"tests[{index}].entry must be a non-empty string")
+        if kind not in TEST_KINDS:
+            raise ManifestError(f"tests[{index}].kind is unsupported: {kind!r}")
+        tags = item.get("tags", [])
+        if not isinstance(tags, list) or not all(isinstance(tag, str) and tag for tag in tags):
+            raise ManifestError(f"tests[{index}].tags must be an array of strings")
+        if not isinstance(item.get("arguments", []), list):
+            raise ManifestError(f"tests[{index}].arguments must be an array")
+        for numeric in ("step_budget", "timeout_seconds", "seed", "case_index"):
+            if numeric in item and (not isinstance(item[numeric], int) or isinstance(item[numeric], bool) or item[numeric] < 0):
+                raise ManifestError(f"tests[{index}].{numeric} must be a non-negative integer")
+        expected_status = item.get("expected_status")
+        if expected_status is not None and expected_status not in EXECUTION_STATUSES:
+            raise ManifestError(f"tests[{index}].expected_status is invalid: {expected_status!r}")
+        diagnostic_codes = item.get("diagnostic_codes", [])
+        if not isinstance(diagnostic_codes, list) or not all(
+            isinstance(code, str) and DIAGNOSTIC_CODE.match(code) for code in diagnostic_codes
+        ):
+            raise ManifestError(f"tests[{index}].diagnostic_codes must contain diagnostic code prefixes")
+        if len(diagnostic_codes) > MAX_DIAGNOSTIC_EXPECTATIONS:
+            raise ManifestError(
+                f"tests[{index}].diagnostic_codes may contain at most {MAX_DIAGNOSTIC_EXPECTATIONS} prefixes"
+            )
+        for code in diagnostic_codes:
+            try:
+                code_bytes = code.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise ManifestError(
+                    f"tests[{index}].diagnostic_codes must contain valid UTF-8 prefixes"
+                ) from error
+            if len(code_bytes) > MAX_DIAGNOSTIC_CODE_BYTES:
+                raise ManifestError(
+                    f"tests[{index}].diagnostic_codes prefixes must be at most {MAX_DIAGNOSTIC_CODE_BYTES} UTF-8 bytes"
+                )
+        seen.add(test_id)
+        normalized = dict(item)
+        normalized.setdefault("kind", "unit")
+        normalized.setdefault("tags", [])
+        normalized.setdefault("arguments", [])
+        normalized.setdefault("diagnostic_codes", [])
+        normalized_tests.append(normalized)
+    return normalized_tests
+
+
+def validate_manifest(
+    raw: Any, manifest_path: Path, *, mncs: str | None = None,
+    cwd: Path | None = None, environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ManifestError("manifest must be a TOML table")
     if raw.get("schema_version") != MANIFEST_SCHEMA:
@@ -2215,61 +2458,24 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
     tests = raw.get("tests", [])
     if not isinstance(tests, list):
         raise ManifestError("tests must be an array when present")
-    seen: set[str] = set()
-    normalized_tests: list[dict[str, Any]] = []
-    for index, item in enumerate(tests):
-        if not isinstance(item, dict):
-            raise ManifestError(f"tests[{index}] must be a table")
-        test_id = item.get("id")
-        entry = item.get("entry")
-        kind = item.get("kind", "unit")
-        if not isinstance(test_id, str) or not test_id.strip() or test_id in seen:
-            raise ManifestError(f"tests[{index}].id must be unique and non-empty")
-        if not isinstance(entry, str) or not entry.strip():
-            raise ManifestError(f"tests[{index}].entry must be a non-empty string")
-        if kind not in TEST_KINDS:
-            raise ManifestError(f"tests[{index}].kind is unsupported: {kind!r}")
-        tags = item.get("tags", [])
-        if not isinstance(tags, list) or not all(isinstance(tag, str) and tag for tag in tags):
-            raise ManifestError(f"tests[{index}].tags must be an array of strings")
-        arguments = item.get("arguments", [])
-        if not isinstance(arguments, list):
-            raise ManifestError(f"tests[{index}].arguments must be an array")
-        for numeric in ("step_budget", "timeout_seconds", "seed", "case_index"):
-            if numeric in item and (not isinstance(item[numeric], int) or isinstance(item[numeric], bool) or item[numeric] < 0):
-                raise ManifestError(f"tests[{index}].{numeric} must be a non-negative integer")
-        expected_status = item.get("expected_status")
-        if expected_status is not None and expected_status not in EXECUTION_STATUSES:
-            raise ManifestError(f"tests[{index}].expected_status is invalid: {expected_status!r}")
-        diagnostic_codes = item.get("diagnostic_codes", [])
-        if not isinstance(diagnostic_codes, list) or not all(
-            isinstance(code, str) and DIAGNOSTIC_CODE.match(code) for code in diagnostic_codes
-        ):
-            raise ManifestError(f"tests[{index}].diagnostic_codes must contain diagnostic code prefixes")
-        if len(diagnostic_codes) > MAX_DIAGNOSTIC_EXPECTATIONS:
-            raise ManifestError(
-                f"tests[{index}].diagnostic_codes may contain at most "
-                f"{MAX_DIAGNOSTIC_EXPECTATIONS} prefixes"
-            )
-        for code in diagnostic_codes:
-            try:
-                code_bytes = code.encode("utf-8")
-            except UnicodeEncodeError as error:
-                raise ManifestError(
-                    f"tests[{index}].diagnostic_codes must contain valid UTF-8 prefixes"
-                ) from error
-            if len(code_bytes) > MAX_DIAGNOSTIC_CODE_BYTES:
-                raise ManifestError(
-                    f"tests[{index}].diagnostic_codes prefixes must be at most "
-                    f"{MAX_DIAGNOSTIC_CODE_BYTES} UTF-8 bytes"
-                )
-        seen.add(test_id)
-        normalized = dict(item)
-        normalized.setdefault("kind", "unit")
-        normalized.setdefault("tags", [])
-        normalized.setdefault("arguments", [])
-        normalized.setdefault("diagnostic_codes", [])
-        normalized_tests.append(normalized)
+    native_validation = _native_manifest_test_validation(
+        tests, mncs=mncs, cwd=cwd, environment=environment,
+    )
+    if native_validation is None:
+        normalized_tests = _validate_manifest_tests_host(tests)
+    elif not native_validation["valid"]:
+        raise ManifestError(_manifest_test_validation_error(native_validation, tests))
+    else:
+        normalized_tests = []
+        for item in tests:
+            # The native app has already rejected every non-table row.
+            assert isinstance(item, dict)
+            normalized = dict(item)
+            normalized.setdefault("kind", "unit")
+            normalized.setdefault("tags", [])
+            normalized.setdefault("arguments", [])
+            normalized.setdefault("diagnostic_codes", [])
+            normalized_tests.append(normalized)
     source_path = resolve_path(raw["source"], manifest_path.parent, must_exist=True)
     if not source_path.is_file():
         raise ManifestError(f"source is not a file: {raw['source']}")
@@ -2288,7 +2494,10 @@ def validate_manifest(raw: Any, manifest_path: Path) -> dict[str, Any]:
     return result
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
+def load_manifest(
+    path: Path, *, mncs: str | None = None, cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
             raw = tomllib.load(handle)
@@ -2296,7 +2505,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise ManifestError(f"cannot read manifest {path}: {error}") from error
     except tomllib.TOMLDecodeError as error:
         raise ManifestError(f"invalid TOML in {path}: {error}") from error
-    return validate_manifest(raw, path.resolve())
+    return validate_manifest(
+        raw, path.resolve(), mncs=mncs, cwd=cwd, environment=environment,
+    )
 
 
 def read_source(path: Path) -> str:
@@ -6751,9 +6962,17 @@ def run_manifest(args: argparse.Namespace) -> int:
     cwd = Path.cwd().resolve()
     result_path, check_path, artifact_root = result_paths(args, cwd)
     manifest_path = resolve_path(args.manifest, cwd)
+    environment = native_application_environment(cwd)
+    mncs: str | None = args.mncs
     artifacts: ArtifactStore | None = None
     try:
-        manifest = load_manifest(manifest_path)
+        manifest_environment = environment
+        manifest_mncs = args.mncs
+        if manifest_mncs is None and getattr(args, "execution", "stage0-reference") != "canonical-vm":
+            manifest_mncs = "mncs"
+        manifest = load_manifest(
+            manifest_path, mncs=manifest_mncs, cwd=cwd, environment=manifest_environment,
+        )
         source_text = read_source(Path(manifest["source_path"]))
         mncs = resolve_run_mncs(
             args.mncs, getattr(args, "execution", "stage0-reference"), cwd)
@@ -7421,11 +7640,14 @@ def discover_manifests(root: Path, recursive: bool) -> list[Path]:
 def discover_command(args: argparse.Namespace) -> int:
     root = resolve_path(args.root, Path.cwd())
     mncs = resolve_mncs(args.mncs, Path.cwd())
+    manifest_environment = native_application_environment(Path.cwd())
     manifests = []
     errors = []
     for path in discover_manifests(root, args.recursive):
         try:
-            manifest = load_manifest(path)
+            manifest = load_manifest(
+                path, mncs=mncs, cwd=Path.cwd(), environment=manifest_environment,
+            )
             document = {
                 "path": relative_path(path, Path.cwd()),
                 "name": manifest["name"],
@@ -7488,7 +7710,7 @@ def discover_command(args: argparse.Namespace) -> int:
                     for item in inventory.get("tests", [])
                 ]
             manifests.append(document)
-        except ManifestError as error:
+        except (ManifestError, AdapterError) as error:
             errors.append({"path": relative_path(path, Path.cwd()), "error": str(error)})
     output = {"schema_version": DISCOVERY_SCHEMA, "root": str(root), "authority": "mncs-compiler", "manifests": manifests, "errors": errors}
     if args.format == "text":
@@ -7503,8 +7725,19 @@ def discover_command(args: argparse.Namespace) -> int:
 
 def validate_manifest_command(args: argparse.Namespace) -> int:
     try:
-        manifest_path = resolve_path(args.manifest, Path.cwd())
-        manifest = load_manifest(manifest_path)
+        cwd = Path.cwd().resolve()
+        manifest_path = resolve_path(args.manifest, cwd)
+        environment = native_application_environment(cwd)
+        libraries: list[Path] = []
+        for raw_path in args.library:
+            for component in raw_path.split(os.pathsep):
+                if component:
+                    libraries.append(resolve_path(component, cwd, must_exist=True))
+        environment = command_environment(libraries, environment)
+        manifest = load_manifest(
+            manifest_path, mncs=resolve_mncs(args.mncs, cwd), cwd=cwd,
+            environment=environment,
+        )
         output = {
             "schema_version": MANIFEST_SCHEMA,
             "valid": True,
@@ -7515,7 +7748,7 @@ def validate_manifest_command(args: argparse.Namespace) -> int:
         }
         print(json.dumps(output, indent=2, sort_keys=True))
         return EXIT_SUCCESS
-    except ManifestError as error:
+    except (ManifestError, AdapterError) as error:
         print(json.dumps({"schema_version": MANIFEST_SCHEMA, "valid": False, "error": str(error)}, indent=2, sort_keys=True))
         return EXIT_INVALID_INVOCATION
 
@@ -7599,6 +7832,8 @@ def parser() -> argparse.ArgumentParser:
 
     validate = commands.add_parser("validate-manifest", help="validate one manifest")
     validate.add_argument("--manifest", default="mncs-test.toml")
+    validate.add_argument("--mncs", default=os.environ.get("MNCS", "mncs"))
+    validate.add_argument("--library", action="append", default=[])
     validate.set_defaults(handler=validate_manifest_command)
 
     replay = commands.add_parser("replay", help="show a safe reproduction record; never executes it")

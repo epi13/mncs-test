@@ -1,0 +1,246 @@
+mncs 0.18;
+
+// Bounded semantic validation of mncs-test manifest declarations. Python
+// owns TOML decoding and filesystem/path checks; this module owns declaration
+// policy for the typed test rows admitted by its request contract.
+module mncs.test.manifest_test_validation_v1;
+
+use mncs.std.application.v1;
+
+record TextValueV1 {
+    is_string: bool,
+    blank: bool,
+    bytes: [byte; up_to 512]
+}
+
+record NonnegativeIntegerV1 {
+    present: bool,
+    is_integer: bool,
+    is_boolean: bool,
+    negative: bool
+}
+
+record ManifestTestV1 {
+    is_table: bool,
+    id: TextValueV1,
+    entry: TextValueV1,
+    kind: TextValueV1,
+    tags_are_array: bool,
+    tags: [TextValueV1; up_to 32],
+    arguments_are_array: bool,
+    step_budget: NonnegativeIntegerV1,
+    timeout_seconds: NonnegativeIntegerV1,
+    seed: NonnegativeIntegerV1,
+    case_index: NonnegativeIntegerV1,
+    expected_status_present: bool,
+    expected_status: TextValueV1,
+    diagnostic_codes_are_array: bool,
+    diagnostic_codes: [TextValueV1; up_to 256]
+}
+
+record ManifestTestValidationRequestV1 {
+    schema_version: [byte; up_to 64],
+    test_count: u64,
+    tests: [ManifestTestV1; up_to 16]
+}
+
+record ManifestTestIssueV1 {
+    code: u64,
+    test_index: u64,
+    field_index: u64,
+    item_index: u64
+}
+
+record ManifestTestValidationResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    valid: bool,
+    issue_code: u64,
+    test_index: u64,
+    field_index: u64,
+    item_index: u64
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 109, 97, 110, 105, 102, 101, 115, 116, 45, 116, 101, 115, 116, 45, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 47, 49];
+}
+
+fn same_schema(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn same_text(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn is_kind(value: TextValueV1) -> (result: bool) {
+    let unit: [byte; up_to 512] = [117, 110, 105, 116];
+    let specification: [byte; up_to 512] = [115, 112, 101, 99, 105, 102, 105, 99, 97, 116, 105, 111, 110];
+    let integration: [byte; up_to 512] = [105, 110, 116, 101, 103, 114, 97, 116, 105, 111, 110];
+    let property_kind: [byte; up_to 512] = [112, 114, 111, 112, 101, 114, 116, 121];
+    let snapshot: [byte; up_to 512] = [115, 110, 97, 112, 115, 104, 111, 116];
+    let regression: [byte; up_to 512] = [114, 101, 103, 114, 101, 115, 115, 105, 111, 110];
+    let compile_pass: [byte; up_to 512] = [99, 111, 109, 112, 105, 108, 101, 45, 112, 97, 115, 115];
+    let compile_fail: [byte; up_to 512] = [99, 111, 109, 112, 105, 108, 101, 45, 102, 97, 105, 108];
+    let diagnostic: [byte; up_to 512] = [100, 105, 97, 103, 110, 111, 115, 116, 105, 99];
+    let runtime_failure: [byte; up_to 512] = [114, 117, 110, 116, 105, 109, 101, 45, 102, 97, 105, 108, 117, 114, 101];
+    let skip: [byte; up_to 512] = [115, 107, 105, 112];
+    let unsupported: [byte; up_to 512] = [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100];
+    return value.is_string && (
+        same_text(value.bytes, unit) || same_text(value.bytes, specification)
+        || same_text(value.bytes, integration) || same_text(value.bytes, property_kind)
+        || same_text(value.bytes, snapshot) || same_text(value.bytes, regression)
+        || same_text(value.bytes, compile_pass) || same_text(value.bytes, compile_fail)
+        || same_text(value.bytes, diagnostic) || same_text(value.bytes, runtime_failure)
+        || same_text(value.bytes, skip) || same_text(value.bytes, unsupported)
+    );
+}
+
+fn is_execution_status(value: TextValueV1) -> (result: bool) {
+    let returned: [byte; up_to 512] = [114, 101, 116, 117, 114, 110, 101, 100];
+    let runtime_failure: [byte; up_to 512] = [114, 117, 110, 116, 105, 109, 101, 95, 102, 97, 105, 108, 117, 114, 101];
+    let unsupported: [byte; up_to 512] = [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100];
+    let budget_exhausted: [byte; up_to 512] = [98, 117, 100, 103, 101, 116, 95, 101, 120, 104, 97, 117, 115, 116, 101, 100];
+    let invalid_request: [byte; up_to 512] = [105, 110, 118, 97, 108, 105, 100, 95, 114, 101, 113, 117, 101, 115, 116];
+    return value.is_string && (
+        same_text(value.bytes, returned) || same_text(value.bytes, runtime_failure)
+        || same_text(value.bytes, unsupported) || same_text(value.bytes, budget_exhausted)
+        || same_text(value.bytes, invalid_request)
+    );
+}
+
+fn numeric_issue(value: NonnegativeIntegerV1) -> (result: bool) {
+    return value.present && (!value.is_integer || value.is_boolean || value.negative);
+}
+
+fn first_numeric_issue(row: ManifestTestV1, test_index: u64) -> (result: ManifestTestIssueV1) {
+    if numeric_issue(row.step_budget) {
+        return ManifestTestIssueV1 { code: 8, test_index: test_index, field_index: 0, item_index: 0 };
+    }
+    if numeric_issue(row.timeout_seconds) {
+        return ManifestTestIssueV1 { code: 8, test_index: test_index, field_index: 1, item_index: 0 };
+    }
+    if numeric_issue(row.seed) {
+        return ManifestTestIssueV1 { code: 8, test_index: test_index, field_index: 2, item_index: 0 };
+    }
+    if numeric_issue(row.case_index) {
+        return ManifestTestIssueV1 { code: 8, test_index: test_index, field_index: 3, item_index: 0 };
+    }
+    return ManifestTestIssueV1 { code: 0, test_index: test_index, field_index: 0, item_index: 0 };
+}
+
+fn has_duplicate_id(request: ManifestTestValidationRequestV1, row: ManifestTestV1, index: u64) -> (result: bool) {
+    iterate i over request.tests carrying found_duplicate: bool = false {
+        let earlier: ManifestTestV1 = request.tests[i];
+        next found_duplicate = found_duplicate || (i < index && earlier.id.is_string && row.id.is_string
+            && same_text(earlier.id.bytes, row.id.bytes));
+    }
+    return found_duplicate;
+}
+
+fn row_issue(request: ManifestTestValidationRequestV1, row: ManifestTestV1, index: u64) -> (result: ManifestTestIssueV1) {
+    if !row.is_table {
+        return ManifestTestIssueV1 { code: 2, test_index: index, field_index: 0, item_index: 0 };
+    }
+    if !row.id.is_string || row.id.blank || has_duplicate_id(request, row, index) {
+        return ManifestTestIssueV1 { code: 3, test_index: index, field_index: 0, item_index: 0 };
+    }
+    if !row.entry.is_string || row.entry.blank {
+        return ManifestTestIssueV1 { code: 4, test_index: index, field_index: 0, item_index: 0 };
+    }
+    if !is_kind(row.kind) {
+        return ManifestTestIssueV1 { code: 5, test_index: index, field_index: 0, item_index: 0 };
+    }
+    if !row.tags_are_array {
+        return ManifestTestIssueV1 { code: 6, test_index: index, field_index: 0, item_index: 0 };
+    }
+    iterate i over row.tags carrying tags_valid: bool = true {
+        let tag: TextValueV1 = row.tags[i];
+        if !tag.is_string || tag.bytes.len == 0 {
+            return ManifestTestIssueV1 { code: 6, test_index: index, field_index: 0, item_index: i };
+        }
+        next tags_valid = tags_valid;
+    }
+    if !row.arguments_are_array {
+        return ManifestTestIssueV1 { code: 7, test_index: index, field_index: 0, item_index: 0 };
+    }
+    let numeric: ManifestTestIssueV1 = first_numeric_issue(row, index);
+    if numeric.code != 0 { return numeric; }
+    if row.expected_status_present && !is_execution_status(row.expected_status) {
+        return ManifestTestIssueV1 { code: 9, test_index: index, field_index: 0, item_index: 0 };
+    }
+    if !row.diagnostic_codes_are_array {
+        return ManifestTestIssueV1 { code: 10, test_index: index, field_index: 0, item_index: 0 };
+    }
+    iterate i over row.diagnostic_codes carrying diagnostics_valid: bool = true {
+        let diagnostic: TextValueV1 = row.diagnostic_codes[i];
+        if !diagnostic.is_string || diagnostic.bytes.len == 0 {
+            return ManifestTestIssueV1 { code: 10, test_index: index, field_index: 0, item_index: i };
+        }
+        let first: byte = diagnostic.bytes[0];
+        if first < 65 || first > 90 {
+            return ManifestTestIssueV1 { code: 10, test_index: index, field_index: 0, item_index: i };
+        }
+        next diagnostics_valid = diagnostics_valid;
+    }
+    return ManifestTestIssueV1 { code: 0, test_index: index, field_index: 0, item_index: 0 };
+}
+
+fn validate(request: ManifestTestValidationRequestV1) -> (result: ManifestTestIssueV1) {
+    if !same_schema(request.schema_version, request_schema()) || request.test_count != request.tests.len {
+        return ManifestTestIssueV1 { code: 255, test_index: 0, field_index: 0, item_index: 0 };
+    }
+    iterate i over request.tests carrying issue: ManifestTestIssueV1 = ManifestTestIssueV1 {
+        code: 0, test_index: 0, field_index: 0, item_index: 0
+    } {
+        next issue = merge_issue(issue, row_issue(request, request.tests[i], i));
+    }
+    return issue;
+}
+
+fn merge_issue(current: ManifestTestIssueV1, candidate: ManifestTestIssueV1) -> (result: ManifestTestIssueV1) {
+    if current.code != 0 { return current; }
+    return candidate;
+}
+
+fn public_result(issue: ManifestTestIssueV1) -> (result: ManifestTestValidationResultV1) {
+    return ManifestTestValidationResultV1 {
+        schema_version: result_schema(),
+        supported: issue.code != 255,
+        valid: issue.code == 0,
+        issue_code: issue.code,
+        test_index: issue.test_index,
+        field_index: issue.field_index,
+        item_index: issue.item_index
+    };
+}
+
+fn manifest_test_validation_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: ManifestTestValidationRequestV1 = structured_read(context.argv[0], request_schema());
+    let issue: ManifestTestIssueV1 = validate(request);
+    let result: ManifestTestValidationResultV1 = public_result(issue);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([109, 97, 110, 105, 102, 101, 115, 116, 32, 118, 97, 108, 105, 100, 97, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
