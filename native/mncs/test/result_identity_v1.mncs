@@ -42,7 +42,7 @@ record ResultIdentityStreamRequestV1 {
     schema_version: [byte; up_to 64],
     has_state: bool,
     state: ResultIdentityHashStateV1,
-    chunks: [[byte; up_to 1024]; up_to 12],
+    chunks: [[byte; up_to 1024]; up_to 14],
     finalize: bool
 }
 
@@ -144,7 +144,7 @@ fn valid_stream_state(state: ResultIdentityHashStateV1) -> (result: bool) {
 
 fn valid_stream_request(request: ResultIdentityStreamRequestV1) -> (result: bool) {
     if !same_bytes(request.schema_version, stream_request_schema())
-        || request.chunks.len > 12 {
+        || request.chunks.len > 14 {
         return false;
     }
     if request.has_state {

@@ -129,8 +129,9 @@ application accepts up to 16 payloads, 64 chunks, 65,536 bytes, and the
 toolchain's 8,000,000-step ceiling per request. `ArtifactStore` uses the
 streaming identity application when a payload or file exceeds the batch's
 step limit but is at most 65,536 bytes. It carries native SHA-256 state between
-calls, with at most twelve 1,024-byte chunks (12,288 bytes) per call, so the
-continuation is bounded to six application executions. After three native
+calls, with at most fourteen 1,024-byte chunks (14,336 bytes) per call, so the
+continuation is bounded to five application executions. The maximum per-call
+step estimate remains below 8,000,000. After three native
 application hashes in one store, it compiles the same MNCS module to a backend
 artifact and retains an `mncs-embed` session. That session calls the pure MNCS
 identity and SHA-256 functions in bounded windows for payloads and files up to

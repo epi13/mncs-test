@@ -79,7 +79,7 @@ def test_artifact_store_hashes_bounded_payloads_with_native_sha256(
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
-def test_artifact_store_streams_medium_payload_and_file_hashes_in_mncs(
+def test_artifact_store_hashes_native_stream_limit_in_five_updates(
     tmp_path: Path,
 ) -> None:
     artifact_root = tmp_path / "artifacts"
@@ -89,8 +89,14 @@ def test_artifact_store_streams_medium_payload_and_file_hashes_in_mncs(
         cwd=tmp_path,
         environment=_native_environment(),
     )
-    payload = bytes((index * 19 + 7) % 256 for index in range(20_000))
-    file_payload = bytes((index * 23 + 11) % 256 for index in range(20_000))
+    payload = bytes(
+        (index * 19 + 7) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES)
+    )
+    file_payload = bytes(
+        (index * 23 + 11) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES)
+    )
     path = artifact_root / "compiler" / "large.bin"
     path.parent.mkdir(parents=True)
     path.write_bytes(file_payload)
@@ -113,22 +119,18 @@ def test_artifact_store_streams_medium_payload_and_file_hashes_in_mncs(
     assert relative == "compiler/large.bin"
     assert store.items[0]["sha256"] == hashlib.sha256(payload).hexdigest()
     assert store.items[1]["sha256"] == hashlib.sha256(file_payload).hexdigest()
-    assert native_app.call_count == 4
+    assert native_app.call_count == 10
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-result-identity-stream.json",
-        "test-result-identity-stream.json",
-        "test-result-identity-stream.json",
-        "test-result-identity-stream.json",
-    ]
+        "test-result-identity-stream.json"
+    ] * 10
     requests = [call.args[1] for call in native_app.call_args_list]
     assert [sum(len(chunk) for chunk in request["chunks"]) for request in requests] == [
-        12_288,
-        7_712,
-        12_288,
-        7_712,
+        14_336, 14_336, 14_336, 14_336, 8_192,
+        14_336, 14_336, 14_336, 14_336, 8_192,
     ]
-    assert [request["has_state"] for request in requests] == [False, True, False, True]
-    assert [request["finalize"] for request in requests] == [False, True, False, True]
+    assert [len(request["chunks"]) for request in requests] == [14, 14, 14, 14, 8] * 2
+    assert [request["has_state"] for request in requests] == [False, True, True, True, True] * 2
+    assert [request["finalize"] for request in requests] == [False, False, False, False, True] * 2
     assert all(
         call.kwargs["step_budget"] <= mncs_test.TEST_RESULT_IDENTITY_MAX_STEP_BUDGET
         for call in native_app.call_args_list
@@ -176,7 +178,7 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             wraps=hasher.session.call_batch,
         ) as embedded_call_batch:
             empty_stream_digest = hasher.digest_chunks([])
-            exact_window = bytes(range(256)) * 48
+            exact_window = bytes(range(256)) * 56
             exact_window_digest = hasher.digest_chunks([exact_window])
             store.write("stdout/large.bin", payload, "stdout")
             store.record_existing(path, "compiler-output")
@@ -193,12 +195,27 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             request["record"]["fields"]["finalize"]["boolean"]["value"]
             for request in requests
         ]
+        request_fields = [request["record"]["fields"] for request in requests]
+        window_byte_counts = [
+            sum(
+                len(chunk["sequence"]["values"])
+                for chunk in fields["chunks"]["sequence"]["values"]
+            )
+            for fields in request_fields
+        ]
         window_counts = [
             (size + mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - 1)
             // mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
             for size in (len(payload), len(file_payload))
         ]
         expected_windows = sum(window_counts)
+        assert expected_windows == 65
+        assert max(window_byte_counts) == mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
+        assert all(
+            len(fields["chunks"]["sequence"]["values"])
+            <= mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST
+            for fields in request_fields
+        )
         assert function_batches.count(["update_stream_state"]) == expected_windows + 2
         assert len(function_batches) == expected_windows + 2
         assert all(len(batch) == 1 for batch in function_batches)
