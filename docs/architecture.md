@@ -444,6 +444,16 @@ output. The 65,536-byte source, depth-12, 64-member, 256-byte key, and
 8,000,000-step bounds remain in force. Arrays whose descendants exceed the
 value or execution bounds retain the established compatibility path.
 
+P-034 uses a bounded MNCS task stack for large retained array and object
+member lists; smaller value graphs keep the existing recursive writer. Large
+arrays containing object values no longer consume one native call frame per
+element. The task tier follows retained writer work, so scalar-only arrays
+collapsed into compact source spans stay in the small tier. An object with an
+array containing one unsorted object and 1,019 integer elements reaches
+exactly 1,024 values, sorts natively, and matches independent output bytes and
+SHA-256. The parser's value, depth, member, key, input-size, and execution
+bounds remain unchanged.
+
 `mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
 `mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded
 UTF-8 fields as strings in the existing typed request, avoiding one JSON

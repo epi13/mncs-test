@@ -52,14 +52,18 @@ record FrameV1 {
     contains_object: bool,
     compact: bool,
     child_count: u64,
+    writer_steps: u64,
     expect: byte
 }
+
+record ContainerValueV1 { value: JsonValueV1, writer_steps: u64 }
 
 record ParseStateV1 {
     frames: [FrameV1; 12],
     depth: u64,
     span_compact_arrays: bool,
     root: JsonValueV1,
+    root_writer_steps: u64,
     has_root: bool,
     string_start: u64,
     in_string: bool,
@@ -117,6 +121,19 @@ record JsonDigestWriterV1 {
 record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
 
 record ArrayReverseStateV1 { remaining: JsonValueV1, reversed: JsonValueV1 }
+
+enum JsonWriteTaskV1 {
+    Empty,
+    Value { value: JsonValueV1 },
+    ArrayNext { remaining: JsonValueV1, first: bool },
+    ObjectNext { remaining: JsonValueV1, first: bool }
+}
+
+record JsonWriteStateV1 {
+    tasks: [JsonWriteTaskV1; 16],
+    depth: u64,
+    writer: JsonOrderWriterV1
+}
 
 record JsonOrderChunkBuilderV1 {
     chunks: [JsonOrderChunkV1; 64],
@@ -458,6 +475,7 @@ fn empty_frame(kind: byte) -> (result: FrameV1) {
         contains_object: false,
         compact: true,
         child_count: 0,
+        writer_steps: 0,
         expect: select(kind == 1, 1, 5)
     };
 }
@@ -478,11 +496,21 @@ fn located_byte(document: JsonTokenDocumentV1, position: u64) -> (result: byte) 
     return found.value;
 }
 
-fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV1) {
+fn append_value(
+    state: ParseStateV1,
+    value: JsonValueV1,
+    writer_steps: u64
+) -> (result: ParseStateV1) {
     if !state.valid || state.value_count >= 1024 { return ParseStateV1 { ..state, valid: false }; }
     if state.depth == 0 {
         if state.has_root { return ParseStateV1 { ..state, valid: false }; }
-        return ParseStateV1 { ..state, root: value, has_root: true, value_count: state.value_count +% 1 };
+        return ParseStateV1 {
+            ..state,
+            root: value,
+            root_writer_steps: writer_steps,
+            has_root: true,
+            value_count: state.value_count +% 1
+        };
     }
     let frame_index: u64 = state.depth -% 1;
     let frame: FrameV1 = state.frames[frame_index];
@@ -492,6 +520,7 @@ fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV
             ..frame,
             items: prepended,
             child_count: frame.child_count +% 1,
+            writer_steps: frame.writer_steps +% writer_steps +% 1,
             expect: 6
         };
         return ParseStateV1 {
@@ -509,6 +538,7 @@ fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV
             pending_key: empty_key(),
             has_pending_key: false,
             child_count: frame.child_count +% 1,
+            writer_steps: frame.writer_steps +% writer_steps +% 1,
             expect: 4
         };
         return ParseStateV1 {
@@ -528,7 +558,8 @@ fn finalize_scalar(state: ParseStateV1, position: u64) -> (result: ParseStateV1)
     }
     let appended: ParseStateV1 = append_value(
         ParseStateV1 { ..state, scalar_active: false },
-        JsonValueV1.Raw { start: state.scalar_start, length: position -% state.scalar_start }
+        JsonValueV1.Raw { start: state.scalar_start, length: position -% state.scalar_start },
+        1
     );
     return appended;
 }
@@ -540,15 +571,24 @@ fn maybe_finalize_scalar(state: ParseStateV1, position: u64, boundary: bool) -> 
 
 fn container_value(
     frame: FrameV1, end_position: u64, span_compact_arrays: bool
-) -> (result: JsonValueV1) {
-    if frame.kind == 1 { return JsonValueV1.Object { fields: frame.items }; }
+) -> (result: ContainerValueV1) {
+    if frame.kind == 1 { return ContainerValueV1 {
+        value: JsonValueV1.Object { fields: frame.items },
+        writer_steps: frame.writer_steps +% 2
+    }; }
     if span_compact_arrays && !frame.contains_object && frame.compact {
-        return JsonValueV1.Raw {
-            start: frame.source_start,
-            length: end_position -% frame.source_start +% 1
+        return ContainerValueV1 {
+            value: JsonValueV1.Raw {
+                start: frame.source_start,
+                length: end_position -% frame.source_start +% 1
+            },
+            writer_steps: 1
         };
     }
-    return JsonValueV1.Array { items: reverse_array(frame.items, JsonValueV1.ArrayNil) };
+    return ContainerValueV1 {
+        value: JsonValueV1.Array { items: reverse_array(frame.items, JsonValueV1.ArrayNil) },
+        writer_steps: frame.writer_steps +% 2
+    };
 }
 
 fn parse_chunk_step(parsed: ParseStateV1, document: JsonTokenDocumentV1, base: u64, chunk: JsonTokenInputChunkV1, index: u64) -> (result: ParseStateV1) {
@@ -607,7 +647,8 @@ fn parse_string_step(
     }
     return append_value(
         closed,
-        JsonValueV1.String { start: raw_start, length: raw_length }
+        JsonValueV1.String { start: raw_start, length: raw_length },
+        1
     );
 }
 
@@ -665,11 +706,11 @@ fn parse_close_container(state: ParseStateV1, position: u64, value: byte) -> (re
     let correct: bool = (value == 125 && frame.kind == 1 && (frame.expect == 1 || frame.expect == 4))
         || (value == 93 && frame.kind == 2 && (frame.expect == 5 || frame.expect == 6));
     if !correct || frame.has_pending_key { return ParseStateV1 { ..state, valid: false }; }
-    let container: JsonValueV1 = container_value(
+    let container: ContainerValueV1 = container_value(
         frame, position, state.span_compact_arrays
     );
     let popped: ParseStateV1 = ParseStateV1 { ..state, depth: frame_index };
-    return append_value(popped, container);
+    return append_value(popped, container.value, container.writer_steps);
 }
 
 fn parse_comma(state: ParseStateV1) -> (result: ParseStateV1) {
@@ -754,6 +795,7 @@ fn empty_parse_state(span_compact_arrays: bool) -> (result: ParseStateV1) {
         depth: 0,
         span_compact_arrays: span_compact_arrays,
         root: JsonValueV1.Empty,
+        root_writer_steps: 0,
         has_root: false,
         string_start: 0,
         in_string: false,
@@ -1075,7 +1117,7 @@ fn writer_key(
     return writer_byte(raw, 34);
 }
 
-fn write_json(
+fn write_json_recursive(
     value: JsonValueV1,
     writer: JsonOrderWriterV1,
     document: JsonTokenDocumentV1
@@ -1088,20 +1130,24 @@ fn write_json(
             writer_source_range(writer_byte(writer, 34), document, start, length),
             34
         ),
-        Array { items: items } => writer_byte(write_json(items, writer_byte(writer, 91), document), 93),
-        Object { fields: fields } => writer_byte(write_json(fields, writer_byte(writer, 123), document), 125),
+        Array { items: items } => writer_byte(
+            write_json_recursive(items, writer_byte(writer, 91), document), 93
+        ),
+        Object { fields: fields } => writer_byte(
+            write_json_recursive(fields, writer_byte(writer, 123), document), 125
+        ),
         ArrayNil => writer,
         ArrayCons { head: head, tail: tail } => match tail {
-            ArrayNil => write_json(head, writer, document),
+            ArrayNil => write_json_recursive(head, writer, document),
             Empty => JsonOrderWriterV1 { ..writer, ok: false },
             Null => JsonOrderWriterV1 { ..writer, ok: false },
             Raw { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
             String { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
             Array { items: items } => JsonOrderWriterV1 { ..writer, ok: false },
             Object { fields: fields } => JsonOrderWriterV1 { ..writer, ok: false },
-            ArrayCons { head: next_head, tail: next_tail } => write_json(
+            ArrayCons { head: next_head, tail: next_tail } => write_json_recursive(
                 tail,
-                writer_byte(write_json(head, writer, document), 44),
+                writer_byte(write_json_recursive(head, writer, document), 44),
                 document
             ),
             ObjectNil => JsonOrderWriterV1 { ..writer, ok: false },
@@ -1109,7 +1155,9 @@ fn write_json(
         },
         ObjectNil => writer,
         ObjectCons { key: key, value: inner, tail: tail } => match tail {
-            ObjectNil => write_json(inner, writer_byte(writer_key(writer, key, document), 58), document),
+            ObjectNil => write_json_recursive(
+                inner, writer_byte(writer_key(writer, key, document), 58), document
+            ),
             Empty => JsonOrderWriterV1 { ..writer, ok: false },
             Null => JsonOrderWriterV1 { ..writer, ok: false },
             Raw { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
@@ -1118,16 +1166,204 @@ fn write_json(
             Object { fields: fields } => JsonOrderWriterV1 { ..writer, ok: false },
             ArrayNil => JsonOrderWriterV1 { ..writer, ok: false },
             ArrayCons { head: next_head, tail: next_tail } => JsonOrderWriterV1 { ..writer, ok: false },
-            ObjectCons { key: next_key, value: next_value, tail: next_tail } => write_json(
+            ObjectCons { key: next_key, value: next_value, tail: next_tail } => write_json_recursive(
                 tail,
                 writer_byte(
-                    write_json(inner, writer_byte(writer_key(writer, key, document), 58), document),
+                    write_json_recursive(inner, writer_byte(writer_key(writer, key, document), 58), document),
                     44
                 ),
                 document
             )
         }
     };
+}
+
+fn write_json_task_push(
+    state: JsonWriteStateV1,
+    task: JsonWriteTaskV1
+) -> (result: JsonWriteStateV1) {
+    if state.depth >= 16 { return JsonWriteStateV1 {
+        ..state,
+        tasks: [JsonWriteTaskV1.Empty; 16],
+        depth: 0,
+        writer: JsonOrderWriterV1 { ..state.writer, ok: false }
+    }; }
+    return JsonWriteStateV1 {
+        ..state,
+        tasks: replace(state.tasks, state.depth, task),
+        depth: state.depth +% 1
+    };
+}
+
+fn write_json_task_failure(state: JsonWriteStateV1) -> (result: JsonWriteStateV1) {
+    return JsonWriteStateV1 {
+        ..state,
+        tasks: [JsonWriteTaskV1.Empty; 16],
+        depth: 0,
+        writer: JsonOrderWriterV1 { ..state.writer, ok: false }
+    };
+}
+
+fn write_json_array_next_step(
+    state: JsonWriteStateV1,
+    remaining: JsonValueV1,
+    head: JsonValueV1,
+    first: bool
+) -> (result: JsonWriteStateV1) {
+    let separated: JsonOrderWriterV1 = select(
+        first, state.writer, writer_byte(state.writer, 44)
+    );
+    let queued: JsonWriteStateV1 = write_json_task_push(
+        JsonWriteStateV1 { ..state, writer: separated },
+        JsonWriteTaskV1.ArrayNext { remaining: remaining, first: false }
+    );
+    return write_json_task_push(queued, JsonWriteTaskV1.Value { value: head });
+}
+
+fn write_json_object_next_step(
+    state: JsonWriteStateV1,
+    remaining: JsonValueV1,
+    key: KeyV1,
+    value: JsonValueV1,
+    first: bool,
+    document: JsonTokenDocumentV1
+) -> (result: JsonWriteStateV1) {
+    let separated: JsonOrderWriterV1 = select(
+        first, state.writer, writer_byte(state.writer, 44)
+    );
+    let member: JsonOrderWriterV1 = writer_byte(
+        writer_key(separated, key, document), 58
+    );
+    let queued: JsonWriteStateV1 = write_json_task_push(
+        JsonWriteStateV1 { ..state, writer: member },
+        JsonWriteTaskV1.ObjectNext { remaining: remaining, first: false }
+    );
+    return write_json_task_push(queued, JsonWriteTaskV1.Value { value: value });
+}
+
+fn write_json_task_step(
+    state: JsonWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonWriteStateV1) {
+    if state.depth == 0 || !state.writer.ok { return state; }
+    let task_index: u64 = state.depth -% 1;
+    let task: JsonWriteTaskV1 = state.tasks[task_index];
+    let popped: JsonWriteStateV1 = JsonWriteStateV1 {
+        ..state,
+        tasks: replace(state.tasks, task_index, JsonWriteTaskV1.Empty),
+        depth: task_index
+    };
+    return match task {
+        Empty => write_json_task_failure(popped),
+        Value { value: value } => match value {
+            Empty => write_json_task_failure(popped),
+            Null => JsonWriteStateV1 {
+                ..popped,
+                writer: writer_bytes(popped.writer, [110, 117, 108, 108])
+            },
+            Raw { start: start, length: length } => JsonWriteStateV1 {
+                ..popped,
+                writer: writer_source_range(popped.writer, document, start, length)
+            },
+            String { start: start, length: length } => JsonWriteStateV1 {
+                ..popped,
+                writer: writer_byte(
+                    writer_source_range(writer_byte(popped.writer, 34), document, start, length),
+                    34
+                )
+            },
+            Array { items: items } => write_json_task_push(
+                JsonWriteStateV1 { ..popped, writer: writer_byte(popped.writer, 91) },
+                JsonWriteTaskV1.ArrayNext { remaining: items, first: true }
+            ),
+            Object { fields: fields } => write_json_task_push(
+                JsonWriteStateV1 { ..popped, writer: writer_byte(popped.writer, 123) },
+                JsonWriteTaskV1.ObjectNext { remaining: fields, first: true }
+            ),
+            ArrayNil => write_json_task_failure(popped),
+            ArrayCons { head: head, tail: tail } => write_json_task_failure(popped),
+            ObjectNil => write_json_task_failure(popped),
+            ObjectCons { key: key, value: inner, tail: tail } => write_json_task_failure(popped)
+        },
+        ArrayNext { remaining: remaining, first: first } => match remaining {
+            ArrayNil => JsonWriteStateV1 { ..popped, writer: writer_byte(popped.writer, 93) },
+            ArrayCons { head: head, tail: tail } => write_json_array_next_step(
+                popped, tail, head, first
+            ),
+            Empty => write_json_task_failure(popped),
+            Null => write_json_task_failure(popped),
+            Raw { start: start, length: length } => write_json_task_failure(popped),
+            String { start: start, length: length } => write_json_task_failure(popped),
+            Array { items: items } => write_json_task_failure(popped),
+            Object { fields: fields } => write_json_task_failure(popped),
+            ObjectNil => write_json_task_failure(popped),
+            ObjectCons { key: key, value: value, tail: tail } => write_json_task_failure(popped)
+        },
+        ObjectNext { remaining: remaining, first: first } => match remaining {
+            ObjectNil => JsonWriteStateV1 { ..popped, writer: writer_byte(popped.writer, 125) },
+            ObjectCons { key: key, value: value, tail: tail } => write_json_object_next_step(
+                popped, tail, key, value, first, document
+            ),
+            Empty => write_json_task_failure(popped),
+            Null => write_json_task_failure(popped),
+            Raw { start: start, length: length } => write_json_task_failure(popped),
+            String { start: start, length: length } => write_json_task_failure(popped),
+            Array { items: items } => write_json_task_failure(popped),
+            Object { fields: fields } => write_json_task_failure(popped),
+            ArrayNil => write_json_task_failure(popped),
+            ArrayCons { head: head, tail: tail } => write_json_task_failure(popped)
+        }
+    };
+}
+
+fn write_json_advance_three(
+    state: JsonWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonWriteStateV1) {
+    let first: JsonWriteStateV1 = write_json_task_step(state, document);
+    let second: JsonWriteStateV1 = write_json_task_step(first, document);
+    return write_json_task_step(second, document);
+}
+
+fn write_json_run_512(
+    state: JsonWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonWriteStateV1) {
+    iterate i up_to 512 carrying current: JsonWriteStateV1 = state {
+        next current = write_json_advance_three(current, document);
+    }
+    return current;
+}
+
+fn write_json_run_1024(
+    state: JsonWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonWriteStateV1) {
+    iterate i up_to 1024 carrying current: JsonWriteStateV1 = state {
+        next current = write_json_advance_three(current, document);
+    }
+    return current;
+}
+
+fn write_json_finish(state: JsonWriteStateV1) -> (result: JsonOrderWriterV1) {
+    if state.depth == 0 { return state.writer; }
+    return JsonOrderWriterV1 { ..state.writer, ok: false };
+}
+
+fn write_json(
+    value: JsonValueV1,
+    writer: JsonOrderWriterV1,
+    document: JsonTokenDocumentV1,
+    task_bound: u64
+) -> (result: JsonOrderWriterV1) {
+    if task_bound <= 1200 { return write_json_recursive(value, writer, document); }
+    let empty: [JsonWriteTaskV1; 16] = [JsonWriteTaskV1.Empty; 16];
+    let initial: JsonWriteStateV1 = write_json_task_push(
+        JsonWriteStateV1 { tasks: empty, depth: 0, writer: writer },
+        JsonWriteTaskV1.Value { value: value }
+    );
+    if task_bound <= 1536 { return write_json_finish(write_json_run_512(initial, document)); }
+    return write_json_finish(write_json_run_1024(initial, document));
 }
 
 fn empty_output_chunk() -> (result: JsonOrderChunkV1) {
@@ -1276,7 +1512,9 @@ fn parse_key_order_checked(document: JsonTokenDocumentV1, request_valid: bool) -
 }
 
 fn writer_for_parse(parsed: ParseStateV1, document: JsonTokenDocumentV1) -> (result: JsonOrderWriterV1) {
-    if parsed.valid { return write_json(parsed.root, writer_empty(), document); }
+    if parsed.valid {
+        return write_json(parsed.root, writer_empty(), document, parsed.root_writer_steps);
+    }
     return JsonOrderWriterV1 { ..writer_empty(), ok: false };
 }
 
