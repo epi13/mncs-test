@@ -257,7 +257,13 @@ identities, nested unknown selection values, inventory/run identities, and
 selection-span preservation; the family-check integration test verifies that
 the complete retained TestResult and opaque selection span are not passed to
 Python `json.loads` on the native-supported path, while the CheckResult bytes
-and digest still match the independent public-result golden.
+and digest still match the independent public-result golden. P-015 extends the
+same bounded application request with the produced CheckResult document. Its
+independent syntax pass and cursor scan extract only the root schema and verdict
+needed by the family consumer; Python no longer materializes either artifact as
+a value tree on the native-supported path. Oversized or structurally ambiguous
+documents retain the Python compatibility path, and invalid schema or verdict
+agreement still produces the existing family-check error.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

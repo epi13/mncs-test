@@ -16,6 +16,9 @@ record CheckResultJsonNativeRequestV1 {
     schema_version: [byte; up_to 64],
     document: json_order.JsonTokenDocumentV1,
     input_sha256: [byte; up_to 64],
+    check_document_present: bool,
+    check_document: json_order.JsonTokenDocumentV1,
+    check_input_sha256: [byte; up_to 64],
     check_id: [byte; up_to 1024],
     claim: [byte; up_to 1024],
     result_digest: [byte; up_to 64]
@@ -25,7 +28,8 @@ record CheckResultJsonNativeResultV1 {
     schema_version: [byte; up_to 64],
     supported: bool,
     projection: check_result.CheckResultProjectionV1,
-    family_metadata: FamilyResultMetadataV1
+    family_metadata: FamilyResultMetadataV1,
+    check_artifact: CheckArtifactMetadataV1
 }
 
 record FamilyResultMetadataV1 {
@@ -42,6 +46,13 @@ record FamilyResultMetadataV1 {
     run_identity_present: bool,
     run_identity_null: bool,
     run_identity: [byte; up_to 512]
+}
+
+record CheckArtifactMetadataV1 {
+    supported: bool,
+    schema_valid: bool,
+    verdict_valid: bool,
+    verdict: [byte; up_to 16]
 }
 
 record TokenValueSpanV1 { found: bool, kind: byte, start: u64, length: u64 }
@@ -203,11 +214,11 @@ record StringSkipStateV1 {
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 50];
 }
 
 fn empty_span() -> (result: TokenValueSpanV1) {
@@ -1772,6 +1783,15 @@ fn test_result_schema_matches(value: TextValueV1) -> (result: bool) {
     return matches;
 }
 
+fn check_result_schema_matches(value: TextValueV1) -> (result: bool) {
+    let expected: [byte; up_to 64] = [109, 110, 99, 115, 46, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 47, 49];
+    if !value.valid || value.length != expected.len { return false; }
+    iterate i over expected carrying matches: bool = true {
+        next matches = matches && value.bytes[i] == expected[i];
+    }
+    return matches;
+}
+
 fn extract_family_metadata(
     document: json_order.JsonTokenDocumentV1,
     state: CheckResultTokenStateV1
@@ -1834,16 +1854,68 @@ fn extract_family_metadata(
     };
 }
 
+fn empty_check_artifact_metadata() -> (result: CheckArtifactMetadataV1) {
+    return CheckArtifactMetadataV1 {
+        supported: false,
+        schema_valid: false,
+        verdict_valid: false,
+        verdict: []
+    };
+}
+
+fn inspect_check_artifact(
+    request: CheckResultJsonNativeRequestV1
+) -> (result: CheckArtifactMetadataV1) {
+    if !request.check_document_present { return empty_check_artifact_metadata(); }
+    let order_request: json_order.JsonOrderRequestV1 = json_order.JsonOrderRequestV1 {
+        schema_version: json_order.request_schema_v1(),
+        document: request.check_document,
+        input_sha256: request.check_input_sha256
+    };
+    let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.check_document);
+    let transport_valid: bool = json_order.valid_order_request(order_request, shape);
+    let scanned: json.ScanState = json_order.scan_document(request.check_document);
+    let syntax_valid: bool = json.is_valid(scanned);
+    let tokenized: CheckResultTokenStateV1 = checked_token_scan(
+        request.check_document, transport_valid, syntax_valid
+    );
+    let supported: bool = transport_valid && syntax_valid && tokenized.valid
+        && json_cursor.is_valid(tokenized.cursor);
+    let schema_value: TextValueV1 = decode_text_value(
+        request.check_document,
+        FieldLookupV1 {
+            found: tokenized.test_result_schema_seen,
+            value: tokenized.test_result_schema
+        },
+        false
+    );
+    let verdict_value: TextValueV1 = decode_text_value(
+        request.check_document,
+        FieldLookupV1 { found: tokenized.verdict_seen, value: tokenized.verdict },
+        false
+    );
+    return CheckArtifactMetadataV1 {
+        supported: supported,
+        schema_valid: supported && tokenized.root_is_object
+            && check_result_schema_matches(schema_value),
+        verdict_valid: supported && tokenized.root_is_object
+            && verdict_value.valid && verdict_value.length <= 16,
+        verdict: widen_text_16(verdict_value.bytes, verdict_value.length)
+    };
+}
+
 fn json_result(
     supported: bool,
     request: check_result.CheckResultProjectionRequestV1,
-    family_metadata: FamilyResultMetadataV1
+    family_metadata: FamilyResultMetadataV1,
+    check_artifact: CheckArtifactMetadataV1
 ) -> (result: CheckResultJsonNativeResultV1) {
     return CheckResultJsonNativeResultV1 {
         schema_version: result_schema(),
         supported: supported,
         projection: check_result.build_result(request),
-        family_metadata: family_metadata
+        family_metadata: family_metadata,
+        check_artifact: check_artifact
     };
 }
 
@@ -1876,12 +1948,13 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     let family_metadata: FamilyResultMetadataV1 = extract_family_metadata(
         request.document, tokenized
     );
+    let check_artifact: CheckArtifactMetadataV1 = inspect_check_artifact(request);
     let supported: bool = transport_valid && syntax_valid && extracted.supported;
     let selected_request: check_result.CheckResultProjectionRequestV1 = select(
         supported, extracted.request, empty_projection_request(request)
     );
     let output: CheckResultJsonNativeResultV1 = json_result(
-        supported, selected_request, family_metadata
+        supported, selected_request, family_metadata, check_artifact
     );
     let published: u64 = structured_write(context.argv[1], result_schema(), output);
     if published == 0 {

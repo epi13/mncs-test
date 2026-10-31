@@ -158,6 +158,42 @@ def test_native_check_result_projection_matches_family_contract(
     assert decoded_inputs == []
 
 
+def test_native_check_result_app_reports_invalid_family_check_schema(
+    tmp_path: Path,
+) -> None:
+    test_result_document = mncs_test.json_bytes(
+        {
+            "schema_version": mncs_test.RESULT_SCHEMA,
+            "provider": "mncs-test",
+            "verdict": "PASS",
+            "classification": "pass",
+            "failure_class": "none",
+            "summary": {},
+            "tests": [],
+        }
+    )
+    check_document = b'{"schema_version":"mncs.check-result/2","verdict":"PASS"}'
+
+    response = mncs_test._native_check_result_json_response(
+        test_result_document,
+        check_document=check_document,
+        result_digest="d" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:invalid-check-schema",
+        claim="Exercise native CheckResult schema validation",
+    )
+
+    assert response is not None
+    assert response["check_artifact"] == {
+        "supported": True,
+        "schema_valid": False,
+        "verdict_valid": True,
+        "verdict": "PASS",
+    }
+
+
 def test_raw_selection_public_result_uses_compatible_host_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

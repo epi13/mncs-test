@@ -49,8 +49,8 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
-CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/1"
-CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/1"
+CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/2"
+CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/2"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
@@ -7284,6 +7284,7 @@ def minimal_result(*, classification: str, message: str, cwd: Path) -> dict[str,
 def _native_check_result_json_response(
     document: bytes,
     *,
+    check_document: bytes | None = None,
     result_digest: str,
     mncs: str,
     cwd: Path,
@@ -7296,10 +7297,27 @@ def _native_check_result_json_response(
     prepared_document = _native_public_result_document_request(document)
     if prepared_document is None:
         return None
+    prepared_check_document = None
+    if (
+        check_document is not None
+        and len(check_document) <= CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
+    ):
+        prepared_check_document = _native_public_result_document_request(check_document)
     native_request = {
         "schema_version": CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
         "document": prepared_document[0]["document"],
         "input_sha256": prepared_document[0]["input_sha256"],
+        "check_document_present": prepared_check_document is not None,
+        "check_document": (
+            prepared_check_document[0]["document"]
+            if prepared_check_document is not None
+            else {"chunks": [], "byte_length": 0}
+        ),
+        "check_input_sha256": (
+            prepared_check_document[0]["input_sha256"]
+            if prepared_check_document is not None
+            else ""
+        ),
         "check_id": check_id or "",
         "claim": claim or "",
         "result_digest": result_digest,
@@ -7325,6 +7343,32 @@ def _native_check_result_json_response(
     ):
         raise AdapterError("MNCS CheckResult JSON projection returned malformed support metadata")
     return native_response
+
+
+def _family_check_artifact_metadata_from_native(
+    native_response: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Read the produced CheckResult's bounded schema and verdict fields."""
+    if native_response is None:
+        return None
+    artifact = native_response.get("check_artifact")
+    if not isinstance(artifact, dict) or artifact.get("supported") is not True:
+        return None
+    schema_valid = artifact.get("schema_valid")
+    verdict_valid = artifact.get("verdict_valid")
+    verdict = artifact.get("verdict")
+    if (
+        type(schema_valid) is not bool
+        or type(verdict_valid) is not bool
+        or not isinstance(verdict, str)
+        or (verdict_valid and len(verdict.encode("utf-8")) > 16)
+    ):
+        return None
+    return {
+        "schema_valid": schema_valid,
+        "verdict_valid": verdict_valid,
+        "verdict": verdict,
+    }
 
 
 def _family_check_metadata_from_native(
@@ -7858,6 +7902,7 @@ def run_family_check(args: argparse.Namespace) -> int:
                 )
         native_json_response = _native_check_result_json_response(
             result_document_bytes,
+            check_document=check_document_bytes,
             result_digest=result_digest,
             mncs=args.mncs,
             cwd=cwd,
@@ -7869,7 +7914,29 @@ def run_family_check(args: argparse.Namespace) -> int:
             native_json_response,
             result_document_bytes,
         )
-        produced_check = json.loads(check_document_bytes)
+        check_metadata = _family_check_artifact_metadata_from_native(
+            native_json_response
+        )
+        if check_metadata is None or family_metadata is None:
+            produced_check = json.loads(check_document_bytes)
+            if (
+                not isinstance(produced_check, dict)
+                or produced_check.get("schema_version") != CHECK_SCHEMA
+            ):
+                raise AdapterError(
+                    "family check produced an invalid mncs.check-result/1 document"
+                )
+            produced_check_verdict = produced_check.get("verdict")
+        else:
+            if not check_metadata["schema_valid"]:
+                raise AdapterError(
+                    "family check produced an invalid mncs.check-result/1 document"
+                )
+            produced_check_verdict = (
+                check_metadata["verdict"]
+                if check_metadata["verdict_valid"]
+                else None
+            )
         if family_metadata is None:
             result = json.loads(result_document_bytes)
         else:
@@ -7887,9 +7954,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             }
         if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.test-result/1 document")
-        if not isinstance(produced_check, dict) or produced_check.get("schema_version") != CHECK_SCHEMA:
-            raise AdapterError("family check produced an invalid mncs.check-result/1 document")
-        if produced_check.get("verdict") != result.get("verdict"):
+        if produced_check_verdict != result.get("verdict"):
             raise AdapterError("family check TestResult and CheckResult verdicts disagree")
         selected = (
             family_metadata["selected_test_identities"]

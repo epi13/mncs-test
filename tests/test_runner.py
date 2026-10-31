@@ -833,6 +833,10 @@ class RunnerTests(unittest.TestCase):
             },
             "experiment": {"run_identity": "run-family-check-fixture"},
         }
+        check_document_bytes = mncs_test.json_bytes({
+            "schema_version": mncs_test.CHECK_SCHEMA,
+            "verdict": "PASS",
+        })
 
         with tempfile.TemporaryDirectory(prefix="mncs-test-family-digest-") as directory:
             root = Path(directory)
@@ -843,10 +847,7 @@ class RunnerTests(unittest.TestCase):
                 result_path = Path(command[command.index("--result") + 1])
                 check_path = Path(command[command.index("--check-result") + 1])
                 result_path.write_bytes(mncs_test.json_bytes(result))
-                check_path.write_text(
-                    json.dumps({"schema_version": mncs_test.CHECK_SCHEMA, "verdict": "PASS"}),
-                    encoding="utf-8",
-                )
+                check_path.write_bytes(check_document_bytes)
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             arguments = SimpleNamespace(
@@ -860,6 +861,7 @@ class RunnerTests(unittest.TestCase):
             )
             native_applications: list[str] = []
             native_json_requests: list[dict] = []
+            check_artifact_results: list[dict] = []
             family_metadata_results: list[dict] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
@@ -877,6 +879,7 @@ class RunnerTests(unittest.TestCase):
                 if name == "test-check-result-json-native.json":
                     native_json_requests.append(native_request)
                     family_metadata_results.append(response["family_metadata"])
+                    check_artifact_results.append(response["check_artifact"])
                 return response
 
             raw_selection_inputs = []
@@ -925,6 +928,16 @@ class RunnerTests(unittest.TestCase):
             family_metadata_results[0]["supported"],
             family_metadata_results[0],
         )
+        self.assertEqual(len(check_artifact_results), 1)
+        self.assertEqual(
+            check_artifact_results[0],
+            {
+                "supported": True,
+                "schema_valid": True,
+                "verdict_valid": True,
+                "verdict": "PASS",
+            },
+        )
         expected_test_result_document = mncs_test.json_bytes(result)
         self.assertNotIn(
             expected_test_result_document,
@@ -935,6 +948,11 @@ class RunnerTests(unittest.TestCase):
             json.dumps(result["selection"]).encode("utf-8"),
             decoded_json_documents,
             "the opaque selection field should stay a raw span on the native path",
+        )
+        self.assertNotIn(
+            check_document_bytes,
+            decoded_json_documents,
+            "family checks should validate the produced CheckResult with native tokens",
         )
         self.assertEqual(len(raw_selection_inputs), 1)
         family_metadata = family_metadata_results[0]
@@ -952,6 +970,15 @@ class RunnerTests(unittest.TestCase):
             [request["document"] for request in native_json_requests],
             [expected_native_document["document"]],
             "family CheckResult projection should consume the retained TestResult document",
+        )
+        expected_check_document, _ = mncs_test._native_public_result_document_request(
+            check_document_bytes
+        )
+        self.assertTrue(native_json_requests[0]["check_document_present"])
+        self.assertEqual(
+            native_json_requests[0]["check_document"],
+            expected_check_document["document"],
+            "the family validator should receive the exact produced CheckResult bytes",
         )
         self.assertIn("test-result-identity.json", native_applications)
         self.assertGreaterEqual(
