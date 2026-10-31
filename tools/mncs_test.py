@@ -394,10 +394,11 @@ def _native_public_result_key_order(
     start_request, source_length = packed
     if source_length != len(document):
         raise AdapterError("MNCS public-result key-order input packing changed its length")
+    input_hash = start_request["input_sha256"]
     key_request = {
         "schema_version": PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA,
         "document": start_request["document"],
-        "input_sha256": hashlib.sha256(document).hexdigest(),
+        "input_sha256": input_hash,
     }
     try:
         result = run_native_app(
@@ -647,9 +648,14 @@ def _native_public_result_token_tape(
         return None
     start_request, source_length = prepared
     source_chunks = start_request["document"]["chunks"]
-    input_hash = hashlib.sha256(document).hexdigest()
+    input_hash = start_request["input_sha256"]
     packed_source = b"".join(chunk["bytes"].encode("utf-8") for chunk in source_chunks)
-    if packed_source != document or source_length != len(document) or input_hash != start_request["input_sha256"]:
+    if (
+        packed_source != document
+        or source_length != len(document)
+        or not isinstance(input_hash, str)
+        or not SHA256_HEX.fullmatch(input_hash)
+    ):
         raise AdapterError("MNCS public-result token source changed during transport packing")
 
     tokens: list[dict[str, Any]] = []
@@ -862,8 +868,13 @@ def _native_public_result_document_payload(
         item["bytes"].encode("utf-8")
         for item in document["chunks"]
     )
-    input_hash = hashlib.sha256(packed_source).hexdigest()
-    if packed_source != source or len(packed_source) != source_length or input_hash != start_request["input_sha256"]:
+    input_hash = start_request["input_sha256"]
+    if (
+        packed_source != source
+        or len(packed_source) != source_length
+        or not isinstance(input_hash, str)
+        or not SHA256_HEX.fullmatch(input_hash)
+    ):
         raise AdapterError("MNCS public-result input packing changed its source bytes")
 
     output = bytearray()

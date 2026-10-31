@@ -84,6 +84,60 @@ def test_native_request_transports_one_compact_json_document() -> None:
     assert "edges" not in request
 
 
+def test_native_raw_tokenizer_reuses_transport_source_digest(tmp_path: Path) -> None:
+    source = b'{"b":[2,1],"a":"native"}'
+    digest = mock.Mock(wraps=hashlib.sha256)
+    host_hashlib = mock.Mock(sha256=digest)
+    with mock.patch.object(mncs_test, "hashlib", host_hashlib):
+        actual = mncs_test._native_public_result_token_tape(
+            source,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    expected = mncs_test.json_bytes(json.loads(source))
+    assert actual == (expected, hashlib.sha256(expected).hexdigest())
+    assert digest.call_count == 1
+
+
+def test_native_key_order_reuses_transport_source_digest(tmp_path: Path) -> None:
+    source = b'{"b":2,"a":1}'
+    digest = mock.Mock(wraps=hashlib.sha256)
+    host_hashlib = mock.Mock(sha256=digest)
+    with mock.patch.object(mncs_test, "hashlib", host_hashlib):
+        actual = mncs_test._native_public_result_key_order(
+            source,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == b'{"a":1,"b":2}'
+    assert digest.call_count == 1
+
+
+def test_native_document_serializer_reuses_transport_source_digest(
+    tmp_path: Path,
+) -> None:
+    source = b'{"value":"native"}'
+    digest = mock.Mock(wraps=hashlib.sha256)
+    host_hashlib = mock.Mock(sha256=digest)
+    with mock.patch.object(mncs_test, "hashlib", host_hashlib):
+        actual = mncs_test._native_public_result_document_payload(
+            source,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    expected = _python_result_bytes(json.loads(source))
+    assert actual == (expected, hashlib.sha256(expected).hexdigest())
+    assert digest.call_count == 2
+    assert digest.call_args_list[0].args[0] == source
+    assert digest.call_args_list[1].args[0] == expected
+
+
 def test_native_continuation_rejects_a_changed_source_document(tmp_path: Path) -> None:
     prepared = mncs_test._native_public_result_request(
         {"payload": ["x" * 500 for _ in range(20)]}
