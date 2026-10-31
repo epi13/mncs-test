@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.check-result-json-native",
+  "source": "../native/mncs/test/check_result_json_native_v1.mncs",
+  "module": "mncs.test.check_result_json_native_v1",
+  "entry_function": "check_result_json_native_app_v1",
+  "profile": "0.18",
+  "interface_identity": "2cfd6ca2ac068b7c2faf0958784e79f6acddf5f255c43e3475368b302069482a",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

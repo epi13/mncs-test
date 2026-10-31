@@ -856,6 +856,7 @@ class RunnerTests(unittest.TestCase):
                 timeout_seconds=120,
             )
             native_applications: list[str] = []
+            native_json_requests: list[dict] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
                 "test-public-result-json-native-token-tape.json",
@@ -869,6 +870,8 @@ class RunnerTests(unittest.TestCase):
             def observe_native_app(name, native_request, **kwargs):
                 response = original_run_native_app(name, native_request, **kwargs)
                 native_applications.append(name)
+                if name == "test-check-result-json-native.json":
+                    native_json_requests.append(native_request)
                 return response
 
             public_payload_inputs = []
@@ -899,7 +902,16 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0, output.getvalue())
         response = json.loads(output.getvalue())
-        self.assertIn("test-check-result-projection.json", native_applications)
+        self.assertIn("test-check-result-json-native.json", native_applications)
+        expected_test_result_document = json.dumps(result).encode("utf-8")
+        expected_native_document, _ = mncs_test._native_public_result_document_request(
+            expected_test_result_document
+        )
+        self.assertEqual(
+            [request["document"] for request in native_json_requests],
+            [expected_native_document["document"]],
+            "family CheckResult projection should consume the retained TestResult document",
+        )
         self.assertIn("test-result-identity.json", native_applications)
         self.assertGreaterEqual(
             sum(name in public_json_apps for name in native_applications),

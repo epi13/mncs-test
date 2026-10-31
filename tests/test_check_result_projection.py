@@ -37,7 +37,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_native_check_result_projection_matches_family_contract(tmp_path: Path) -> None:
+def test_native_check_result_projection_matches_family_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     long_identity = "mncs:test-case:" + ("long-identity-" * 12)
     result_digest = "d" * 64
     source_digest = "a" * 64
@@ -62,6 +64,16 @@ def test_native_check_result_projection_matches_family_contract(tmp_path: Path) 
         },
     }
 
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
     projected = mncs_test.check_result(
         result,
         result_digest,
@@ -70,6 +82,7 @@ def test_native_check_result_projection_matches_family_contract(tmp_path: Path) 
         environment=_environment(),
         check_id="family:exact:check",
         claim="The exact repository-owned behavioral family check was executed by mncs-test",
+        test_result_document=mncs_test.json.dumps(result, ensure_ascii=False).encode("utf-8"),
     )
 
     digest = f"sha256:{result_digest}"
@@ -102,6 +115,97 @@ def test_native_check_result_projection_matches_family_contract(tmp_path: Path) 
         "failure_class": "unsupported_capability",
         "selection": result["selection"],
     }
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is True
+
+
+def test_native_projection_uses_external_check_id_when_source_id_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "classification": "pass",
+        "failure_class": "none",
+        "summary": {},
+        "tests": [],
+    }
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    projected = mncs_test.check_result(
+        result,
+        "8" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:external-id",
+        test_result_document=mncs_test.json.dumps(result, separators=(",", ":")).encode(),
+    )
+
+    assert projected["id"] == "family:external-id"
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is True
+
+
+def test_native_source_projection_decodes_escaped_values_and_utf8_failure_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = 'mncs:test-case:quoted-"-duck-🦆-é'
+    message = ('line one\nquoted "failure" 🦆 café ' * 4) + "end"
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "scope": {"manifest": "mncs-test.toml"},
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "failure": {"message": message},
+        "summary": {"passed": 12, "failed": 2, "skipped": 3},
+        "tests": [{"id": identity, "verdict": "FAIL"}],
+        "provenance": {"runner": {"source_sha256": "f" * 64}},
+        "run_id": "run-native-escaped-19",
+        "selection": {"selected_test_identities": [identity]},
+    }
+
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    projected = mncs_test.check_result(
+        result,
+        "9" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=mncs_test.json.dumps(
+            result, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8"),
+    )
+
+    assert projected["summary"] == (
+        f"unsupported: 12 passed, 2 failed, 3 skipped; failing_identity={identity}"
+    )
+    assert projected["unresolved"] == [message]
+    assert projected["producer_revision"] == f"sha256:{'f' * 64}"
+    assert projected["selection"] == result["selection"]
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is True
 
 
 def test_native_check_result_projection_preserves_defaults_and_verdict_policy(
@@ -158,7 +262,7 @@ def test_native_check_result_projection_preserves_defaults_and_verdict_policy(
 
 
 def test_native_check_result_projection_reassembles_long_utf8_failure_message(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     message = ("failure-🦆é" * 220) + "end"
     result = {
@@ -174,16 +278,31 @@ def test_native_check_result_projection_reassembles_long_utf8_failure_message(
         "run_id": "run-utf8",
     }
 
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
     projected = mncs_test.check_result(
         result,
         "c" * 64,
         mncs=str(MNCS),
         cwd=tmp_path,
         environment=_environment(),
+        test_result_document=mncs_test.json.dumps(
+            result, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8"),
     )
 
     assert projected["unresolved"] == [message]
     assert projected["result_ref"]["uri"] == "urn:mncs-test:run-utf8"
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is False
 
 
 def test_native_check_result_projection_uses_string_scope_for_minimal_result(

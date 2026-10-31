@@ -49,6 +49,8 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
+CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/1"
+CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/1"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
@@ -7284,6 +7286,7 @@ def check_result(
     environment: dict[str, str],
     check_id: str | None = None,
     claim: str | None = None,
+    test_result_document: bytes | None = None,
 ) -> dict[str, Any]:
     """Project a detailed TestResult through the native CheckResult policy."""
     if not isinstance(result, dict):
@@ -7301,6 +7304,38 @@ def check_result(
         return value
 
     maximum_u64 = (1 << 64) - 1
+
+    if test_result_document is not None:
+        prepared_document = _native_public_result_document_request(test_result_document)
+        if prepared_document is not None:
+            native_request = {
+                "schema_version": CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
+                "document": prepared_document[0]["document"],
+                "input_sha256": prepared_document[0]["input_sha256"],
+                "check_id": check_id or "",
+                "claim": claim or "",
+                "result_digest": result_digest,
+            }
+            try:
+                native_response = run_native_app(
+                    "test-check-result-json-native.json",
+                    native_request,
+                    request_schema=CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
+                    result_schema=CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    step_budget=8_000_000,
+                )
+            except (NativeInputBoundError, NativeBudgetExhaustedError):
+                native_response = None
+            except NativeTransportError as error:
+                raise AdapterError(f"native Test CheckResult JSON projection failed: {error}") from error
+            if native_response is not None and native_response.get("supported") is True:
+                projected = native_response.get("projection")
+                if not isinstance(projected, dict):
+                    raise AdapterError("MNCS CheckResult JSON projection returned no typed projection")
+                return _finish_check_result_projection(projected, result)
 
     def summary_count(summary: dict[str, Any], field: str) -> int:
         value = summary.get(field, 0)
@@ -7424,6 +7459,12 @@ def check_result(
     # The application transports long unresolved text in UTF-8-safe bounded
     # chunks. Reassembly and the external CheckResult field names belong to
     # this adapter boundary; the native application chose the disposition.
+    return _finish_check_result_projection(projected, result)
+
+
+def _finish_check_result_projection(
+    projected: dict[str, Any], result: dict[str, Any]
+) -> dict[str, Any]:
     if (
         projected.get("result_schema_version") != CHECK_SCHEMA
         or type(projected.get("unresolved_present")) is not bool
@@ -7714,6 +7755,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             environment=check_result_environment,
             check_id=request["check_identity"],
             claim="The exact repository-owned behavioral family check was executed by mncs-test",
+            test_result_document=result_document_bytes,
         )
         check_result_payload, check_result_digest = _public_result_json_payload(
             check_result_document,
@@ -8768,6 +8810,7 @@ def run_manifest(args: argparse.Namespace) -> int:
                 mncs=mncs,
                 cwd=cwd,
                 environment=environment,
+                test_result_document=result_payload,
             ),
             mncs=mncs,
             cwd=cwd,

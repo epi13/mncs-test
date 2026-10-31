@@ -1,0 +1,518 @@
+mncs 0.18;
+
+// Read the retained TestResult as a bounded native JSON value, project only
+// the fields needed by CheckResult, and leave opaque selection with the
+// adapter. The shared Test JSON parser retains source spans and decodes text
+// only when a consumer asks for a bounded field.
+module mncs.test.check_result_json_native_v1;
+
+use mncs.std.application.v1;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+use mncs.test.check_result_projection_v1 as check_result;
+
+record CheckResultJsonNativeRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: json_order.JsonTokenDocumentV1,
+    input_sha256: [byte; up_to 64],
+    check_id: [byte; up_to 1024],
+    claim: [byte; up_to 1024],
+    result_digest: [byte; up_to 64]
+}
+
+record CheckResultJsonNativeResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    projection: check_result.CheckResultProjectionV1
+}
+
+record FieldLookupV1 {
+    found: bool,
+    value: json_order.JsonValueV1
+}
+
+record TextValueV1 {
+    valid: bool,
+    present: bool,
+    bytes: [byte; up_to 256],
+    length: u64
+}
+
+record NumberValueV1 { valid: bool, value: u64 }
+record NumberParseV1 { valid: bool, value: u64 }
+
+record SummaryProjectionV1 {
+    valid: bool,
+    value: check_result.CheckSummaryV1
+}
+
+record TestRowsV1 {
+    valid: bool,
+    rows: [check_result.CheckTestV1; 256],
+    count: u64
+}
+
+record ExtractedTestResultV1 {
+    supported: bool,
+    request: check_result.CheckResultProjectionRequestV1
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 49];
+}
+
+fn empty_lookup() -> (result: FieldLookupV1) {
+    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn empty_text() -> (result: TextValueV1) {
+    return TextValueV1 { valid: true, present: false, bytes: [], length: 0 };
+}
+
+fn failure_message_chunks(message: TextValueV1) -> (result: [[byte; up_to 1024]; up_to 256]) {
+    if !message.present { return []; }
+    let empty: [[byte; up_to 1024]; 256] = [[0; 0]; 256];
+    let message_bytes: [byte; up_to 1024] = widen_text_1024(message.bytes, message.length);
+    let with_message: [[byte; up_to 1024]; 256] = replace(empty, 0, message_bytes);
+    return with_message[0..1];
+}
+
+fn key_value(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: name,
+        ordered_length: name.len,
+        valid: true
+    };
+}
+
+fn widen_text_step<N: Nat>(
+    output: [byte; N],
+    input: [byte; up_to 256],
+    index: u64,
+    length: u64,
+    capacity: u64
+) -> (result: [byte; N]) {
+    if index >= length || index >= capacity { return output; }
+    return replace(output, index, input[index]);
+}
+
+fn widen_text_16(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 16]) {
+    iterate i up_to 16 carrying output: [byte; 16] = [0; 16] {
+        next output = widen_text_step<16>(output, input, i, length, 16);
+    }
+    let bounded_length: u64 = select(length < 16, length, 16);
+    return output[0..bounded_length];
+}
+
+fn widen_text_64(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 64]) {
+    iterate i up_to 64 carrying output: [byte; 64] = [0; 64] {
+        next output = widen_text_step<64>(output, input, i, length, 64);
+    }
+    let bounded_length: u64 = select(length < 64, length, 64);
+    return output[0..bounded_length];
+}
+
+fn widen_text_128(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 128]) {
+    iterate i up_to 128 carrying output: [byte; 128] = [0; 128] {
+        next output = widen_text_step<128>(output, input, i, length, 128);
+    }
+    let bounded_length: u64 = select(length < 128, length, 128);
+    return output[0..bounded_length];
+}
+
+fn widen_text_512(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 512]) {
+    iterate i up_to 256 carrying output: [byte; 512] = [0; 512] {
+        next output = widen_text_step<512>(output, input, i, length, 512);
+    }
+    let bounded_length: u64 = select(length < 512, length, 512);
+    return output[0..bounded_length];
+}
+
+fn widen_text_1024(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 1024]) {
+    iterate i up_to 256 carrying output: [byte; 1024] = [0; 1024] {
+        next output = widen_text_step<1024>(output, input, i, length, 1024);
+    }
+    let bounded_length: u64 = select(length < 1024, length, 1024);
+    return output[0..bounded_length];
+}
+
+fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: FieldLookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } => match json_order.compare_key(wanted, current) {
+            json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
+            json_order.KeyOrderV1.Before => empty_lookup(),
+            json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+        },
+        Empty => empty_lookup(),
+        Null => empty_lookup(),
+        Raw { start: start, length: length } => empty_lookup(),
+        String { start: start, length: length } => empty_lookup(),
+        Array { items: items } => empty_lookup(),
+        Object { fields: nested } => empty_lookup(),
+        ArrayNil => empty_lookup(),
+        ArrayCons { head: head, tail: tail } => empty_lookup(),
+        ObjectNil => empty_lookup()
+    };
+}
+
+fn object_field(object: json_order.JsonValueV1, name: [byte; up_to 32]) -> (result: FieldLookupV1) {
+    let wanted: json_order.KeyV1 = key_value(name);
+    return match object {
+        json_order.JsonValueV1.Object { fields: fields } => lookup_field(fields, wanted),
+        Empty => empty_lookup(),
+        Null => empty_lookup(),
+        Raw { start: start, length: length } => empty_lookup(),
+        String { start: start, length: length } => empty_lookup(),
+        Array { items: items } => empty_lookup(),
+        ArrayNil => empty_lookup(),
+        ArrayCons { head: head, tail: tail } => empty_lookup(),
+        ObjectNil => empty_lookup(),
+        ObjectCons { key: key, value: value, tail: tail } => empty_lookup()
+    };
+}
+
+fn lookup_is_object(value: json_order.JsonValueV1) -> (result: bool) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => true,
+        Empty => false,
+        Null => false,
+        Raw { start: start, length: length } => false,
+        String { start: start, length: length } => false,
+        Array { items: items } => false,
+        ArrayNil => false,
+        ArrayCons { head: head, tail: tail } => false,
+        ObjectNil => false,
+        ObjectCons { key: key, value: inner, tail: tail } => false
+    };
+}
+
+fn decode_text_span(
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: TextValueV1) {
+    if length > 256 { return TextValueV1 { ..empty_text(), valid: false }; }
+    let decoded: json_order.KeyV1 = json_order.decode_key(document, start, length);
+    return TextValueV1 {
+        valid: decoded.valid,
+        present: true,
+        bytes: decoded.ordered,
+        length: decoded.ordered_length
+    };
+}
+
+fn decode_text_value(
+    document: json_order.JsonTokenDocumentV1,
+    field: FieldLookupV1,
+    missing_allowed: bool,
+    null_allowed: bool
+) -> (result: TextValueV1) {
+    if !field.found { return TextValueV1 { ..empty_text(), valid: missing_allowed }; }
+    return match field.value {
+        json_order.JsonValueV1.String { start: start, length: length } => decode_text_span(document, start, length),
+        Null => TextValueV1 { ..empty_text(), valid: null_allowed },
+        Empty => TextValueV1 { ..empty_text(), valid: false },
+        Raw { start: raw_start, length: raw_length } => TextValueV1 { ..empty_text(), valid: false },
+        Array { items: items } => TextValueV1 { ..empty_text(), valid: false },
+        Object { fields: fields } => TextValueV1 { ..empty_text(), valid: false },
+        ArrayNil => TextValueV1 { ..empty_text(), valid: false },
+        ArrayCons { head: head, tail: tail } => TextValueV1 { ..empty_text(), valid: false },
+        ObjectNil => TextValueV1 { ..empty_text(), valid: false },
+        ObjectCons { key: key, value: value, tail: tail } => TextValueV1 { ..empty_text(), valid: false }
+    };
+}
+
+fn parse_number_step(
+    state: NumberParseV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: NumberParseV1) {
+    if index >= length || !state.valid { return state; }
+    let digit_byte: byte = json_order.located_byte(document, start +% index);
+    if digit_byte < 48 || digit_byte > 57 || index >= 20 {
+        return NumberParseV1 { ..state, valid: false };
+    }
+    let digit: u64 = (digit_byte as u64) -% 48;
+    let within_u64: bool = state.value < 1844674407370955161
+        || (state.value == 1844674407370955161 && digit <= 5);
+    if !within_u64 { return NumberParseV1 { ..state, valid: false }; }
+    return NumberParseV1 { value: state.value *% 10 +% digit, valid: true };
+}
+
+fn parse_unsigned_span(
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: NumberValueV1) {
+    if length == 0 || length > 20 { return NumberValueV1 { valid: false, value: 0 }; }
+    let initial: NumberParseV1 = NumberParseV1 { valid: true, value: 0 };
+    iterate i up_to 20 carrying parsed: NumberParseV1 = initial {
+        next parsed = parse_number_step(parsed, document, start, length, i);
+    }
+    return NumberValueV1 { valid: parsed.valid, value: parsed.value };
+}
+
+fn unsigned_value(
+    document: json_order.JsonTokenDocumentV1,
+    field: FieldLookupV1,
+    missing_allowed: bool
+) -> (result: NumberValueV1) {
+    if !field.found { return NumberValueV1 { valid: missing_allowed, value: 0 }; }
+    return match field.value {
+        json_order.JsonValueV1.Raw { start: start, length: length } => parse_unsigned_span(document, start, length),
+        Empty => NumberValueV1 { valid: false, value: 0 },
+        Null => NumberValueV1 { valid: false, value: 0 },
+        String { start: start, length: length } => NumberValueV1 { valid: false, value: 0 },
+        Array { items: items } => NumberValueV1 { valid: false, value: 0 },
+        Object { fields: fields } => NumberValueV1 { valid: false, value: 0 },
+        ArrayNil => NumberValueV1 { valid: false, value: 0 },
+        ArrayCons { head: head, tail: tail } => NumberValueV1 { valid: false, value: 0 },
+        ObjectNil => NumberValueV1 { valid: false, value: 0 },
+        ObjectCons { key: key, value: value, tail: tail } => NumberValueV1 { valid: false, value: 0 }
+    };
+}
+
+fn summary_value(document: json_order.JsonTokenDocumentV1, summary: FieldLookupV1) -> (result: SummaryProjectionV1) {
+    if !summary.found {
+        return SummaryProjectionV1 {
+            valid: true,
+            value: check_result.CheckSummaryV1 { passed: 0, failed: 0, skipped: 0 }
+        };
+    }
+    if !lookup_is_object(summary.value) {
+        return SummaryProjectionV1 {
+            valid: false,
+            value: check_result.CheckSummaryV1 { passed: 0, failed: 0, skipped: 0 }
+        };
+    }
+    let passed: NumberValueV1 = unsigned_value(document, object_field(summary.value, [112, 97, 115, 115, 101, 100]), true);
+    let failed: NumberValueV1 = unsigned_value(document, object_field(summary.value, [102, 97, 105, 108, 101, 100]), true);
+    let skipped: NumberValueV1 = unsigned_value(document, object_field(summary.value, [115, 107, 105, 112, 112, 101, 100]), true);
+    return SummaryProjectionV1 {
+        valid: passed.valid && failed.valid && skipped.valid,
+        value: check_result.CheckSummaryV1 {
+            passed: passed.value,
+            failed: failed.value,
+            skipped: skipped.value
+        }
+    };
+}
+
+fn empty_test_rows() -> (result: TestRowsV1) {
+    let empty: check_result.CheckTestV1 = check_result.CheckTestV1 { id: [], verdict: [] };
+    return TestRowsV1 { valid: true, rows: [empty; 256], count: 0 };
+}
+
+fn append_object_test_row(
+    state: TestRowsV1,
+    document: json_order.JsonTokenDocumentV1,
+    fields: json_order.JsonValueV1
+) -> (result: TestRowsV1) {
+    if state.count >= 256 { return TestRowsV1 { ..state, valid: false }; }
+    let id: TextValueV1 = decode_text_value(
+        document, lookup_field(fields, key_value([105, 100])), true, true
+    );
+    let verdict_field: FieldLookupV1 = lookup_field(fields, key_value([118, 101, 114, 100, 105, 99, 116]));
+    let verdict: TextValueV1 = decode_text_value(document, verdict_field, true, false);
+    if !id.valid || !verdict.valid || id.length > 512 || verdict.length > 16 {
+        return TestRowsV1 { ..state, valid: false };
+    }
+    let row: check_result.CheckTestV1 = check_result.CheckTestV1 {
+        id: widen_text_512(id.bytes, id.length),
+        verdict: widen_text_16(verdict.bytes, verdict.length)
+    };
+    return TestRowsV1 {
+        rows: replace(state.rows, state.count, row),
+        count: state.count +% 1,
+        valid: true
+    };
+}
+
+fn append_test_row(
+    state: TestRowsV1,
+    document: json_order.JsonTokenDocumentV1,
+    item: json_order.JsonValueV1
+) -> (result: TestRowsV1) {
+    return match item {
+        json_order.JsonValueV1.Object { fields: fields } => append_object_test_row(state, document, fields),
+        Empty => state,
+        Null => state,
+        Raw { start: start, length: length } => state,
+        String { start: start, length: length } => state,
+        Array { items: items } => state,
+        ArrayNil => state,
+        ArrayCons { head: head, tail: tail } => state,
+        ObjectNil => state,
+        ObjectCons { key: key, value: value, tail: tail } => state
+    };
+}
+
+fn collect_test_rows(
+    items: json_order.JsonValueV1,
+    state: TestRowsV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: TestRowsV1) {
+    return match items {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => collect_test_rows(tail, append_test_row(state, document, head), document),
+        ArrayNil => state,
+        Empty => TestRowsV1 { ..state, valid: false },
+        Null => TestRowsV1 { ..state, valid: false },
+        Raw { start: start, length: length } => TestRowsV1 { ..state, valid: false },
+        String { start: start, length: length } => TestRowsV1 { ..state, valid: false },
+        Array { items: nested } => TestRowsV1 { ..state, valid: false },
+        Object { fields: fields } => TestRowsV1 { ..state, valid: false },
+        ObjectNil => TestRowsV1 { ..state, valid: false },
+        ObjectCons { key: key, value: value, tail: tail } => TestRowsV1 { ..state, valid: false }
+    };
+}
+
+fn test_rows(document: json_order.JsonTokenDocumentV1, tests: FieldLookupV1) -> (result: TestRowsV1) {
+    if !tests.found { return empty_test_rows(); }
+    return match tests.value {
+        json_order.JsonValueV1.Array { items: items } => collect_test_rows(items, empty_test_rows(), document),
+        Empty => TestRowsV1 { ..empty_test_rows(), valid: false },
+        Null => TestRowsV1 { ..empty_test_rows(), valid: false },
+        Raw { start: start, length: length } => TestRowsV1 { ..empty_test_rows(), valid: false },
+        String { start: start, length: length } => TestRowsV1 { ..empty_test_rows(), valid: false },
+        Object { fields: fields } => TestRowsV1 { ..empty_test_rows(), valid: false },
+        ArrayNil => TestRowsV1 { ..empty_test_rows(), valid: false },
+        ArrayCons { head: head, tail: tail } => TestRowsV1 { ..empty_test_rows(), valid: false },
+        ObjectNil => TestRowsV1 { ..empty_test_rows(), valid: false },
+        ObjectCons { key: key, value: value, tail: tail } => TestRowsV1 { ..empty_test_rows(), valid: false }
+    };
+}
+
+fn empty_projection_request(metadata: CheckResultJsonNativeRequestV1) -> (result: check_result.CheckResultProjectionRequestV1) {
+    return check_result.CheckResultProjectionRequestV1 {
+        schema_version: check_result.request_schema(),
+        id: metadata.check_id,
+        provider: [],
+        verdict: [80, 65, 83, 83],
+        scope_manifest: [],
+        scope_manifest_present: false,
+        claim: metadata.claim,
+        classification: [],
+        failure_class: [],
+        result_digest: metadata.result_digest,
+        source_sha256: [],
+        summary: check_result.CheckSummaryV1 { passed: 0, failed: 0, skipped: 0 },
+        failure_message_present: false,
+        failure_message_count: 0,
+        failure_message_chunks: [],
+        run_id: [],
+        test_count: 0,
+        tests: []
+    };
+}
+
+fn extract_test_result(
+    root: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1,
+    metadata: CheckResultJsonNativeRequestV1
+) -> (result: ExtractedTestResultV1) {
+    if !lookup_is_object(root) {
+        return ExtractedTestResultV1 { supported: false, request: empty_projection_request(metadata) };
+    }
+    let id_field: FieldLookupV1 = object_field(root, [105, 100]);
+    let id_text: TextValueV1 = decode_text_value(document, id_field, false, false);
+    let provider: TextValueV1 = decode_text_value(document, object_field(root, [112, 114, 111, 118, 105, 100, 101, 114]), false, false);
+    let verdict: TextValueV1 = decode_text_value(document, object_field(root, [118, 101, 114, 100, 105, 99, 116]), false, false);
+    let classification: TextValueV1 = decode_text_value(document, object_field(root, [99, 108, 97, 115, 115, 105, 102, 105, 99, 97, 116, 105, 111, 110]), false, false);
+    let failure_class: TextValueV1 = decode_text_value(document, object_field(root, [102, 97, 105, 108, 117, 114, 101, 95, 99, 108, 97, 115, 115]), false, false);
+    let scope_field: FieldLookupV1 = object_field(root, [115, 99, 111, 112, 101]);
+    let scope_valid: bool = !scope_field.found || lookup_is_object(scope_field.value);
+    let manifest_field: FieldLookupV1 = object_field(scope_field.value, [109, 97, 110, 105, 102, 101, 115, 116]);
+    let manifest: TextValueV1 = decode_text_value(document, manifest_field, true, true);
+    let summary: SummaryProjectionV1 = summary_value(document, object_field(root, [115, 117, 109, 109, 97, 114, 121]));
+    let tests: TestRowsV1 = test_rows(document, object_field(root, [116, 101, 115, 116, 115]));
+    let failure_field: FieldLookupV1 = object_field(root, [102, 97, 105, 108, 117, 114, 101]);
+    let failure_object: bool = lookup_is_object(failure_field.value);
+    let failure_message_field: FieldLookupV1 = object_field(failure_field.value, [109, 101, 115, 115, 97, 103, 101]);
+    let failure_message: TextValueV1 = decode_text_value(document, failure_message_field, true, false);
+    let provenance_field: FieldLookupV1 = object_field(root, [112, 114, 111, 118, 101, 110, 97, 110, 99, 101]);
+    let provenance_object: bool = lookup_is_object(provenance_field.value);
+    let runner_field: FieldLookupV1 = object_field(provenance_field.value, [114, 117, 110, 110, 101, 114]);
+    let runner_object: bool = lookup_is_object(runner_field.value);
+    let source_sha_field: FieldLookupV1 = object_field(runner_field.value, [115, 111, 117, 114, 99, 101, 95, 115, 104, 97, 50, 53, 54]);
+    let source_sha: TextValueV1 = decode_text_value(document, source_sha_field, true, false);
+    let run_id: TextValueV1 = decode_text_value(document, object_field(root, [114, 117, 110, 95, 105, 100]), true, false);
+    let source_id: [byte; up_to 1024] = widen_text_1024(id_text.bytes, id_text.length);
+    let check_id: [byte; up_to 1024] = select(metadata.check_id.len > 0, metadata.check_id, source_id);
+    let message_chunks: [[byte; up_to 1024]; up_to 256] = failure_message_chunks(failure_message);
+    let request: check_result.CheckResultProjectionRequestV1 = check_result.CheckResultProjectionRequestV1 {
+        schema_version: check_result.request_schema(),
+        id: check_id,
+        provider: provider.bytes[0..provider.length],
+        verdict: widen_text_16(verdict.bytes, verdict.length),
+        scope_manifest: widen_text_1024(manifest.bytes, manifest.length),
+        scope_manifest_present: manifest.present,
+        claim: metadata.claim,
+        classification: widen_text_128(classification.bytes, classification.length),
+        failure_class: widen_text_128(failure_class.bytes, failure_class.length),
+        result_digest: metadata.result_digest,
+        source_sha256: widen_text_64(source_sha.bytes, source_sha.length),
+        summary: summary.value,
+        failure_message_present: failure_object && failure_message.present,
+        failure_message_count: message_chunks.len,
+        failure_message_chunks: message_chunks,
+        run_id: widen_text_512(run_id.bytes, run_id.length),
+        test_count: tests.count,
+        tests: tests.rows[0..tests.count]
+    };
+    let supported: bool = (id_text.valid || metadata.check_id.len > 0) && provider.valid && verdict.valid
+        && classification.valid && failure_class.valid && scope_valid && manifest.valid
+        && summary.valid && tests.valid && failure_message.valid && source_sha.valid
+        && run_id.valid && provider.length <= 256 && verdict.length <= 16
+        && classification.length <= 128 && failure_class.length <= 128
+        && manifest.length <= 1024 && source_sha.length <= 64 && run_id.length <= 512
+        && check_result.valid_request(request);
+    return ExtractedTestResultV1 { supported: supported, request: request };
+}
+
+fn json_result(
+    supported: bool,
+    request: check_result.CheckResultProjectionRequestV1
+) -> (result: CheckResultJsonNativeResultV1) {
+    return CheckResultJsonNativeResultV1 {
+        schema_version: result_schema(),
+        supported: supported,
+        projection: check_result.build_result(request)
+    };
+}
+
+fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 67, 104, 101, 99, 107, 82, 101, 115, 117, 108, 116, 32, 74, 83, 79, 78, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: CheckResultJsonNativeRequestV1 = structured_read(context.argv[0], request_schema());
+    let order_request: json_order.JsonOrderRequestV1 = json_order.JsonOrderRequestV1 {
+        schema_version: json_order.request_schema_v1(),
+        document: request.document,
+        input_sha256: request.input_sha256
+    };
+    let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.document);
+    let transport_valid: bool = json_order.valid_order_request(order_request, shape);
+    let parsed: json_order.ParseStateV1 = json_order.parse_checked(request.document, transport_valid);
+    let extracted: ExtractedTestResultV1 = extract_test_result(parsed.root, request.document, request);
+    let supported: bool = transport_valid && parsed.valid && extracted.supported;
+    let selected_request: check_result.CheckResultProjectionRequestV1 = select(
+        supported, extracted.request, empty_projection_request(request)
+    );
+    let output: CheckResultJsonNativeResultV1 = json_result(supported, selected_request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), output);
+    if published == 0 {
+        return failure([67, 104, 101, 99, 107, 82, 101, 115, 117, 108, 116, 32, 74, 83, 79, 78, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
