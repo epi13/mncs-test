@@ -7241,6 +7241,46 @@ def print_result(
     print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
 
 
+def _json_text_is_ascii(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.isascii()
+    if isinstance(value, dict):
+        return all(
+            _json_text_is_ascii(key) and _json_text_is_ascii(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return all(_json_text_is_ascii(item) for item in value)
+    return True
+
+
+def print_cli_json(
+    value: Any,
+    *,
+    mncs: str | None,
+    cwd: Path,
+    environment: dict[str, str],
+    ensure_ascii: bool = False,
+) -> None:
+    """Print bounded CLI documents natively while retaining ASCII mode exactly."""
+    if ensure_ascii and not _json_text_is_ascii(value):
+        sys.stdout.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
+        return
+    try:
+        payload, _digest = _public_result_json_payload(
+            value,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+    except AdapterError:
+        payload = (
+            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=ensure_ascii)
+            + "\n"
+        ).encode("utf-8")
+    sys.stdout.write(payload.decode("utf-8"))
+
+
 def select_tests(
     tests: list[dict[str, Any]],
     filters: list[str],
@@ -8099,20 +8139,21 @@ def discover_manifests(root: Path, recursive: bool) -> list[Path]:
 
 
 def discover_command(args: argparse.Namespace) -> int:
-    root = resolve_path(args.root, Path.cwd())
-    mncs = resolve_mncs(args.mncs, Path.cwd())
-    manifest_environment = native_application_environment(Path.cwd())
+    cwd = Path.cwd().resolve()
+    root = resolve_path(args.root, cwd)
+    mncs = resolve_mncs(args.mncs, cwd)
+    manifest_environment = native_application_environment(cwd)
     manifests = []
     errors = []
     for path in discover_manifests(root, args.recursive):
         try:
             manifest = load_manifest(
-                path, mncs=mncs, cwd=Path.cwd(), environment=manifest_environment,
+                path, mncs=mncs, cwd=cwd, environment=manifest_environment,
             )
             document = {
-                "path": relative_path(path, Path.cwd()),
+                "path": relative_path(path, cwd),
                 "name": manifest["name"],
-                "source": relative_path(Path(manifest["source_path"]), Path.cwd()),
+                "source": relative_path(Path(manifest["source_path"]), cwd),
                 "module": manifest["module"],
                 "suite": manifest.get("suite"),
                 "discovery": "manifest-compatibility" if manifest["tests"] or manifest.get("suite") else "compiler-inventory",
@@ -8126,7 +8167,7 @@ def discover_command(args: argparse.Namespace) -> int:
                 for raw_path in args.library:
                     for component in raw_path.split(os.pathsep):
                         if component:
-                            libraries.append(resolve_path(component, Path.cwd(), must_exist=True))
+                            libraries.append(resolve_path(component, cwd, must_exist=True))
                 with tempfile.TemporaryDirectory(prefix="mncs-test-discover-") as directory:
                     artifacts = ArtifactStore(
                         Path(directory),
@@ -8138,7 +8179,7 @@ def discover_command(args: argparse.Namespace) -> int:
                         inventory, transport = compiler_inventory(
                             source_path=Path(manifest["source_path"]),
                             mncs=mncs,
-                            cwd=Path.cwd(),
+                            cwd=cwd,
                             environment=command_environment(libraries),
                             timeout_seconds=manifest["timeout_seconds"],
                             artifacts=artifacts,
@@ -8148,7 +8189,7 @@ def discover_command(args: argparse.Namespace) -> int:
                 if inventory is None:
                     errors.append(
                         {
-                            "path": relative_path(path, Path.cwd()),
+                            "path": relative_path(path, cwd),
                             "error": "compiler inventory unavailable",
                             "diagnostics": diagnostic_list(transport.get("document")),
                         }
@@ -8172,7 +8213,7 @@ def discover_command(args: argparse.Namespace) -> int:
                 ]
             manifests.append(document)
         except (ManifestError, AdapterError) as error:
-            errors.append({"path": relative_path(path, Path.cwd()), "error": str(error)})
+            errors.append({"path": relative_path(path, cwd), "error": str(error)})
     output = {"schema_version": DISCOVERY_SCHEMA, "root": str(root), "authority": "mncs-compiler", "manifests": manifests, "errors": errors}
     if args.format == "text":
         for manifest in manifests:
@@ -8180,23 +8221,30 @@ def discover_command(args: argparse.Namespace) -> int:
         for error in errors:
             print(f"{error['path']}: INVALID — {error['error']}")
     else:
-        print(json.dumps(output, indent=2, sort_keys=True, ensure_ascii=False))
+        print_cli_json(
+            output,
+            mncs=mncs,
+            cwd=cwd,
+            environment=manifest_environment,
+        )
     return EXIT_INVALID_INVOCATION if errors else EXIT_SUCCESS
 
 
 def validate_manifest_command(args: argparse.Namespace) -> int:
+    cwd = Path.cwd().resolve()
+    environment = native_application_environment(cwd)
+    mncs: str | None = None
     try:
-        cwd = Path.cwd().resolve()
         manifest_path = resolve_path(args.manifest, cwd)
-        environment = native_application_environment(cwd)
         libraries: list[Path] = []
         for raw_path in args.library:
             for component in raw_path.split(os.pathsep):
                 if component:
                     libraries.append(resolve_path(component, cwd, must_exist=True))
         environment = command_environment(libraries, environment)
+        mncs = resolve_mncs(args.mncs, cwd)
         manifest = load_manifest(
-            manifest_path, mncs=resolve_mncs(args.mncs, cwd), cwd=cwd,
+            manifest_path, mncs=mncs, cwd=cwd,
             environment=environment,
         )
         output = {
@@ -8207,10 +8255,22 @@ def validate_manifest_command(args: argparse.Namespace) -> int:
             "module": manifest["module"],
             "tests": len(manifest["tests"]),
         }
-        print(json.dumps(output, indent=2, sort_keys=True))
+        print_cli_json(
+            output,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            ensure_ascii=True,
+        )
         return EXIT_SUCCESS
     except (ManifestError, AdapterError) as error:
-        print(json.dumps({"schema_version": MANIFEST_SCHEMA, "valid": False, "error": str(error)}, indent=2, sort_keys=True))
+        print_cli_json(
+            {"schema_version": MANIFEST_SCHEMA, "valid": False, "error": str(error)},
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            ensure_ascii=True,
+        )
         return EXIT_INVALID_INVOCATION
 
 

@@ -165,6 +165,107 @@ def test_print_result_uses_preformatted_json_without_host_reserialization(
     assert capsys.readouterr().out.encode("utf-8") == payload
 
 
+def test_discover_json_uses_native_public_result_serializer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path = tmp_path / "mncs-test.toml"
+    manifest_path.write_text("", encoding="utf-8")
+    manifest = {
+        "name": "sample-suite",
+        "source_path": tmp_path / "sample.mncs",
+        "module": "sample",
+        "suite": None,
+        "tests": [],
+        "library_paths": [],
+    }
+
+    with mock.patch.dict(os.environ, _native_environment()), mock.patch.object(
+        mncs_test, "load_manifest", return_value=manifest
+    ), mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        exit_code = mncs_test.main(
+            ["discover", "--root", str(tmp_path), "--mncs", str(MNCS), "--format", "json"]
+        )
+
+    output = capsys.readouterr().out.encode("utf-8")
+    document = json.loads(output)
+    assert exit_code == mncs_test.EXIT_SUCCESS
+    assert output == _python_result_bytes(document)
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+    ]
+
+
+def test_validate_manifest_json_uses_native_serializer_for_ascii_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with mock.patch.dict(os.environ, _native_environment()), mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        exit_code = mncs_test.main(
+            [
+                "validate-manifest",
+                "--manifest",
+                str(ROOT / "mncs-test.toml"),
+                "--mncs",
+                str(MNCS),
+            ]
+        )
+
+    output = capsys.readouterr().out.encode("utf-8")
+    document = json.loads(output)
+    assert exit_code == mncs_test.EXIT_SUCCESS
+    assert output == _python_result_bytes(document)
+    assert [call.args[0] for call in native_app.call_args_list[-2:]] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+    ]
+
+
+def test_ascii_json_mode_keeps_escaped_unicode_compatibility(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    value = {"message": "Lúna 東京"}
+    with mock.patch.object(mncs_test, "run_native_app") as native_app:
+        mncs_test.print_cli_json(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+            ensure_ascii=True,
+        )
+
+    output = capsys.readouterr().out.encode("utf-8")
+    expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert output == expected
+    native_app.assert_not_called()
+
+
+def test_cli_json_falls_back_when_native_formatter_is_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    value = {"valid": True, "tests": ["alpha", "beta"]}
+    with mock.patch.object(
+        mncs_test,
+        "run_native_app",
+        side_effect=mncs_test.AdapterError("native JSON formatter unavailable"),
+    ) as native_app:
+        mncs_test.print_cli_json(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert capsys.readouterr().out.encode("utf-8") == _python_result_bytes(value)
+    native_app.assert_called_once()
+
+
 def test_artifact_store_json_uses_native_serializer_and_keeps_golden_digest(
     tmp_path: Path,
 ) -> None:
