@@ -170,6 +170,13 @@ def test_native_check_result_app_reports_invalid_family_check_schema(
             "failure_class": "none",
             "summary": {},
             "tests": [],
+            "selection": {
+                "selected_test_identities": [
+                    "mncs:test-case:z",
+                    "mncs:test-case:a",
+                ]
+            },
+            "test_inventory": {"inventory_identity": "b" * 64},
         }
     )
     check_document = b'{"schema_version":"mncs.check-result/2","verdict":"PASS"}'
@@ -177,6 +184,8 @@ def test_native_check_result_app_reports_invalid_family_check_schema(
     response = mncs_test._native_check_result_json_response(
         test_result_document,
         check_document=check_document,
+        expected_test_identities=["mncs:test-case:a", "mncs:test-case:z"],
+        expected_inventory_identity="a" * 64,
         result_digest="d" * 64,
         mncs=str(MNCS),
         cwd=tmp_path,
@@ -191,6 +200,35 @@ def test_native_check_result_app_reports_invalid_family_check_schema(
         "schema_valid": False,
         "verdict_valid": True,
         "verdict": "PASS",
+        "verdict_comparison_supported": True,
+        "verdict_matches_test_result": True,
+    }
+    assert response["family_metadata"]["selection_comparison_supported"] is True
+    assert response["family_metadata"]["selection_matches_expected"] is True
+    assert response["family_metadata"]["inventory_comparison_supported"] is True
+    assert response["family_metadata"]["inventory_matches_expected"] is False
+
+    disagreeing_check_response = mncs_test._native_check_result_json_response(
+        test_result_document,
+        check_document=b'{"schema_version":"mncs.check-result/1","verdict":"FAIL"}',
+        expected_test_identities=["mncs:test-case:a", "mncs:test-case:z"],
+        expected_inventory_identity="a" * 64,
+        result_digest="d" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:verdict-mismatch",
+        claim="Exercise native CheckResult verdict agreement",
+    )
+
+    assert disagreeing_check_response is not None
+    assert disagreeing_check_response["check_artifact"] == {
+        "supported": True,
+        "schema_valid": True,
+        "verdict_valid": True,
+        "verdict": "FAIL",
+        "verdict_comparison_supported": True,
+        "verdict_matches_test_result": False,
     }
 
 

@@ -49,8 +49,8 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
-CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/2"
-CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/2"
+CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/3"
+CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/3"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
@@ -7285,6 +7285,8 @@ def _native_check_result_json_response(
     document: bytes,
     *,
     check_document: bytes | None = None,
+    expected_test_identities: list[str] | None = None,
+    expected_inventory_identity: str | None = None,
     result_digest: str,
     mncs: str,
     cwd: Path,
@@ -7303,6 +7305,30 @@ def _native_check_result_json_response(
         and len(check_document) <= CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
     ):
         prepared_check_document = _native_public_result_document_request(check_document)
+    native_expected_test_identities: list[str] = []
+    selection_expectation_present = False
+    if expected_test_identities is not None and len(expected_test_identities) <= 256:
+        try:
+            identity_lengths = [
+                len(identity.encode("utf-8")) for identity in expected_test_identities
+            ]
+        except (AttributeError, UnicodeEncodeError):
+            identity_lengths = []
+        if len(identity_lengths) == len(expected_test_identities) and all(
+            length <= 512 for length in identity_lengths
+        ):
+            native_expected_test_identities = expected_test_identities
+            selection_expectation_present = True
+    native_expected_inventory_identity = ""
+    inventory_expectation_present = False
+    if expected_inventory_identity is not None:
+        try:
+            inventory_identity_length = len(expected_inventory_identity.encode("utf-8"))
+        except (AttributeError, UnicodeEncodeError):
+            inventory_identity_length = 65
+        if inventory_identity_length <= 64:
+            native_expected_inventory_identity = expected_inventory_identity
+            inventory_expectation_present = True
     native_request = {
         "schema_version": CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
         "document": prepared_document[0]["document"],
@@ -7318,6 +7344,10 @@ def _native_check_result_json_response(
             if prepared_check_document is not None
             else ""
         ),
+        "selection_expectation_present": selection_expectation_present,
+        "expected_test_identities": native_expected_test_identities,
+        "inventory_expectation_present": inventory_expectation_present,
+        "expected_inventory_identity": native_expected_inventory_identity,
         "check_id": check_id or "",
         "claim": claim or "",
         "result_digest": result_digest,
@@ -7357,9 +7387,13 @@ def _family_check_artifact_metadata_from_native(
     schema_valid = artifact.get("schema_valid")
     verdict_valid = artifact.get("verdict_valid")
     verdict = artifact.get("verdict")
+    verdict_comparison_supported = artifact.get("verdict_comparison_supported")
+    verdict_matches_test_result = artifact.get("verdict_matches_test_result")
     if (
         type(schema_valid) is not bool
         or type(verdict_valid) is not bool
+        or type(verdict_comparison_supported) is not bool
+        or type(verdict_matches_test_result) is not bool
         or not isinstance(verdict, str)
         or (verdict_valid and len(verdict.encode("utf-8")) > 16)
     ):
@@ -7368,6 +7402,8 @@ def _family_check_artifact_metadata_from_native(
         "schema_valid": schema_valid,
         "verdict_valid": verdict_valid,
         "verdict": verdict,
+        "verdict_comparison_supported": verdict_comparison_supported,
+        "verdict_matches_test_result": verdict_matches_test_result,
     }
 
 
@@ -7385,8 +7421,16 @@ def _family_check_metadata_from_native(
     verdict = family.get("verdict")
     selected = family.get("selected_test_identities")
     selection_present = family.get("selection_present")
+    selection_comparison_supported = family.get("selection_comparison_supported")
+    selection_matches_expected = family.get("selection_matches_expected")
+    inventory_comparison_supported = family.get("inventory_comparison_supported")
+    inventory_matches_expected = family.get("inventory_matches_expected")
     if (
         type(schema_valid) is not bool
+        or type(selection_comparison_supported) is not bool
+        or type(selection_matches_expected) is not bool
+        or type(inventory_comparison_supported) is not bool
+        or type(inventory_matches_expected) is not bool
         or not isinstance(verdict, str)
         or len(verdict.encode("utf-8")) > 16
         or not isinstance(selected, list)
@@ -7450,12 +7494,16 @@ def _family_check_metadata_from_native(
         "selected_test_identities": selected,
         "selection_present": selection_present,
         "selection_json": selection_json,
+        "selection_comparison_supported": selection_comparison_supported,
+        "selection_matches_expected": selection_matches_expected,
         "inventory_identity": (
             inventory_identity if inventory_present and not inventory_null else None
         ),
         "run_identity": (
             run_identity if run_identity_present and not run_identity_null else None
         ),
+        "inventory_comparison_supported": inventory_comparison_supported,
+        "inventory_matches_expected": inventory_matches_expected,
     }
 
 
@@ -7903,6 +7951,8 @@ def run_family_check(args: argparse.Namespace) -> int:
         native_json_response = _native_check_result_json_response(
             result_document_bytes,
             check_document=check_document_bytes,
+            expected_test_identities=selector["test_identities"],
+            expected_inventory_identity=selector.get("inventory_identity"),
             result_digest=result_digest,
             mncs=args.mncs,
             cwd=cwd,
@@ -7917,6 +7967,7 @@ def run_family_check(args: argparse.Namespace) -> int:
         check_metadata = _family_check_artifact_metadata_from_native(
             native_json_response
         )
+        native_verdict_agreement: bool | None = None
         if check_metadata is None or family_metadata is None:
             produced_check = json.loads(check_document_bytes)
             if (
@@ -7937,6 +7988,10 @@ def run_family_check(args: argparse.Namespace) -> int:
                 if check_metadata["verdict_valid"]
                 else None
             )
+            if check_metadata["verdict_comparison_supported"]:
+                native_verdict_agreement = check_metadata[
+                    "verdict_matches_test_result"
+                ]
         if family_metadata is None:
             result = json.loads(result_document_bytes)
         else:
@@ -7954,20 +8009,50 @@ def run_family_check(args: argparse.Namespace) -> int:
             }
         if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.test-result/1 document")
-        if produced_check_verdict != result.get("verdict"):
+        if native_verdict_agreement is False or (
+            native_verdict_agreement is None
+            and produced_check_verdict != result.get("verdict")
+        ):
             raise AdapterError("family check TestResult and CheckResult verdicts disagree")
+        expected_inventory = selector.get("inventory_identity")
+        if family_metadata is not None and family_metadata["selection_comparison_supported"]:
+            selection_matches = family_metadata["selection_matches_expected"]
+        else:
+            selected = (
+                family_metadata["selected_test_identities"]
+                if family_metadata is not None
+                else result.get("selection", {}).get("selected_test_identities", [])
+            )
+            selection_matches = sorted(selected) == selector["test_identities"]
+        if not selection_matches:
+            raise AdapterError("family check did not execute exactly the declared test identities")
         selected = (
             family_metadata["selected_test_identities"]
             if family_metadata is not None
             else result.get("selection", {}).get("selected_test_identities", [])
         )
-        if sorted(selected) != selector["test_identities"]:
-            raise AdapterError("family check did not execute exactly the declared test identities")
-        inventory = result.get("test_inventory")
-        inventory_identity = inventory.get("inventory_identity") if isinstance(inventory, dict) else None
-        expected_inventory = selector.get("inventory_identity")
-        if expected_inventory is not None and inventory_identity != expected_inventory:
-            raise AdapterError("family check compiler inventory identity is stale")
+        if family_metadata is not None:
+            inventory_identity = family_metadata["inventory_identity"]
+        else:
+            inventory = result.get("test_inventory")
+            inventory_identity = (
+                inventory.get("inventory_identity")
+                if isinstance(inventory, dict)
+                else None
+            )
+        if expected_inventory is not None:
+            if family_metadata is not None and family_metadata["inventory_comparison_supported"]:
+                inventory_matches = family_metadata["inventory_matches_expected"]
+            else:
+                inventory = result.get("test_inventory")
+                inventory_identity = (
+                    inventory.get("inventory_identity")
+                    if isinstance(inventory, dict)
+                    else None
+                )
+                inventory_matches = inventory_identity == expected_inventory
+            if not inventory_matches:
+                raise AdapterError("family check compiler inventory identity is stale")
         check_result_document = check_result(
             result,
             result_digest,

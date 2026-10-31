@@ -263,7 +263,11 @@ independent syntax pass and cursor scan extract only the root schema and verdict
 needed by the family consumer; Python no longer materializes either artifact as
 a value tree on the native-supported path. Oversized or structurally ambiguous
 documents retain the Python compatibility path, and invalid schema or verdict
-agreement still produces the existing family-check error.
+agreement still produces the existing family-check error. P-016 also moves the
+selected-identity multiset comparison, compiler-inventory freshness check, and
+TestResult/CheckResult verdict agreement into that native scan. Python retains
+the previous comparisons only when the native request or artifact falls
+outside the scanner's published bounds.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

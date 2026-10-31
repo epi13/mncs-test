@@ -1,8 +1,8 @@
 mncs 0.18;
 
-// Validate the retained TestResult JSON, then project CheckResult and family
-// policy fields from bounded native cursor tokens. Keep source spans instead
-// of a JsonValue tree, and leave opaque selection with the adapter. Unescaped
+// Validate the retained TestResult and produced CheckResult with bounded
+// native cursor scans. Project CheckResult and family policy fields without
+// building value trees; preserve opaque selection as a source span. Unescaped
 // message bytes remain packed UTF-8 spans; escaped messages use the decoder.
 module mncs.test.check_result_json_native_v1;
 
@@ -19,6 +19,10 @@ record CheckResultJsonNativeRequestV1 {
     check_document_present: bool,
     check_document: json_order.JsonTokenDocumentV1,
     check_input_sha256: [byte; up_to 64],
+    selection_expectation_present: bool,
+    expected_test_identities: [[byte; up_to 512]; up_to 256],
+    inventory_expectation_present: bool,
+    expected_inventory_identity: [byte; up_to 64],
     check_id: [byte; up_to 1024],
     claim: [byte; up_to 1024],
     result_digest: [byte; up_to 64]
@@ -40,9 +44,13 @@ record FamilyResultMetadataV1 {
     selection_present: bool,
     selection_start: u64,
     selection_length: u64,
+    selection_comparison_supported: bool,
+    selection_matches_expected: bool,
     inventory_identity_present: bool,
     inventory_identity_null: bool,
     inventory_identity: [byte; up_to 64],
+    inventory_comparison_supported: bool,
+    inventory_matches_expected: bool,
     run_identity_present: bool,
     run_identity_null: bool,
     run_identity: [byte; up_to 512]
@@ -52,7 +60,14 @@ record CheckArtifactMetadataV1 {
     supported: bool,
     schema_valid: bool,
     verdict_valid: bool,
-    verdict: [byte; up_to 16]
+    verdict: [byte; up_to 16],
+    verdict_comparison_supported: bool,
+    verdict_matches_test_result: bool
+}
+
+record IdentityMinimumV1 {
+    identities: [[byte; up_to 512]; 256],
+    minimum_index: u64
 }
 
 record TokenValueSpanV1 { found: bool, kind: byte, start: u64, length: u64 }
@@ -214,11 +229,11 @@ record StringSkipStateV1 {
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 51];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 50];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 51];
 }
 
 fn empty_span() -> (result: TokenValueSpanV1) {
@@ -1792,9 +1807,117 @@ fn check_result_schema_matches(value: TextValueV1) -> (result: bool) {
     return matches;
 }
 
+fn identity_compare_step(
+    order: byte,
+    left: [byte; up_to 512],
+    right: [byte; up_to 512],
+    common_length: u64,
+    index: u64
+) -> (result: byte) {
+    if order != 0 || index >= common_length { return order; }
+    if left[index] < right[index] { return 1; }
+    if left[index] > right[index] { return 3; }
+    return 0;
+}
+
+fn identity_compare(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: byte) {
+    let common_length: u64 = select(left.len < right.len, left.len, right.len);
+    iterate i up_to 512 carrying order: byte = 0 {
+        next order = identity_compare_step(order, left, right, common_length, i);
+    }
+    if order != 0 { return order; }
+    if left.len < right.len { return 1; }
+    if left.len > right.len { return 3; }
+    return 2;
+}
+
+fn identity_minimum_step(
+    state: IdentityMinimumV1,
+    index: u64,
+    count: u64
+) -> (result: IdentityMinimumV1) {
+    if index >= count || index <= state.minimum_index { return state; }
+    let current: [byte; up_to 512] = state.identities[index];
+    let minimum: [byte; up_to 512] = state.identities[state.minimum_index];
+    if identity_compare(current, minimum) == 1 {
+        return IdentityMinimumV1 { ..state, minimum_index: index };
+    }
+    return state;
+}
+
+fn identity_sort_step(
+    identities: [[byte; up_to 512]; 256],
+    count: u64,
+    index: u64
+) -> (result: [[byte; up_to 512]; 256]) {
+    if index >= count { return identities; }
+    let initial: IdentityMinimumV1 = IdentityMinimumV1 {
+        identities: identities, minimum_index: index
+    };
+    iterate scan_index up_to 256 carrying minimum: IdentityMinimumV1 = initial {
+        next minimum = identity_minimum_step(minimum, scan_index, count);
+    }
+    if minimum.minimum_index == index { return identities; }
+    let selected: [byte; up_to 512] = identities[index];
+    let smallest: [byte; up_to 512] = identities[minimum.minimum_index];
+    let with_smallest: [[byte; up_to 512]; 256] = replace(identities, index, smallest);
+    return replace(with_smallest, minimum.minimum_index, selected);
+}
+
+fn sort_selected_identities(
+    identities: [[byte; up_to 512]; 256],
+    count: u64
+) -> (result: [[byte; up_to 512]; 256]) {
+    iterate index up_to 256 carrying sorted: [[byte; up_to 512]; 256] = identities {
+        next sorted = identity_sort_step(sorted, count, index);
+    }
+    return sorted;
+}
+
+fn selected_identities_match_expected(
+    selected: [[byte; up_to 512]; 256],
+    selected_count: u64,
+    expected: [[byte; up_to 512]; up_to 256]
+) -> (result: bool) {
+    if selected_count != expected.len { return false; }
+    let sorted: [[byte; up_to 512]; 256] = sort_selected_identities(
+        selected, selected_count
+    );
+    iterate i over expected carrying matches: bool = true {
+        next matches = matches && identity_compare(sorted[i], expected[i]) == 2;
+    }
+    return matches;
+}
+
+fn inventory_identity_matches_expected(
+    value: TextValueV1,
+    expected: [byte; up_to 64]
+) -> (result: bool) {
+    if !value.valid || value.length != expected.len { return false; }
+    iterate i over expected carrying matches: bool = true {
+        next matches = matches && value.bytes[i] == expected[i];
+    }
+    return matches;
+}
+
+fn verdict_matches_test_result(
+    check_verdict: TextValueV1,
+    test_verdict: [byte; up_to 16]
+) -> (result: bool) {
+    if !check_verdict.valid || check_verdict.length > 16
+        || check_verdict.length != test_verdict.len {
+        return false;
+    }
+    iterate i over test_verdict carrying matches: bool = true {
+        next matches = matches && check_verdict.bytes[i] == test_verdict[i];
+    }
+    return matches;
+}
+
 fn extract_family_metadata(
     document: json_order.JsonTokenDocumentV1,
-    state: CheckResultTokenStateV1
+    state: CheckResultTokenStateV1,
+    request: CheckResultJsonNativeRequestV1
 ) -> (result: FamilyResultMetadataV1) {
     let schema_value: TextValueV1 = decode_text_value(
         document,
@@ -1829,6 +1952,22 @@ fn extract_family_metadata(
     let selection_span_valid: bool = !state.selection_seen
         || (state.selection_span.found && state.selection_span.kind == 7
             && state.selection_span.length > 0);
+    let selection_comparison_supported: bool = request.selection_expectation_present
+        && state.selected_test_identities_valid
+        && state.selected_test_identity_count <= 256;
+    let selection_matches_expected: bool = selection_comparison_supported
+        && selected_identities_match_expected(
+            state.selected_test_identities,
+            state.selected_test_identity_count,
+            request.expected_test_identities
+        );
+    let inventory_comparison_supported: bool = request.inventory_expectation_present
+        && inventory_value_valid;
+    let inventory_matches_expected: bool = inventory_comparison_supported
+        && state.inventory_identity_seen && !inventory_is_null
+        && inventory_identity_matches_expected(
+            inventory_value, request.expected_inventory_identity
+        );
     let supported: bool = state.valid && json_cursor.is_valid(state.cursor)
         && state.root_is_object && state.verdict_seen && verdict_value.valid
         && verdict_value.length <= 16 && state.selection_valid
@@ -1845,9 +1984,13 @@ fn extract_family_metadata(
         selection_present: state.selection_seen,
         selection_start: state.selection_span.start,
         selection_length: state.selection_span.length,
+        selection_comparison_supported: selection_comparison_supported,
+        selection_matches_expected: selection_matches_expected,
         inventory_identity_present: state.inventory_identity_seen,
         inventory_identity_null: inventory_is_null,
         inventory_identity: widen_text_64(inventory_value.bytes, inventory_value.length),
+        inventory_comparison_supported: inventory_comparison_supported,
+        inventory_matches_expected: inventory_matches_expected,
         run_identity_present: state.run_identity_seen,
         run_identity_null: run_identity_is_null,
         run_identity: widen_text_512(run_identity_value.bytes, run_identity_value.length)
@@ -1859,12 +2002,15 @@ fn empty_check_artifact_metadata() -> (result: CheckArtifactMetadataV1) {
         supported: false,
         schema_valid: false,
         verdict_valid: false,
-        verdict: []
+        verdict: [],
+        verdict_comparison_supported: false,
+        verdict_matches_test_result: false
     };
 }
 
 fn inspect_check_artifact(
-    request: CheckResultJsonNativeRequestV1
+    request: CheckResultJsonNativeRequestV1,
+    family_metadata: FamilyResultMetadataV1
 ) -> (result: CheckArtifactMetadataV1) {
     if !request.check_document_present { return empty_check_artifact_metadata(); }
     let order_request: json_order.JsonOrderRequestV1 = json_order.JsonOrderRequestV1 {
@@ -1894,13 +2040,17 @@ fn inspect_check_artifact(
         FieldLookupV1 { found: tokenized.verdict_seen, value: tokenized.verdict },
         false
     );
+    let verdict_comparison_supported: bool = supported && family_metadata.supported;
     return CheckArtifactMetadataV1 {
         supported: supported,
         schema_valid: supported && tokenized.root_is_object
             && check_result_schema_matches(schema_value),
         verdict_valid: supported && tokenized.root_is_object
             && verdict_value.valid && verdict_value.length <= 16,
-        verdict: widen_text_16(verdict_value.bytes, verdict_value.length)
+        verdict: widen_text_16(verdict_value.bytes, verdict_value.length),
+        verdict_comparison_supported: verdict_comparison_supported,
+        verdict_matches_test_result: verdict_comparison_supported
+            && verdict_matches_test_result(verdict_value, family_metadata.verdict)
     };
 }
 
@@ -1946,9 +2096,11 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
         request.document, tokenized, request
     );
     let family_metadata: FamilyResultMetadataV1 = extract_family_metadata(
-        request.document, tokenized
+        request.document, tokenized, request
     );
-    let check_artifact: CheckArtifactMetadataV1 = inspect_check_artifact(request);
+    let check_artifact: CheckArtifactMetadataV1 = inspect_check_artifact(
+        request, family_metadata
+    );
     let supported: bool = transport_valid && syntax_valid && extracted.supported;
     let selected_request: check_result.CheckResultProjectionRequestV1 = select(
         supported, extracted.request, empty_projection_request(request)

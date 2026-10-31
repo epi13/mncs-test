@@ -936,8 +936,14 @@ class RunnerTests(unittest.TestCase):
                 "schema_valid": True,
                 "verdict_valid": True,
                 "verdict": "PASS",
+                "verdict_comparison_supported": True,
+                "verdict_matches_test_result": True,
             },
         )
+        self.assertTrue(family_metadata_results[0]["selection_comparison_supported"])
+        self.assertTrue(family_metadata_results[0]["selection_matches_expected"])
+        self.assertTrue(family_metadata_results[0]["inventory_comparison_supported"])
+        self.assertTrue(family_metadata_results[0]["inventory_matches_expected"])
         expected_test_result_document = mncs_test.json_bytes(result)
         self.assertNotIn(
             expected_test_result_document,
@@ -979,6 +985,14 @@ class RunnerTests(unittest.TestCase):
             native_json_requests[0]["check_document"],
             expected_check_document["document"],
             "the family validator should receive the exact produced CheckResult bytes",
+        )
+        self.assertEqual(
+            native_json_requests[0]["expected_test_identities"],
+            check["selector"]["test_identities"],
+        )
+        self.assertEqual(
+            native_json_requests[0]["expected_inventory_identity"],
+            check["selector"]["inventory_identity"],
         )
         self.assertIn("test-result-identity.json", native_applications)
         self.assertGreaterEqual(
