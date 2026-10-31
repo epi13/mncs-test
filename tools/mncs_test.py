@@ -55,7 +55,7 @@ PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
-REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/1"
+REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/2"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
@@ -683,14 +683,14 @@ def _native_replay_json_payload(
     )
 
 
-def _native_replay_schema_valid(
+def _native_replay_schema_result(
     document: bytes,
     *,
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
-) -> bool | None:
-    """Check a bounded result document's schema through the MNCS JSON parser."""
+) -> dict[str, Any] | None:
+    """Parse a bounded replay result and return its native field projection."""
     packed = _native_public_result_document_request(document)
     if packed is None:
         return None
@@ -721,6 +721,13 @@ def _native_replay_schema_valid(
     if (
         type(result.get("supported")) is not bool
         or type(result.get("result_schema_valid")) is not bool
+        or type(result.get("text_projection_supported")) is not bool
+        or type(result.get("reproduction_command_present")) is not bool
+        or type(result.get("reproduction_command_start")) is not int
+        or type(result.get("reproduction_command_length")) is not int
+        or type(result.get("reproduction_replay_command_present")) is not bool
+        or type(result.get("reproduction_replay_command_start")) is not int
+        or type(result.get("reproduction_replay_command_length")) is not int
         or type(result.get("document_length")) is not int
         or result.get("document_length") != source_length
         or result.get("input_sha256") != start_request["input_sha256"]
@@ -728,7 +735,98 @@ def _native_replay_schema_valid(
         raise AdapterError("MNCS replay schema app returned malformed validation metadata")
     if not result["supported"]:
         return None
+    for field in (
+        ("reproduction_command_present", "reproduction_command_start", "reproduction_command_length"),
+        ("reproduction_replay_command_present", "reproduction_replay_command_start", "reproduction_replay_command_length"),
+    ):
+        present_name, start_name, length_name = field
+        present = result[present_name]
+        start = result[start_name]
+        length = result[length_name]
+        if present:
+            if start <= 0 or length < 0 or start + length >= source_length:
+                raise AdapterError("MNCS replay schema app returned an out-of-bounds text span")
+        elif start != 0 or length != 0:
+            raise AdapterError("MNCS replay schema app returned a span without a value")
+    return result
+
+
+def _native_replay_schema_valid(
+    document: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bool | None:
+    """Check a bounded result document's schema through the MNCS JSON parser."""
+    result = _native_replay_schema_result(
+        document,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if result is None:
+        return None
     return result["result_schema_valid"]
+
+
+def _native_replay_text_commands(
+    source: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[str, str] | None:
+    """Project replay command fields natively, decoding only string scalars on the host."""
+    ordered = _native_public_result_key_order(
+        source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if ordered is None:
+        return None
+    result = _native_replay_schema_result(
+        ordered,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if (
+        result is None
+        or result["result_schema_valid"] is not True
+        or result["text_projection_supported"] is not True
+    ):
+        return None
+
+    def decode_span(present_name: str, start_name: str, length_name: str) -> str:
+        if not result[present_name]:
+            return ""
+        start = result[start_name]
+        length = result[length_name]
+        encoded = ordered[start - 1 : start + length + 1]
+        if len(encoded) != length + 2 or encoded[0] != 34 or encoded[-1] != 34:
+            raise AdapterError("MNCS replay schema app returned a malformed JSON string span")
+        try:
+            value = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterError("MNCS replay schema app returned an invalid JSON string span") from error
+        if not isinstance(value, str):
+            raise AdapterError("MNCS replay schema app returned a non-text reproduction value")
+        return value
+
+    return (
+        decode_span(
+            "reproduction_command_present",
+            "reproduction_command_start",
+            "reproduction_command_length",
+        ),
+        decode_span(
+            "reproduction_replay_command_present",
+            "reproduction_replay_command_start",
+            "reproduction_replay_command_length",
+        ),
+    )
 
 
 def _public_result_input_chunks(document: bytes) -> list[bytes]:
@@ -8350,6 +8448,19 @@ def replay_command(args: argparse.Namespace) -> int:
             native_payload = None
         if native_payload is not None:
             sys.stdout.write(native_payload[0].decode("utf-8"))
+            return EXIT_SUCCESS
+    if args.format == "text" and selected_mncs is not None:
+        try:
+            native_commands = _native_replay_text_commands(
+                source_document,
+                mncs=selected_mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+        except AdapterError:
+            native_commands = None
+        if native_commands is not None:
+            sys.stdout.write(f"{native_commands[0]}\n{native_commands[1]}\n")
             return EXIT_SUCCESS
 
     try:

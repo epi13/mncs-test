@@ -18,18 +18,28 @@ record ReplaySchemaResultV1 {
     schema_version: [byte; up_to 64],
     supported: bool,
     result_schema_valid: bool,
+    text_projection_supported: bool,
+    reproduction_command_present: bool,
+    reproduction_command_start: u64,
+    reproduction_command_length: u64,
+    reproduction_replay_command_present: bool,
+    reproduction_replay_command_start: u64,
+    reproduction_replay_command_length: u64,
     document_length: u64,
     input_sha256: [byte; up_to 64]
 }
 
 record SchemaFieldV1 { found: bool, valid: bool }
+record FieldLookupV1 { found: bool, value: json_order.JsonValueV1 }
+record TextSpanV1 { valid: bool, present: bool, start: u64, length: u64 }
+record ReplayTextFieldsV1 { supported: bool, command: TextSpanV1, replay_command: TextSpanV1 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 47, 50];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -47,6 +57,139 @@ fn schema_key() -> (result: json_order.KeyV1) {
         ordered: [115, 99, 104, 101, 109, 97, 95, 118, 101, 114, 115, 105, 111, 110],
         ordered_length: 14,
         valid: true
+    };
+}
+
+fn reproduction_key() -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: [114, 101, 112, 114, 111, 100, 117, 99, 116, 105, 111, 110],
+        ordered_length: 12,
+        valid: true
+    };
+}
+
+fn command_key() -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: [99, 111, 109, 109, 97, 110, 100],
+        ordered_length: 7,
+        valid: true
+    };
+}
+
+fn replay_command_key() -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: [114, 101, 112, 108, 97, 121, 95, 99, 111, 109, 109, 97, 110, 100],
+        ordered_length: 14,
+        valid: true
+    };
+}
+
+fn empty_field_lookup() -> (result: FieldLookupV1) {
+    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn empty_text_span() -> (result: TextSpanV1) {
+    return TextSpanV1 { valid: true, present: false, start: 0, length: 0 };
+}
+
+fn unsupported_text_fields() -> (result: ReplayTextFieldsV1) {
+    return ReplayTextFieldsV1 {
+        supported: false,
+        command: empty_text_span(),
+        replay_command: empty_text_span()
+    };
+}
+
+fn lookup_field(
+    fields: json_order.JsonValueV1,
+    wanted: json_order.KeyV1
+) -> (result: FieldLookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } => match json_order.compare_key(wanted, current) {
+            json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
+            json_order.KeyOrderV1.Before => empty_field_lookup(),
+            json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+        },
+        Empty => empty_field_lookup(),
+        Null => empty_field_lookup(),
+        Raw { start: start, length: length } => empty_field_lookup(),
+        String { start: start, length: length } => empty_field_lookup(),
+        Array { items: items } => empty_field_lookup(),
+        Object { fields: nested } => empty_field_lookup(),
+        ArrayNil => empty_field_lookup(),
+        ArrayCons { head: head, tail: tail } => empty_field_lookup(),
+        ObjectNil => empty_field_lookup()
+    };
+}
+
+fn text_span(field: FieldLookupV1) -> (result: TextSpanV1) {
+    return match field.value {
+        json_order.JsonValueV1.String { start: start, length: length } => TextSpanV1 {
+            valid: true, present: field.found, start: start, length: length
+        },
+        Empty => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        Null => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        Raw { start: start, length: length } => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        Array { items: items } => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        Object { fields: fields } => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        ArrayNil => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        ArrayCons { head: head, tail: tail } => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        ObjectNil => TextSpanV1 { ..empty_text_span(), valid: !field.found },
+        ObjectCons { key: key, value: value, tail: tail } => TextSpanV1 { ..empty_text_span(), valid: !field.found }
+    };
+}
+
+fn text_fields_from_object(fields: json_order.JsonValueV1) -> (result: ReplayTextFieldsV1) {
+    let command: TextSpanV1 = text_span(lookup_field(fields, command_key()));
+    let replay_command: TextSpanV1 = text_span(lookup_field(fields, replay_command_key()));
+    return ReplayTextFieldsV1 {
+        supported: command.valid && replay_command.valid,
+        command: command,
+        replay_command: replay_command
+    };
+}
+
+fn text_fields_from_root_object(fields: json_order.JsonValueV1) -> (result: ReplayTextFieldsV1) {
+    let reproduction: FieldLookupV1 = lookup_field(fields, reproduction_key());
+    if !reproduction.found {
+        return ReplayTextFieldsV1 {
+            supported: true,
+            command: empty_text_span(),
+            replay_command: empty_text_span()
+        };
+    }
+    return match reproduction.value {
+        json_order.JsonValueV1.Object { fields: nested } => text_fields_from_object(nested),
+        Empty => unsupported_text_fields(),
+        Null => unsupported_text_fields(),
+        Raw { start: start, length: length } => unsupported_text_fields(),
+        String { start: start, length: length } => unsupported_text_fields(),
+        Array { items: items } => unsupported_text_fields(),
+        ArrayNil => unsupported_text_fields(),
+        ArrayCons { head: head, tail: tail } => unsupported_text_fields(),
+        ObjectNil => unsupported_text_fields(),
+        ObjectCons { key: key, value: value, tail: tail } => unsupported_text_fields()
+    };
+}
+
+fn replay_text_fields(value: json_order.JsonValueV1) -> (result: ReplayTextFieldsV1) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => text_fields_from_root_object(fields),
+        Empty => unsupported_text_fields(),
+        Null => unsupported_text_fields(),
+        Raw { start: start, length: length } => unsupported_text_fields(),
+        String { start: start, length: length } => unsupported_text_fields(),
+        Array { items: items } => unsupported_text_fields(),
+        ArrayNil => unsupported_text_fields(),
+        ArrayCons { head: head, tail: tail } => unsupported_text_fields(),
+        ObjectNil => unsupported_text_fields(),
+        ObjectCons { key: key, value: value, tail: tail } => unsupported_text_fields()
     };
 }
 
@@ -153,6 +296,13 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
             schema_version: result_schema(),
             supported: false,
             result_schema_valid: false,
+            text_projection_supported: false,
+            reproduction_command_present: false,
+            reproduction_command_start: 0,
+            reproduction_command_length: 0,
+            reproduction_replay_command_present: false,
+            reproduction_replay_command_start: 0,
+            reproduction_replay_command_length: 0,
             document_length: 0,
             input_sha256: request.input_sha256
         };
@@ -163,10 +313,18 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
     let parsed: json_order.ParseStateV1 = json_order.parse_document(request.document);
     let supported: bool = parsed.valid && parsed.has_root;
     let result_valid: bool = supported && root_schema_matches(parsed.root, request.document);
+    let text_fields: ReplayTextFieldsV1 = replay_text_fields(parsed.root);
     let response: ReplaySchemaResultV1 = ReplaySchemaResultV1 {
         schema_version: result_schema(),
         supported: supported,
         result_schema_valid: result_valid,
+        text_projection_supported: supported && result_valid && text_fields.supported,
+        reproduction_command_present: text_fields.command.present,
+        reproduction_command_start: text_fields.command.start,
+        reproduction_command_length: text_fields.command.length,
+        reproduction_replay_command_present: text_fields.replay_command.present,
+        reproduction_replay_command_start: text_fields.replay_command.start,
+        reproduction_replay_command_length: text_fields.replay_command.length,
         document_length: request.document.byte_length,
         input_sha256: request.input_sha256
     };

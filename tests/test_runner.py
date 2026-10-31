@@ -217,6 +217,85 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("mncs-test run --manifest x", completed.stdout)
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_replay_text_projects_commands_natively_without_python_result_tree(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-replay-text-native-") as directory:
+            result_path = Path(directory) / "result.json"
+            stored = {
+                "schema_version": "mncs.test-result/1",
+                "reproduction": {
+                    "command": 'mncs-test run --manifest "two words"',
+                    "replay_command": "mncs-test replay --format text",
+                },
+                "details": {"unicode": "Lúna 東京"},
+            }
+            result_path.write_bytes(mncs_test.json_bytes(stored))
+            source_text = result_path.read_text(encoding="utf-8")
+            arguments = mncs_test.parser().parse_args(
+                ["replay", "--result", str(result_path), "--format", "text", "--mncs", str(MNCS)]
+            )
+            output = io.StringIO()
+            source_tree_parses = []
+            native_apps = []
+            real_json_loads = mncs_test.json.loads
+            real_run_native_app = mncs_test.run_native_app
+
+            def json_loads(value, *args, **kwargs):
+                if value == source_text:
+                    source_tree_parses.append(value)
+                    raise AssertionError("native text replay must not construct the full Python result tree")
+                return real_json_loads(value, *args, **kwargs)
+
+            def run_native_app(*args, **kwargs):
+                native_apps.append(args[0])
+                return real_run_native_app(*args, **kwargs)
+
+            with mock.patch.object(
+                mncs_test,
+                "run_native_app",
+                side_effect=run_native_app,
+            ), mock.patch.object(
+                mncs_test.json,
+                "loads",
+                side_effect=json_loads,
+            ), redirect_stdout(output):
+                exit_code = mncs_test.replay_command(arguments)
+
+            self.assertEqual(exit_code, mncs_test.EXIT_SUCCESS)
+            self.assertEqual(
+                output.getvalue(),
+                'mncs-test run --manifest "two words"\nmncs-test replay --format text\n',
+            )
+            self.assertEqual(source_tree_parses, [])
+            self.assertEqual(
+                native_apps,
+                [
+                    "test-public-result-json-key-order.json",
+                    "test-replay-schema.json",
+                ],
+            )
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_replay_text_falls_back_for_non_text_reproduction_values(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-replay-text-fallback-") as directory:
+            result_path = Path(directory) / "result.json"
+            result_path.write_bytes(
+                mncs_test.json_bytes(
+                    {
+                        "schema_version": "mncs.test-result/1",
+                        "reproduction": {"command": 7},
+                    }
+                )
+            )
+            arguments = mncs_test.parser().parse_args(
+                ["replay", "--result", str(result_path), "--format", "text", "--mncs", str(MNCS)]
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = mncs_test.replay_command(arguments)
+            self.assertEqual(exit_code, mncs_test.EXIT_SUCCESS)
+            self.assertEqual(output.getvalue(), "7\n\n")
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_replay_json_uses_native_formatter_without_executing_record(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-replay-json-") as directory:
             root = Path(directory)
