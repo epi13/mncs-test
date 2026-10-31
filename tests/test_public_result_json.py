@@ -147,6 +147,49 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
     ]
 
 
+def test_artifact_store_json_uses_native_serializer_and_keeps_golden_digest(
+    tmp_path: Path,
+) -> None:
+    value = {
+        "schema_version": "mncs.test-inventory/1",
+        "tests": [
+            {"name": "compiler.case.alpha", "source": "alpha.mncs"},
+            {"name": "compiler.case.beta", "source": "βeta.mncs"},
+        ],
+    }
+    expected = _python_result_bytes(value)
+    store = mncs_test.ArtifactStore(
+        tmp_path / "artifacts",
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        relative = store.write_json(
+            "compiler/direct-test-inventory.json",
+            value,
+            "compiler-test-inventory",
+        )
+
+    artifact = tmp_path / "artifacts" / relative
+    assert relative == "compiler/direct-test-inventory.json"
+    assert artifact.read_bytes() == expected
+    assert store.items == [
+        {
+            "path": relative,
+            "kind": "compiler-test-inventory",
+            "sha256": hashlib.sha256(expected).hexdigest(),
+        }
+    ]
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+    ]
+
+
 def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path) -> None:
     value = {
         "z": 0,

@@ -3323,6 +3323,20 @@ class ArtifactStore:
         return digest, result
 
     def write(self, relative: str, payload: bytes, kind: str) -> str:
+        digest = self.digest_payload(payload)
+        return self._record_payload(relative, payload, kind, digest)
+
+    def write_json(self, relative: str, value: Any, kind: str) -> str:
+        """Serialize a JSON artifact through the native public-result path."""
+        payload, digest = _public_result_json_payload(
+            value,
+            mncs=self.mncs,
+            cwd=self.cwd,
+            environment=self.environment,
+        )
+        return self._record_payload(relative, payload, kind, digest)
+
+    def _record_payload(self, relative: str, payload: bytes, kind: str, digest: str) -> str:
         path = (self.root / relative).resolve()
         try:
             path.relative_to(self.root)
@@ -3330,7 +3344,6 @@ class ArtifactStore:
             raise AdapterError(f"unsafe artifact path: {relative}") from error
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
-        digest = self.digest_payload(payload)
         item = {"path": path.relative_to(self.root).as_posix(), "kind": kind, "sha256": digest}
         self.items.append(item)
         return item["path"]
@@ -7554,7 +7567,11 @@ def run_manifest(args: argparse.Namespace) -> int:
                         cache=args.vm_cache, timeout=args.timeout_seconds or manifest["timeout_seconds"])
                 except (OSError, ValueError, RuntimeError) as error:
                     raise AdapterError("canonical compiler preparation refused: " + str(error)) from error
-                inventory_path = artifacts.write("compiler/direct-test-inventory.json", json_bytes(test_inventory), "compiler-test-inventory")
+                inventory_path = artifacts.write_json(
+                    "compiler/direct-test-inventory.json",
+                    test_inventory,
+                    "compiler-test-inventory",
+                )
                 inventory_transport = {"process": {"stdout_artifact": inventory_path}, "document": test_inventory}
             else:
                 test_inventory, inventory_transport = compiler_inventory(
