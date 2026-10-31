@@ -218,8 +218,8 @@ admits at most 65,536 input bytes in 64 UTF-8-safe chunks of up to 1,024 bytes.
 The adapter returns to the compatibility path if UTF-8 boundaries would
 require a 65th chunk. For CheckResult, the adapter also preflights native
 execution to 16,384 document bytes: the fixed 8,000,000-step application
-budget is exhausted by larger documents in the recursive value-tree
-extractor. Within that execution bound, the extractor supports 512 JSON
+budget bounds the native token extraction path. Within that execution bound,
+the extractor supports 512 JSON
 values, depth 12, 64 object members, 256-byte decoded keys, 1,024 decoded
 bytes for ordinary text fields, and 256 test rows. Failure messages decode
 raw spans up to 10,240 bytes in at most twelve UTF-8-safe windows and return
@@ -230,7 +230,15 @@ Differential tests cover the exact 16,384-byte execution bound, a 10,240-byte
 native message, fallback at 10,241 bytes, UTF-8-safe 65th-chunk preflight, a
 surrogate-pair escape across a raw-window boundary, and the compatibility path
 for larger documents. Existing Test JSON and CheckResult capabilities remain
-sufficient; this slice adds no duplicate Stdlib parser.
+sufficient; this slice adds no duplicate Stdlib parser. The P-011 follow-up
+replaces the CheckResult extractor's `JsonValueV1` tree traversal with a
+bounded cursor event stream and source spans. It retains the independent
+`json.v1` syntax pass, rejects duplicate keys even when they are unknown to
+CheckResult, and stores only decoded key histories needed for that check.
+Unescaped failure messages reuse packed UTF-8-safe source chunks directly;
+escaped strings continue through the native decoder. The exact 10,240-byte
+message and 16,384-byte document cases pass through the native application at
+the existing 8,000,000-step ceiling.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

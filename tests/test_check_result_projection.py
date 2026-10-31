@@ -157,6 +157,47 @@ def test_native_projection_uses_external_check_id_when_source_id_is_missing(
     assert native_responses[0]["supported"] is True
 
 
+def test_native_projection_rejects_duplicate_unrecognized_json_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "classification": "pass",
+        "failure_class": "none",
+        "summary": {},
+        "tests": [],
+    }
+    document = (
+        b'{"schema_version":"mncs.test-result/1","provider":"mncs-test",'
+        b'"verdict":"PASS","classification":"pass","failure_class":"none",'
+        b'"summary":{},"tests":[],"extra":1,"\\u0065xtra":2}'
+    )
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    mncs_test.check_result(
+        result,
+        "7" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:duplicate-key",
+        test_result_document=document,
+    )
+
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is False
+
+
 def test_native_source_projection_decodes_escaped_values_and_utf8_failure_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

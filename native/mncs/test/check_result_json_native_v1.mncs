@@ -1,12 +1,14 @@
 mncs 0.18;
 
-// Read the retained TestResult as a bounded native JSON value, project only
-// the fields needed by CheckResult, and leave opaque selection with the
-// adapter. The shared Test JSON parser retains source spans and decodes text
-// only when a consumer asks for a bounded field.
+// Validate the retained TestResult JSON, then project only CheckResult fields
+// from bounded native cursor tokens. Keep source spans instead of a JsonValue
+// tree, and leave opaque selection with the adapter. Unescaped message bytes
+// remain packed UTF-8 spans; escaped messages use the bounded native decoder.
 module mncs.test.check_result_json_native_v1;
 
 use mncs.std.application.v1;
+use mncs.std.json.v1 as json;
+use mncs.std.json_cursor.v1 as json_cursor;
 use mncs.test.public_result_json_key_order_v1 as json_order;
 use mncs.test.check_result_projection_v1 as check_result;
 
@@ -25,10 +27,9 @@ record CheckResultJsonNativeResultV1 {
     projection: check_result.CheckResultProjectionV1
 }
 
-record FieldLookupV1 {
-    found: bool,
-    value: json_order.JsonValueV1
-}
+record TokenValueSpanV1 { found: bool, kind: byte, start: u64, length: u64 }
+
+record FieldLookupV1 { found: bool, value: TokenValueSpanV1 }
 
 record TextValueV1 {
     valid: bool,
@@ -60,13 +61,15 @@ record MessageProjectionV1 {
     count: u64
 }
 
+record RawMessageBuildStateV1 {
+    projection: MessageProjectionV1,
+    base: u64,
+    start: u64,
+    end: u64
+}
+
 record NumberValueV1 { valid: bool, value: u64 }
 record NumberParseV1 { valid: bool, value: u64 }
-
-record SummaryProjectionV1 {
-    valid: bool,
-    value: check_result.CheckSummaryV1
-}
 
 record TestRowsV1 {
     valid: bool,
@@ -74,9 +77,95 @@ record TestRowsV1 {
     count: u64
 }
 
+enum TokenTestRowsListV1 {
+    Nil,
+    Cons { head: check_result.CheckTestV1, tail: TokenTestRowsListV1 }
+}
+
+record TokenTestRowsV1 {
+    valid: bool,
+    rows: TokenTestRowsListV1,
+    count: u64
+}
+
+record TokenRowsBuildStateV1 {
+    rows: [check_result.CheckTestV1; 256],
+    source: TokenTestRowsListV1
+}
+
 record ExtractedTestResultV1 {
     supported: bool,
     request: check_result.CheckResultProjectionRequestV1
+}
+
+enum TokenKeyListV1 { Nil, Cons { head: json_order.KeyV1, tail: TokenKeyListV1 } }
+
+record CheckResultTokenStateV1 {
+    cursor: json_cursor.Cursor,
+    scanner_string_has_escape: bool,
+    contexts: [byte; 12],
+    pending_tags: [byte; 12],
+    member_counts: [u64; 12],
+    key_history: [TokenKeyListV1; 12],
+    value_count: u64,
+    valid: bool,
+    root_is_object: bool,
+    id_seen: bool,
+    provider_seen: bool,
+    verdict_seen: bool,
+    classification_seen: bool,
+    failure_class_seen: bool,
+    id: TokenValueSpanV1,
+    provider: TokenValueSpanV1,
+    verdict: TokenValueSpanV1,
+    classification: TokenValueSpanV1,
+    failure_class: TokenValueSpanV1,
+    scope_seen: bool,
+    scope_valid: bool,
+    manifest: TokenValueSpanV1,
+    summary_seen: bool,
+    summary_valid: bool,
+    summary: check_result.CheckSummaryV1,
+    tests_seen: bool,
+    tests_valid: bool,
+    tests: TokenTestRowsV1,
+    failure_is_object: bool,
+    failure_message: TokenValueSpanV1,
+    failure_message_has_escape: bool,
+    source_sha256: TokenValueSpanV1,
+    run_id: TokenValueSpanV1,
+    row_id: TokenValueSpanV1,
+    row_verdict: TokenValueSpanV1,
+    row_valid: bool,
+    row_seen_id: bool,
+    row_seen_verdict: bool
+}
+
+record TokenKeyHistoryScanV1 {
+    remaining: TokenKeyListV1,
+    duplicate: bool
+}
+
+record TokenEventV1 {
+    kind: byte,
+    event: byte,
+    start: u64,
+    end: u64,
+    depth: byte,
+    has_escape: bool
+}
+
+record TokenCaptureStateV1 {
+    cursor: json_cursor.Cursor,
+    events: [TokenEventV1; 64],
+    string_had_escape: bool,
+    count: u64
+}
+
+record StringSkipStateV1 {
+    cursor: json_cursor.Cursor,
+    closed: bool,
+    had_escape: bool
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
@@ -87,8 +176,12 @@ fn result_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 49];
 }
 
-fn empty_lookup() -> (result: FieldLookupV1) {
-    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+fn empty_span() -> (result: TokenValueSpanV1) {
+    return TokenValueSpanV1 { found: false, kind: 0, start: 0, length: 0 };
+}
+
+fn invalid_span() -> (result: TokenValueSpanV1) {
+    return TokenValueSpanV1 { found: true, kind: 0, start: 0, length: 0 };
 }
 
 fn empty_text() -> (result: TextValueV1) {
@@ -212,24 +305,72 @@ fn decode_message_span(
     };
 }
 
+fn append_raw_message_chunk(
+    state: RawMessageBuildStateV1,
+    chunk: json_order.JsonTokenInputChunkV1
+) -> (result: RawMessageBuildStateV1) {
+    let chunk_end: u64 = state.base +% chunk.length;
+    let overlap_start: u64 = select(state.start > state.base, state.start, state.base);
+    let overlap_end: u64 = select(state.end < chunk_end, state.end, chunk_end);
+    if overlap_start < overlap_end && state.projection.count < 64 {
+        let begin: u64 = overlap_start -% state.base;
+        let finish: u64 = overlap_end -% state.base;
+        let bytes: [byte; up_to 1024] = chunk.bytes[begin..finish];
+        let next_projection: MessageProjectionV1 = MessageProjectionV1 {
+            ..state.projection,
+            chunks: replace(state.projection.chunks, state.projection.count, bytes),
+            count: state.projection.count +% 1
+        };
+        return RawMessageBuildStateV1 {
+            ..state, projection: next_projection, base: chunk_end
+        };
+    }
+    return RawMessageBuildStateV1 { ..state, base: chunk_end };
+}
+
+fn raw_message_span(
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: MessageProjectionV1) {
+    // Input chunks are already UTF-8-safe; an unescaped JSON string has the
+    // same bytes as its decoded value, so retain source slices directly.
+    if length > 10240 { return empty_message_projection(false, true); }
+    let initial: RawMessageBuildStateV1 = RawMessageBuildStateV1 {
+        projection: empty_message_projection(true, true),
+        base: 0,
+        start: start,
+        end: start +% length
+    };
+    iterate i over document.chunks carrying built: RawMessageBuildStateV1 = initial {
+        next built = append_raw_message_chunk(built, document.chunks[i]);
+    }
+    return MessageProjectionV1 {
+        ..built.projection,
+        valid: built.projection.valid && built.base >= built.end
+            && built.projection.count <= 64
+    };
+}
+
 fn decode_failure_message(
     document: json_order.JsonTokenDocumentV1,
-    field: FieldLookupV1
+    field: FieldLookupV1,
+    has_escape: bool
 ) -> (result: MessageProjectionV1) {
     if !field.found { return empty_message_projection(true, false); }
-    return match field.value {
-        json_order.JsonValueV1.String { start: start, length: length } =>
-            decode_message_span(document, start, length),
-        Null => empty_message_projection(false, false),
-        Empty => empty_message_projection(false, false),
-        Raw { start: raw_start, length: raw_length } => empty_message_projection(false, false),
-        Array { items: items } => empty_message_projection(false, false),
-        Object { fields: fields } => empty_message_projection(false, false),
-        ArrayNil => empty_message_projection(false, false),
-        ArrayCons { head: head, tail: tail } => empty_message_projection(false, false),
-        ObjectNil => empty_message_projection(false, false),
-        ObjectCons { key: key, value: value, tail: tail } => empty_message_projection(false, false)
-    };
+    if field.value.kind != 2 { return empty_message_projection(false, false); }
+    if !has_escape {
+        return raw_message_span(
+            document,
+            field.value.start +% 1,
+            field.value.length -% 2
+        );
+    }
+    return decode_message_span(
+        document,
+        field.value.start +% 1,
+        field.value.length -% 2
+    );
 }
 
 fn key_value(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
@@ -299,56 +440,6 @@ fn widen_text_1024(input: [byte; up_to 1024], length: u64) -> (result: [byte; up
     }
     let bounded_length: u64 = select(length < 1024, length, 1024);
     return output[0..bounded_length];
-}
-
-fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: FieldLookupV1) {
-    return match fields {
-        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } => match json_order.compare_key(wanted, current) {
-            json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
-            json_order.KeyOrderV1.Before => empty_lookup(),
-            json_order.KeyOrderV1.After => lookup_field(tail, wanted)
-        },
-        Empty => empty_lookup(),
-        Null => empty_lookup(),
-        Raw { start: start, length: length } => empty_lookup(),
-        String { start: start, length: length } => empty_lookup(),
-        Array { items: items } => empty_lookup(),
-        Object { fields: nested } => empty_lookup(),
-        ArrayNil => empty_lookup(),
-        ArrayCons { head: head, tail: tail } => empty_lookup(),
-        ObjectNil => empty_lookup()
-    };
-}
-
-fn object_field(object: json_order.JsonValueV1, name: [byte; up_to 32]) -> (result: FieldLookupV1) {
-    let wanted: json_order.KeyV1 = key_value(name);
-    return match object {
-        json_order.JsonValueV1.Object { fields: fields } => lookup_field(fields, wanted),
-        Empty => empty_lookup(),
-        Null => empty_lookup(),
-        Raw { start: start, length: length } => empty_lookup(),
-        String { start: start, length: length } => empty_lookup(),
-        Array { items: items } => empty_lookup(),
-        ArrayNil => empty_lookup(),
-        ArrayCons { head: head, tail: tail } => empty_lookup(),
-        ObjectNil => empty_lookup(),
-        ObjectCons { key: key, value: value, tail: tail } => empty_lookup()
-    };
-}
-
-fn lookup_is_object(value: json_order.JsonValueV1) -> (result: bool) {
-    return match value {
-        json_order.JsonValueV1.Object { fields: fields } => true,
-        Empty => false,
-        Null => false,
-        Raw { start: start, length: length } => false,
-        String { start: start, length: length } => false,
-        Array { items: items } => false,
-        ArrayNil => false,
-        ArrayCons { head: head, tail: tail } => false,
-        ObjectNil => false,
-        ObjectCons { key: key, value: inner, tail: tail } => false
-    };
 }
 
 fn text_decoded_byte(state: TextDecodeStateV1, value: byte) -> (result: TextDecodeStateV1) {
@@ -484,22 +575,15 @@ fn decode_text_span(
 fn decode_text_value(
     document: json_order.JsonTokenDocumentV1,
     field: FieldLookupV1,
-    missing_allowed: bool,
-    null_allowed: bool
+    missing_allowed: bool
 ) -> (result: TextValueV1) {
     if !field.found { return TextValueV1 { ..empty_text(), valid: missing_allowed }; }
-    return match field.value {
-        json_order.JsonValueV1.String { start: start, length: length } => decode_text_span(document, start, length),
-        Null => TextValueV1 { ..empty_text(), valid: null_allowed },
-        Empty => TextValueV1 { ..empty_text(), valid: false },
-        Raw { start: raw_start, length: raw_length } => TextValueV1 { ..empty_text(), valid: false },
-        Array { items: items } => TextValueV1 { ..empty_text(), valid: false },
-        Object { fields: fields } => TextValueV1 { ..empty_text(), valid: false },
-        ArrayNil => TextValueV1 { ..empty_text(), valid: false },
-        ArrayCons { head: head, tail: tail } => TextValueV1 { ..empty_text(), valid: false },
-        ObjectNil => TextValueV1 { ..empty_text(), valid: false },
-        ObjectCons { key: key, value: value, tail: tail } => TextValueV1 { ..empty_text(), valid: false }
-    };
+    if field.value.kind != 2 { return TextValueV1 { ..empty_text(), valid: false }; }
+    return decode_text_span(
+        document,
+        field.value.start +% 1,
+        field.value.length -% 2
+    );
 }
 
 fn parse_number_step(
@@ -540,128 +624,8 @@ fn unsigned_value(
     missing_allowed: bool
 ) -> (result: NumberValueV1) {
     if !field.found { return NumberValueV1 { valid: missing_allowed, value: 0 }; }
-    return match field.value {
-        json_order.JsonValueV1.Raw { start: start, length: length } => parse_unsigned_span(document, start, length),
-        Empty => NumberValueV1 { valid: false, value: 0 },
-        Null => NumberValueV1 { valid: false, value: 0 },
-        String { start: start, length: length } => NumberValueV1 { valid: false, value: 0 },
-        Array { items: items } => NumberValueV1 { valid: false, value: 0 },
-        Object { fields: fields } => NumberValueV1 { valid: false, value: 0 },
-        ArrayNil => NumberValueV1 { valid: false, value: 0 },
-        ArrayCons { head: head, tail: tail } => NumberValueV1 { valid: false, value: 0 },
-        ObjectNil => NumberValueV1 { valid: false, value: 0 },
-        ObjectCons { key: key, value: value, tail: tail } => NumberValueV1 { valid: false, value: 0 }
-    };
-}
-
-fn summary_value(document: json_order.JsonTokenDocumentV1, summary: FieldLookupV1) -> (result: SummaryProjectionV1) {
-    if !summary.found {
-        return SummaryProjectionV1 {
-            valid: true,
-            value: check_result.CheckSummaryV1 { passed: 0, failed: 0, skipped: 0 }
-        };
-    }
-    if !lookup_is_object(summary.value) {
-        return SummaryProjectionV1 {
-            valid: false,
-            value: check_result.CheckSummaryV1 { passed: 0, failed: 0, skipped: 0 }
-        };
-    }
-    let passed: NumberValueV1 = unsigned_value(document, object_field(summary.value, [112, 97, 115, 115, 101, 100]), true);
-    let failed: NumberValueV1 = unsigned_value(document, object_field(summary.value, [102, 97, 105, 108, 101, 100]), true);
-    let skipped: NumberValueV1 = unsigned_value(document, object_field(summary.value, [115, 107, 105, 112, 112, 101, 100]), true);
-    return SummaryProjectionV1 {
-        valid: passed.valid && failed.valid && skipped.valid,
-        value: check_result.CheckSummaryV1 {
-            passed: passed.value,
-            failed: failed.value,
-            skipped: skipped.value
-        }
-    };
-}
-
-fn empty_test_rows() -> (result: TestRowsV1) {
-    let empty: check_result.CheckTestV1 = check_result.CheckTestV1 { id: [], verdict: [] };
-    return TestRowsV1 { valid: true, rows: [empty; 256], count: 0 };
-}
-
-fn append_object_test_row(
-    state: TestRowsV1,
-    document: json_order.JsonTokenDocumentV1,
-    fields: json_order.JsonValueV1
-) -> (result: TestRowsV1) {
-    if state.count >= 256 { return TestRowsV1 { ..state, valid: false }; }
-    let id: TextValueV1 = decode_text_value(
-        document, lookup_field(fields, key_value([105, 100])), true, true
-    );
-    let verdict_field: FieldLookupV1 = lookup_field(fields, key_value([118, 101, 114, 100, 105, 99, 116]));
-    let verdict: TextValueV1 = decode_text_value(document, verdict_field, true, false);
-    if !id.valid || !verdict.valid || id.length > 512 || verdict.length > 16 {
-        return TestRowsV1 { ..state, valid: false };
-    }
-    let row: check_result.CheckTestV1 = check_result.CheckTestV1 {
-        id: widen_text_512(id.bytes, id.length),
-        verdict: widen_text_16(verdict.bytes, verdict.length)
-    };
-    return TestRowsV1 {
-        rows: replace(state.rows, state.count, row),
-        count: state.count +% 1,
-        valid: true
-    };
-}
-
-fn append_test_row(
-    state: TestRowsV1,
-    document: json_order.JsonTokenDocumentV1,
-    item: json_order.JsonValueV1
-) -> (result: TestRowsV1) {
-    return match item {
-        json_order.JsonValueV1.Object { fields: fields } => append_object_test_row(state, document, fields),
-        Empty => state,
-        Null => state,
-        Raw { start: start, length: length } => state,
-        String { start: start, length: length } => state,
-        Array { items: items } => state,
-        ArrayNil => state,
-        ArrayCons { head: head, tail: tail } => state,
-        ObjectNil => state,
-        ObjectCons { key: key, value: value, tail: tail } => state
-    };
-}
-
-fn collect_test_rows(
-    items: json_order.JsonValueV1,
-    state: TestRowsV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: TestRowsV1) {
-    return match items {
-        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => collect_test_rows(tail, append_test_row(state, document, head), document),
-        ArrayNil => state,
-        Empty => TestRowsV1 { ..state, valid: false },
-        Null => TestRowsV1 { ..state, valid: false },
-        Raw { start: start, length: length } => TestRowsV1 { ..state, valid: false },
-        String { start: start, length: length } => TestRowsV1 { ..state, valid: false },
-        Array { items: nested } => TestRowsV1 { ..state, valid: false },
-        Object { fields: fields } => TestRowsV1 { ..state, valid: false },
-        ObjectNil => TestRowsV1 { ..state, valid: false },
-        ObjectCons { key: key, value: value, tail: tail } => TestRowsV1 { ..state, valid: false }
-    };
-}
-
-fn test_rows(document: json_order.JsonTokenDocumentV1, tests: FieldLookupV1) -> (result: TestRowsV1) {
-    if !tests.found { return empty_test_rows(); }
-    return match tests.value {
-        json_order.JsonValueV1.Array { items: items } => collect_test_rows(items, empty_test_rows(), document),
-        Empty => TestRowsV1 { ..empty_test_rows(), valid: false },
-        Null => TestRowsV1 { ..empty_test_rows(), valid: false },
-        Raw { start: start, length: length } => TestRowsV1 { ..empty_test_rows(), valid: false },
-        String { start: start, length: length } => TestRowsV1 { ..empty_test_rows(), valid: false },
-        Object { fields: fields } => TestRowsV1 { ..empty_test_rows(), valid: false },
-        ArrayNil => TestRowsV1 { ..empty_test_rows(), valid: false },
-        ArrayCons { head: head, tail: tail } => TestRowsV1 { ..empty_test_rows(), valid: false },
-        ObjectNil => TestRowsV1 { ..empty_test_rows(), valid: false },
-        ObjectCons { key: key, value: value, tail: tail } => TestRowsV1 { ..empty_test_rows(), valid: false }
-    };
+    if field.value.kind != 3 { return NumberValueV1 { valid: false, value: 0 }; }
+    return parse_unsigned_span(document, field.value.start, field.value.length);
 }
 
 fn empty_projection_request(metadata: CheckResultJsonNativeRequestV1) -> (result: check_result.CheckResultProjectionRequestV1) {
@@ -687,37 +651,892 @@ fn empty_projection_request(metadata: CheckResultJsonNativeRequestV1) -> (result
     };
 }
 
-fn extract_test_result(
-    root: json_order.JsonValueV1,
+fn empty_token_state() -> (result: CheckResultTokenStateV1) {
+    let zero_summary: check_result.CheckSummaryV1 = check_result.CheckSummaryV1 {
+        passed: 0, failed: 0, skipped: 0
+    };
+    return CheckResultTokenStateV1 {
+        cursor: json_cursor.init(),
+        scanner_string_has_escape: false,
+        contexts: [0; 12],
+        pending_tags: [0; 12],
+        member_counts: [0; 12],
+        key_history: [TokenKeyListV1.Nil; 12],
+        value_count: 0,
+        valid: true,
+        root_is_object: false,
+        id_seen: false,
+        provider_seen: false,
+        verdict_seen: false,
+        classification_seen: false,
+        failure_class_seen: false,
+        id: empty_span(),
+        provider: empty_span(),
+        verdict: empty_span(),
+        classification: empty_span(),
+        failure_class: empty_span(),
+        scope_seen: false,
+        scope_valid: true,
+        manifest: empty_span(),
+        summary_seen: false,
+        summary_valid: true,
+        summary: zero_summary,
+        tests_seen: false,
+        tests_valid: true,
+        tests: empty_token_rows(),
+        failure_is_object: false,
+        failure_message: empty_span(),
+        failure_message_has_escape: false,
+        source_sha256: empty_span(),
+        run_id: empty_span(),
+        row_id: empty_span(),
+        row_verdict: empty_span(),
+        row_valid: true,
+        row_seen_id: false,
+        row_seen_verdict: false
+    };
+}
+
+fn token_key_equal(key: json_order.KeyV1, name: [byte; up_to 256]) -> (result: bool) {
+    return match json_order.compare_key(key, key_value(name)) {
+        json_order.KeyOrderV1.Equal => true,
+        json_order.KeyOrderV1.Before => false,
+        json_order.KeyOrderV1.After => false
+    };
+}
+
+fn token_key_tag(context: byte, key: json_order.KeyV1) -> (result: byte) {
+    if context == 1 {
+        if token_key_equal(key, [105, 100]) { return 1; }
+        if token_key_equal(key, [112, 114, 111, 118, 105, 100, 101, 114]) { return 2; }
+        if token_key_equal(key, [118, 101, 114, 100, 105, 99, 116]) { return 3; }
+        if token_key_equal(key, [115, 99, 111, 112, 101]) { return 4; }
+        if token_key_equal(key, [115, 117, 109, 109, 97, 114, 121]) { return 5; }
+        if token_key_equal(key, [116, 101, 115, 116, 115]) { return 6; }
+        if token_key_equal(key, [102, 97, 105, 108, 117, 114, 101]) { return 7; }
+        if token_key_equal(key, [112, 114, 111, 118, 101, 110, 97, 110, 99, 101]) { return 8; }
+        if token_key_equal(key, [114, 117, 110, 95, 105, 100]) { return 9; }
+        if token_key_equal(key, [99, 108, 97, 115, 115, 105, 102, 105, 99, 97, 116, 105, 111, 110]) { return 10; }
+        if token_key_equal(key, [102, 97, 105, 108, 117, 114, 101, 95, 99, 108, 97, 115, 115]) { return 11; }
+    }
+    if context == 2 && token_key_equal(key, [109, 97, 110, 105, 102, 101, 115, 116]) { return 1; }
+    if context == 3 {
+        if token_key_equal(key, [112, 97, 115, 115, 101, 100]) { return 1; }
+        if token_key_equal(key, [102, 97, 105, 108, 101, 100]) { return 2; }
+        if token_key_equal(key, [115, 107, 105, 112, 112, 101, 100]) { return 3; }
+    }
+    if context == 5 {
+        if token_key_equal(key, [105, 100]) { return 1; }
+        if token_key_equal(key, [118, 101, 114, 100, 105, 99, 116]) { return 2; }
+    }
+    if context == 6 && token_key_equal(key, [109, 101, 115, 115, 97, 103, 101]) { return 1; }
+    if context == 7 && token_key_equal(key, [114, 117, 110, 110, 101, 114]) { return 1; }
+    if context == 8 && token_key_equal(key, [115, 111, 117, 114, 99, 101, 95, 115, 104, 97, 50, 53, 54]) { return 1; }
+    return 0;
+}
+
+fn token_value_field(token: json_cursor.Cursor) -> (result: FieldLookupV1) {
+    return FieldLookupV1 {
+        found: true,
+        value: TokenValueSpanV1 {
+            found: true,
+            kind: token.token_kind,
+            start: token.token_start,
+            length: token.token_end -% token.token_start
+        }
+    };
+}
+
+fn key_history_scan_match(
+    head: json_order.KeyV1,
+    tail: TokenKeyListV1,
+    key: json_order.KeyV1
+) -> (result: TokenKeyHistoryScanV1) {
+    let equal: bool = match json_order.compare_key(key, head) {
+        json_order.KeyOrderV1.Equal => true,
+        json_order.KeyOrderV1.Before => false,
+        json_order.KeyOrderV1.After => false
+    };
+    return TokenKeyHistoryScanV1 { remaining: tail, duplicate: equal };
+}
+
+fn key_history_scan_step(
+    state: TokenKeyHistoryScanV1,
+    key: json_order.KeyV1
+) -> (result: TokenKeyHistoryScanV1) {
+    if state.duplicate { return TokenKeyHistoryScanV1 { ..state, remaining: TokenKeyListV1.Nil }; }
+    return match state.remaining {
+        TokenKeyListV1.Nil => state,
+        TokenKeyListV1.Cons { head: head, tail: tail } =>
+            key_history_scan_match(head, tail, key)
+    };
+}
+
+fn key_history_has_duplicate(
+    history: TokenKeyListV1,
+    key: json_order.KeyV1
+) -> (result: bool) {
+    let initial: TokenKeyHistoryScanV1 = TokenKeyHistoryScanV1 {
+        remaining: history, duplicate: false
+    };
+    iterate i up_to 64 carrying scanned: TokenKeyHistoryScanV1 = initial {
+        next scanned = key_history_scan_step(scanned, key);
+    }
+    return scanned.duplicate;
+}
+
+fn mark_token_key(
+    state: CheckResultTokenStateV1,
     document: json_order.JsonTokenDocumentV1,
+    token: json_cursor.Cursor
+) -> (result: CheckResultTokenStateV1) {
+    if token.token_depth == 0 || token.token_depth > 12 {
+        return CheckResultTokenStateV1 { ..state, valid: false };
+    }
+    let frame_index: u64 = (token.token_depth as u64) -% 1;
+    let raw_start: u64 = token.token_start +% 1;
+    let raw_length: u64 = token.token_end -% token.token_start -% 2;
+    let key: json_order.KeyV1 = json_order.decode_key(document, raw_start, raw_length);
+    let context: byte = state.contexts[frame_index];
+    let tag: byte = token_key_tag(context, key);
+    let count: u64 = state.member_counts[frame_index];
+    let in_bounds: bool = raw_length <= 256 && key.valid && count < 64;
+    let history: TokenKeyListV1 = state.key_history[frame_index];
+    let duplicate: bool = key_history_has_duplicate(history, key);
+    let next_history: TokenKeyListV1 = TokenKeyListV1.Cons { head: key, tail: history };
+    let next_histories: [TokenKeyListV1; 12] = replace(
+        state.key_history, frame_index, next_history
+    );
+    let next_tags: [byte; 12] = replace(state.pending_tags, frame_index, tag);
+    let next_counts: [u64; 12] = replace(state.member_counts, frame_index, count +% 1);
+    let recognized: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state,
+        key_history: next_histories,
+        pending_tags: next_tags,
+        member_counts: next_counts,
+        valid: state.valid && in_bounds && !duplicate
+    };
+    if context == 1 && tag == 1 { return CheckResultTokenStateV1 { ..recognized, id_seen: true }; }
+    if context == 1 && tag == 2 { return CheckResultTokenStateV1 { ..recognized, provider_seen: true }; }
+    if context == 1 && tag == 3 { return CheckResultTokenStateV1 { ..recognized, verdict_seen: true }; }
+    if context == 1 && tag == 4 { return CheckResultTokenStateV1 { ..recognized, scope_seen: true }; }
+    if context == 1 && tag == 5 { return CheckResultTokenStateV1 { ..recognized, summary_seen: true }; }
+    if context == 1 && tag == 6 { return CheckResultTokenStateV1 { ..recognized, tests_seen: true }; }
+    if context == 1 && tag == 10 { return CheckResultTokenStateV1 { ..recognized, classification_seen: true }; }
+    if context == 1 && tag == 11 { return CheckResultTokenStateV1 { ..recognized, failure_class_seen: true }; }
+    if context == 5 && tag == 1 { return CheckResultTokenStateV1 { ..recognized, row_seen_id: true }; }
+    if context == 5 && tag == 2 { return CheckResultTokenStateV1 { ..recognized, row_seen_verdict: true }; }
+    return recognized;
+}
+
+fn empty_token_rows() -> (result: TokenTestRowsV1) {
+    return TokenTestRowsV1 {
+        valid: true,
+        rows: TokenTestRowsListV1.Nil,
+        count: 0
+    };
+}
+
+fn token_rows_materialize_step(
+    state: TokenRowsBuildStateV1,
+    count: u64,
+    index: u64
+) -> (result: TokenRowsBuildStateV1) {
+    return match state.source {
+        TokenTestRowsListV1.Nil => state,
+        TokenTestRowsListV1.Cons { head: head, tail: tail } =>
+            TokenRowsBuildStateV1 {
+                rows: replace(state.rows, count -% 1 -% index, head),
+                source: tail
+            }
+    };
+}
+
+fn materialize_token_rows(source: TokenTestRowsV1) -> (result: TestRowsV1) {
+    let empty: check_result.CheckTestV1 = check_result.CheckTestV1 { id: [], verdict: [] };
+    let initial: TokenRowsBuildStateV1 = TokenRowsBuildStateV1 {
+        rows: [empty; 256], source: source.rows
+    };
+    iterate i up_to 256 carrying built: TokenRowsBuildStateV1 = initial {
+        next built = token_rows_materialize_step(built, source.count, i);
+    }
+    return TestRowsV1 {
+        valid: source.valid,
+        rows: built.rows,
+        count: source.count
+    };
+}
+
+fn token_row_start(state: CheckResultTokenStateV1) -> (result: CheckResultTokenStateV1) {
+    return CheckResultTokenStateV1 {
+        ..state,
+        row_id: empty_span(),
+        row_verdict: empty_span(),
+        row_valid: true,
+        row_seen_id: false,
+        row_seen_verdict: false
+    };
+}
+
+fn token_row_finish(
+    state: CheckResultTokenStateV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: CheckResultTokenStateV1) {
+    let id: TextValueV1 = decode_text_value(
+        document,
+        FieldLookupV1 { found: state.row_id.found, value: state.row_id },
+        true
+    );
+    let verdict: TextValueV1 = decode_text_value(
+        document,
+        FieldLookupV1 { found: state.row_verdict.found, value: state.row_verdict },
+        true
+    );
+    if !state.row_valid || !id.valid || !verdict.valid
+        || id.length > 512 || verdict.length > 16 || state.tests.count >= 256 {
+        return CheckResultTokenStateV1 {
+            ..state,
+            tests_valid: false,
+            tests: TokenTestRowsV1 { ..state.tests, valid: false }
+        };
+    }
+    let row: check_result.CheckTestV1 = check_result.CheckTestV1 {
+        id: widen_text_512(id.bytes, id.length),
+        verdict: widen_text_16(verdict.bytes, verdict.length)
+    };
+    let rows: TokenTestRowsListV1 = TokenTestRowsListV1.Cons {
+        head: row, tail: state.tests.rows
+    };
+    return CheckResultTokenStateV1 {
+        ..state,
+        tests: TokenTestRowsV1 { ..state.tests, rows: rows, count: state.tests.count +% 1 }
+    };
+}
+
+fn token_value_context(
+    state: CheckResultTokenStateV1,
+    parent_context: byte,
+    tag: byte,
+    kind: byte,
+    frame_index: u64
+) -> (result: CheckResultTokenStateV1) {
+    let ignored: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state,
+        contexts: replace(state.contexts, frame_index, 0)
+    };
+    if parent_context == 1 {
+        if tag == 1 { return CheckResultTokenStateV1 { ..ignored, id: invalid_span() }; }
+        if tag == 2 { return CheckResultTokenStateV1 { ..ignored, provider: invalid_span() }; }
+        if tag == 3 { return CheckResultTokenStateV1 { ..ignored, verdict: invalid_span() }; }
+        if tag == 4 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                scope_valid: state.scope_valid && good,
+                contexts: replace(state.contexts, frame_index, select(good, 2, 0))
+            };
+        }
+        if tag == 5 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                summary_valid: state.summary_valid && good,
+                contexts: replace(state.contexts, frame_index, select(good, 3, 0))
+            };
+        }
+        if tag == 6 {
+            let good: bool = kind == 8;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                tests_valid: state.tests_valid && good,
+                contexts: replace(state.contexts, frame_index, select(good, 4, 0))
+            };
+        }
+        if tag == 7 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                failure_is_object: good,
+                contexts: replace(state.contexts, frame_index, select(good, 6, 0))
+            };
+        }
+        if tag == 8 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                contexts: replace(state.contexts, frame_index, select(good, 7, 0))
+            };
+        }
+        if tag == 9 { return CheckResultTokenStateV1 { ..ignored, run_id: invalid_span() }; }
+        if tag == 10 { return CheckResultTokenStateV1 { ..ignored, classification: invalid_span() }; }
+        if tag == 11 { return CheckResultTokenStateV1 { ..ignored, failure_class: invalid_span() }; }
+        return ignored;
+    }
+    if parent_context == 2 && tag == 1 {
+        return CheckResultTokenStateV1 { ..ignored, manifest: invalid_span() };
+    }
+    if parent_context == 3 && tag > 0 && tag <= 3 {
+        return CheckResultTokenStateV1 { ..ignored, summary_valid: false };
+    }
+    if parent_context == 4 && kind == 7 { return token_row_start(CheckResultTokenStateV1 {
+        ..ignored, contexts: replace(state.contexts, frame_index, 5)
+    }); }
+    if parent_context == 5 && tag == 1 {
+        return CheckResultTokenStateV1 { ..ignored, row_valid: false, row_id: invalid_span() };
+    }
+    if parent_context == 5 && tag == 2 {
+        return CheckResultTokenStateV1 { ..ignored, row_valid: false, row_verdict: invalid_span() };
+    }
+    if parent_context == 6 && tag == 1 {
+        return CheckResultTokenStateV1 {
+            ..ignored,
+            failure_message: invalid_span()
+        };
+    }
+    if parent_context == 7 && tag == 1 && kind == 7 {
+        return CheckResultTokenStateV1 {
+            ..ignored,
+            contexts: replace(state.contexts, frame_index, 8)
+        };
+    }
+    if parent_context == 8 && tag == 1 {
+        return CheckResultTokenStateV1 { ..ignored, source_sha256: invalid_span() };
+    }
+    return ignored;
+}
+
+fn token_open_container(
+    state: CheckResultTokenStateV1,
+    token: json_cursor.Cursor
+) -> (result: CheckResultTokenStateV1) {
+    if token.token_depth >= 12 {
+        return CheckResultTokenStateV1 { ..state, valid: false };
+    }
+    let frame_index: u64 = token.token_depth as u64;
+    if token.token_depth == 0 {
+        let is_object: bool = token.token_kind == 7;
+        let root_context: byte = select(is_object, 1, 0);
+        let reset_counts: [u64; 12] = replace(state.member_counts, frame_index, 0);
+        let reset_history: [TokenKeyListV1; 12] = replace(
+            state.key_history, frame_index, TokenKeyListV1.Nil
+        );
+        return CheckResultTokenStateV1 {
+            ..state,
+            root_is_object: is_object,
+            contexts: replace(state.contexts, frame_index, root_context),
+            key_history: reset_history,
+            member_counts: reset_counts
+        };
+    }
+    let parent_index: u64 = frame_index -% 1;
+    let parent_context: byte = state.contexts[parent_index];
+    let tag: byte = state.pending_tags[parent_index];
+    let reset_counts: [u64; 12] = replace(state.member_counts, frame_index, 0);
+    let reset_history: [TokenKeyListV1; 12] = replace(
+        state.key_history, frame_index, TokenKeyListV1.Nil
+    );
+    let reset_tags: [byte; 12] = replace(state.pending_tags, frame_index, 0);
+    let prepared: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state,
+        pending_tags: replace(reset_tags, parent_index, 0),
+        key_history: reset_history,
+        member_counts: reset_counts
+    };
+    return token_value_context(prepared, parent_context, tag, token.token_kind, frame_index);
+}
+
+fn token_store_scalar(
+    state: CheckResultTokenStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    token: json_cursor.Cursor
+) -> (result: CheckResultTokenStateV1) {
+    let within_values: bool = state.value_count < 512;
+    if token.token_depth == 0 {
+        return CheckResultTokenStateV1 {
+            ..state,
+            value_count: state.value_count +% 1,
+            valid: state.valid && within_values
+        };
+    }
+    let frame_index: u64 = (token.token_depth as u64) -% 1;
+    let context: byte = state.contexts[frame_index];
+    let tag: byte = state.pending_tags[frame_index];
+    let field: FieldLookupV1 = token_value_field(token);
+    let scalar: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state,
+        value_count: state.value_count +% 1,
+        pending_tags: replace(state.pending_tags, frame_index, 0),
+        valid: state.valid && within_values
+    };
+    if context == 1 {
+        if tag == 1 { return CheckResultTokenStateV1 { ..scalar, id: field.value }; }
+        if tag == 2 { return CheckResultTokenStateV1 { ..scalar, provider: field.value }; }
+        if tag == 3 { return CheckResultTokenStateV1 { ..scalar, verdict: field.value }; }
+        if tag == 4 { return CheckResultTokenStateV1 { ..scalar, scope_valid: false }; }
+        if tag == 5 { return CheckResultTokenStateV1 { ..scalar, summary_valid: false }; }
+        if tag == 6 { return CheckResultTokenStateV1 { ..scalar, tests_valid: false }; }
+        if tag == 7 { return CheckResultTokenStateV1 { ..scalar, failure_is_object: false }; }
+        if tag == 9 { return CheckResultTokenStateV1 { ..scalar, run_id: field.value }; }
+        if tag == 10 { return CheckResultTokenStateV1 { ..scalar, classification: field.value }; }
+        if tag == 11 { return CheckResultTokenStateV1 { ..scalar, failure_class: field.value }; }
+        return scalar;
+    }
+    if context == 2 && tag == 1 {
+        return CheckResultTokenStateV1 { ..scalar, manifest: field.value };
+    }
+    if context == 3 && tag > 0 && tag <= 3 {
+        let number: NumberValueV1 = unsigned_value(document, field, false);
+        if !number.valid { return CheckResultTokenStateV1 { ..scalar, summary_valid: false }; }
+        if tag == 1 { return CheckResultTokenStateV1 { ..scalar, summary: check_result.CheckSummaryV1 { ..scalar.summary, passed: number.value } }; }
+        if tag == 2 { return CheckResultTokenStateV1 { ..scalar, summary: check_result.CheckSummaryV1 { ..scalar.summary, failed: number.value } }; }
+        return CheckResultTokenStateV1 { ..scalar, summary: check_result.CheckSummaryV1 { ..scalar.summary, skipped: number.value } };
+    }
+    if context == 5 && tag == 1 {
+        return CheckResultTokenStateV1 { ..scalar, row_id: field.value };
+    }
+    if context == 5 && tag == 2 {
+        return CheckResultTokenStateV1 { ..scalar, row_verdict: field.value };
+    }
+    if context == 6 && tag == 1 {
+        return CheckResultTokenStateV1 {
+            ..scalar,
+            failure_message: field.value
+        };
+    }
+    if context == 8 && tag == 1 {
+        return CheckResultTokenStateV1 {
+            ..scalar,
+            source_sha256: field.value
+        };
+    }
+    return scalar;
+}
+
+fn token_close_container(
+    state: CheckResultTokenStateV1,
+    frame_index: u64,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: CheckResultTokenStateV1) {
+    if frame_index >= 12 || state.value_count >= 512 {
+        return CheckResultTokenStateV1 { ..state, valid: false };
+    }
+    let context: byte = state.contexts[frame_index];
+    let closed: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state,
+        contexts: replace(state.contexts, frame_index, 0),
+        value_count: state.value_count +% 1
+    };
+    if context == 5 { return token_row_finish(closed, document); }
+    return closed;
+}
+
+fn process_cursor_token(
+    state: CheckResultTokenStateV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: CheckResultTokenStateV1) {
+    let token: json_cursor.Cursor = state.cursor;
+    if !token.token_event { return state; }
+    if token.token_kind == 1 { return mark_token_key(state, document, token); }
+    if token.token_kind == 2 || (token.token_kind >= 3 && token.token_kind <= 6) {
+        return token_store_scalar(state, document, token);
+    }
+    if token.token_kind == 7 || token.token_kind == 8 {
+        return token_open_container(state, token);
+    }
+    if token.token_kind == 9 || token.token_kind == 10 {
+        return token_close_container(state, token.token_depth as u64, document);
+    }
+    return state;
+}
+
+
+fn empty_token_capture(
+    cursor: json_cursor.Cursor,
+    string_had_escape: bool
+) -> (result: TokenCaptureStateV1) {
+    let empty: TokenEventV1 = TokenEventV1 {
+        kind: 0, event: 0, start: 0, end: 0, depth: 0, has_escape: false
+    };
+    return TokenCaptureStateV1 {
+        cursor: cursor,
+        events: [empty; 64],
+        string_had_escape: string_had_escape,
+        count: 0
+    };
+}
+
+fn capture_cursor_event_with_escape(
+    state: TokenCaptureStateV1,
+    has_escape: bool
+) -> (result: TokenCaptureStateV1) {
+    if !state.cursor.token_event || state.count >= 64 { return state; }
+    let event: TokenEventV1 = TokenEventV1 {
+        kind: state.cursor.token_kind,
+        event: state.cursor.event,
+        start: state.cursor.token_start,
+        end: state.cursor.token_end,
+        depth: state.cursor.token_depth,
+        has_escape: has_escape
+    };
+    return TokenCaptureStateV1 {
+        ..state,
+        events: replace(state.events, state.count, event),
+        count: state.count +% 1
+    };
+}
+
+fn capture_cursor_event(state: TokenCaptureStateV1) -> (result: TokenCaptureStateV1) {
+    return capture_cursor_event_with_escape(state, false);
+}
+
+fn capture_cursor_byte(
+    state: TokenCaptureStateV1,
+    value: byte
+) -> (result: TokenCaptureStateV1) {
+    let next_cursor: json_cursor.Cursor = json_cursor.feed_byte(state.cursor, value);
+    let advanced: TokenCaptureStateV1 = TokenCaptureStateV1 {
+        ..state, cursor: next_cursor
+    };
+    if next_cursor.token_event { return capture_cursor_event(advanced); }
+    return advanced;
+}
+
+fn skip_string_byte(
+    state: StringSkipStateV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    chunk_base: u64,
+    index: u64
+) -> (result: StringSkipStateV1) {
+    if state.closed || index >= chunk.length { return state; }
+    let value: byte = chunk.bytes[index];
+    let position: u64 = chunk_base +% index +% 1;
+    if state.cursor.escaped {
+        return StringSkipStateV1 {
+            cursor: json_cursor.Cursor {
+                ..state.cursor,
+                escaped: false,
+                event: 0,
+                token_event: false,
+                position: position
+            },
+            closed: false,
+            had_escape: state.had_escape
+        };
+    }
+    if value == 92 {
+        return StringSkipStateV1 {
+            cursor: json_cursor.Cursor {
+                ..state.cursor,
+                escaped: true,
+                event: 0,
+                token_event: false,
+                position: position
+            },
+            closed: false,
+            had_escape: true
+        };
+    }
+    if value == 34 {
+        let is_key: bool = state.cursor.string_is_key;
+        let closed: json_cursor.Cursor = json_cursor.Cursor {
+            ..state.cursor,
+            in_string: false,
+            expect_key: false,
+            escaped: false,
+            unicode_remaining: 0,
+            pending_high_surrogate: false,
+            utf8_remaining: 0,
+            utf8_lead: 0,
+            event: select(is_key, 2, 4),
+            string_end: position -% 1,
+            string_length: 0,
+            pending_key: is_key,
+            position: position,
+            token_event: true,
+            token_kind: select(is_key, 1, 2),
+            token_end: position
+        };
+        return StringSkipStateV1 {
+            cursor: closed, closed: true, had_escape: state.had_escape
+        };
+    }
+    return StringSkipStateV1 {
+        cursor: json_cursor.Cursor {
+            ..state.cursor,
+            event: 0,
+            token_event: false,
+            position: position
+        },
+        closed: false,
+        had_escape: state.had_escape
+    };
+}
+
+fn skip_string_block_step(
+    state: StringSkipStateV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    chunk_base: u64,
+    block_start: u64,
+    block_end: u64,
+    start: u64,
+    index: u64
+) -> (result: StringSkipStateV1) {
+    let local: u64 = block_start +% index;
+    if local < start || local >= block_end { return state; }
+    return skip_string_byte(state, chunk, chunk_base, local);
+}
+
+fn skip_string_block(
+    capture: TokenCaptureStateV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    chunk_base: u64,
+    block_start: u64,
+    block_end: u64,
+    start: u64
+) -> (result: TokenCaptureStateV1) {
+    let initial: StringSkipStateV1 = StringSkipStateV1 {
+        cursor: json_cursor.Cursor { ..capture.cursor, event: 0, token_event: false },
+        closed: false,
+        had_escape: capture.string_had_escape
+    };
+    iterate i up_to 64 carrying skipped: StringSkipStateV1 = initial {
+        next skipped = skip_string_block_step(
+            skipped, chunk, chunk_base, block_start, block_end, start, i
+        );
+    }
+    let scanned: TokenCaptureStateV1 = TokenCaptureStateV1 {
+        ..capture,
+        cursor: skipped.cursor,
+        string_had_escape: select(skipped.closed, false, skipped.had_escape)
+    };
+    if scanned.cursor.token_event {
+        return capture_cursor_event_with_escape(scanned, skipped.had_escape);
+    }
+    return scanned;
+}
+
+fn capture_token_block_step(
+    state: TokenCaptureStateV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    chunk_base: u64,
+    block_start: u64,
+    block_end: u64,
+    index: u64
+) -> (result: TokenCaptureStateV1) {
+    let local: u64 = block_start +% index;
+    if local >= block_end { return state; }
+    let cursor_local: u64 = state.cursor.position -% chunk_base;
+    if local < cursor_local { return state; }
+    if state.cursor.in_string {
+        return skip_string_block(
+            state, chunk, chunk_base, block_start, block_end, local
+        );
+    }
+    return capture_cursor_byte(state, chunk.bytes[local]);
+}
+
+fn capture_token_block(
+    cursor: json_cursor.Cursor,
+    string_had_escape: bool,
+    chunk: json_order.JsonTokenInputChunkV1,
+    chunk_base: u64,
+    block_start: u64
+) -> (result: TokenCaptureStateV1) {
+    let candidate_end: u64 = block_start +% 64;
+    let block_end: u64 = select(candidate_end < chunk.length, candidate_end, chunk.length);
+    let initial: TokenCaptureStateV1 = empty_token_capture(cursor, string_had_escape);
+    if block_start >= block_end { return initial; }
+    iterate i up_to 64 carrying captured: TokenCaptureStateV1 = initial {
+        next captured = capture_token_block_step(
+            captured, chunk, chunk_base, block_start, block_end, i
+        );
+    }
+    return captured;
+}
+
+fn close_number_parent(
+    state: CheckResultTokenStateV1,
+    token: json_cursor.Cursor,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: CheckResultTokenStateV1) {
+    if token.token_kind != 3 || (token.event != 7 && token.event != 8) {
+        return state;
+    }
+    if token.token_depth == 0 { return CheckResultTokenStateV1 { ..state, valid: false }; }
+    return token_close_container(
+        state, (token.token_depth as u64) -% 1, document
+    );
+}
+
+fn is_failure_message_token(
+    state: CheckResultTokenStateV1,
+    token: json_cursor.Cursor
+) -> (result: bool) {
+    if token.token_kind != 2 || token.token_depth == 0 || token.token_depth > 12 {
+        return false;
+    }
+    let frame_index: u64 = (token.token_depth as u64) -% 1;
+    return state.contexts[frame_index] == 6
+        && state.pending_tags[frame_index] == 1;
+}
+
+fn token_cursor_event(
+    state: CheckResultTokenStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    has_escape: bool
+) -> (result: CheckResultTokenStateV1) {
+    let token: json_cursor.Cursor = state.cursor;
+    let is_message: bool = is_failure_message_token(state, token);
+    let processed: CheckResultTokenStateV1 = process_cursor_token(state, document);
+    if is_message {
+        let tracked: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+            ..processed, failure_message_has_escape: has_escape
+        };
+        return close_number_parent(tracked, token, document);
+    }
+    return close_number_parent(processed, token, document);
+}
+
+fn process_captured_event(
+    state: CheckResultTokenStateV1,
+    event: TokenEventV1,
+    document: json_order.JsonTokenDocumentV1,
+    final_cursor: json_cursor.Cursor
+) -> (result: CheckResultTokenStateV1) {
+    let token_cursor: json_cursor.Cursor = json_cursor.Cursor {
+        ..final_cursor,
+        event: event.event,
+        token_event: true,
+        token_kind: event.kind,
+        token_start: event.start,
+        token_end: event.end,
+        token_depth: event.depth
+    };
+    let token_state: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state, cursor: token_cursor
+    };
+    let processed: CheckResultTokenStateV1 = token_cursor_event(
+        token_state, document, event.has_escape
+    );
+    return CheckResultTokenStateV1 { ..processed, cursor: final_cursor };
+}
+
+fn consume_token_events_step(
+    state: CheckResultTokenStateV1,
+    captured: TokenCaptureStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    index: u64
+) -> (result: CheckResultTokenStateV1) {
+    if index >= captured.count { return state; }
+    return process_captured_event(
+        state, captured.events[index], document, captured.cursor
+    );
+}
+
+fn consume_token_events(
+    state: CheckResultTokenStateV1,
+    captured: TokenCaptureStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    final_cursor: json_cursor.Cursor
+) -> (result: CheckResultTokenStateV1) {
+    if captured.count == 0 { return CheckResultTokenStateV1 { ..state, cursor: final_cursor }; }
+    iterate i up_to 64 carrying processed: CheckResultTokenStateV1 = state {
+        next processed = consume_token_events_step(processed, captured, document, i);
+    }
+    return CheckResultTokenStateV1 { ..processed, cursor: final_cursor };
+}
+
+fn token_scan_block(
+    state: CheckResultTokenStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    chunk_base: u64,
+    block_start: u64
+) -> (result: CheckResultTokenStateV1) {
+    let captured: TokenCaptureStateV1 = capture_token_block(
+        state.cursor, state.scanner_string_has_escape, chunk, chunk_base, block_start
+    );
+    let scanned: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state,
+        cursor: captured.cursor,
+        scanner_string_has_escape: captured.string_had_escape,
+        valid: state.valid && captured.cursor.valid
+    };
+    return consume_token_events(
+        scanned, captured, document, captured.cursor
+    );
+}
+
+fn token_scan_chunk(
+    state: CheckResultTokenStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    chunk: json_order.JsonTokenInputChunkV1
+) -> (result: CheckResultTokenStateV1) {
+    let chunk_base: u64 = state.cursor.position;
+    iterate block up_to 16 carrying current: CheckResultTokenStateV1 = state {
+        next current = token_scan_block(
+            current, document, chunk, chunk_base, block *% 64
+        );
+    }
+    return current;
+}
+
+fn token_scan_document(document: json_order.JsonTokenDocumentV1) -> (result: CheckResultTokenStateV1) {
+    iterate i over document.chunks carrying state: CheckResultTokenStateV1 = empty_token_state() {
+        next state = token_scan_chunk(state, document, document.chunks[i]);
+    }
+    let finished: json_cursor.Cursor = json_cursor.finish(state.cursor);
+    let with_finish: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
+        ..state, cursor: finished, valid: state.valid && finished.valid
+    };
+    if finished.token_event { return token_cursor_event(with_finish, document, false); }
+    return with_finish;
+}
+
+fn checked_token_scan(
+    document: json_order.JsonTokenDocumentV1,
+    request_valid: bool,
+    syntax_valid: bool
+) -> (result: CheckResultTokenStateV1) {
+    if request_valid && syntax_valid { return token_scan_document(document); }
+    return CheckResultTokenStateV1 { ..empty_token_state(), valid: false };
+}
+
+fn extract_token_result(
+    document: json_order.JsonTokenDocumentV1,
+    state: CheckResultTokenStateV1,
     metadata: CheckResultJsonNativeRequestV1
 ) -> (result: ExtractedTestResultV1) {
-    if !lookup_is_object(root) {
-        return ExtractedTestResultV1 { supported: false, request: empty_projection_request(metadata) };
-    }
-    let id_field: FieldLookupV1 = object_field(root, [105, 100]);
-    let id_text: TextValueV1 = decode_text_value(document, id_field, false, false);
-    let provider: TextValueV1 = decode_text_value(document, object_field(root, [112, 114, 111, 118, 105, 100, 101, 114]), false, false);
-    let verdict: TextValueV1 = decode_text_value(document, object_field(root, [118, 101, 114, 100, 105, 99, 116]), false, false);
-    let classification: TextValueV1 = decode_text_value(document, object_field(root, [99, 108, 97, 115, 115, 105, 102, 105, 99, 97, 116, 105, 111, 110]), false, false);
-    let failure_class: TextValueV1 = decode_text_value(document, object_field(root, [102, 97, 105, 108, 117, 114, 101, 95, 99, 108, 97, 115, 115]), false, false);
-    let scope_field: FieldLookupV1 = object_field(root, [115, 99, 111, 112, 101]);
-    let scope_valid: bool = !scope_field.found || lookup_is_object(scope_field.value);
-    let manifest_field: FieldLookupV1 = object_field(scope_field.value, [109, 97, 110, 105, 102, 101, 115, 116]);
-    let manifest: TextValueV1 = decode_text_value(document, manifest_field, true, true);
-    let summary: SummaryProjectionV1 = summary_value(document, object_field(root, [115, 117, 109, 109, 97, 114, 121]));
-    let tests: TestRowsV1 = test_rows(document, object_field(root, [116, 101, 115, 116, 115]));
-    let failure_field: FieldLookupV1 = object_field(root, [102, 97, 105, 108, 117, 114, 101]);
-    let failure_object: bool = lookup_is_object(failure_field.value);
-    let failure_message_field: FieldLookupV1 = object_field(failure_field.value, [109, 101, 115, 115, 97, 103, 101]);
-    let failure_message: MessageProjectionV1 = decode_failure_message(document, failure_message_field);
-    let provenance_field: FieldLookupV1 = object_field(root, [112, 114, 111, 118, 101, 110, 97, 110, 99, 101]);
-    let provenance_object: bool = lookup_is_object(provenance_field.value);
-    let runner_field: FieldLookupV1 = object_field(provenance_field.value, [114, 117, 110, 110, 101, 114]);
-    let runner_object: bool = lookup_is_object(runner_field.value);
-    let source_sha_field: FieldLookupV1 = object_field(runner_field.value, [115, 111, 117, 114, 99, 101, 95, 115, 104, 97, 50, 53, 54]);
-    let source_sha: TextValueV1 = decode_text_value(document, source_sha_field, true, false);
-    let run_id: TextValueV1 = decode_text_value(document, object_field(root, [114, 117, 110, 95, 105, 100]), true, false);
+    let id_text: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.id.found, value: state.id }, false
+    );
+    let provider: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.provider.found, value: state.provider }, false
+    );
+    let verdict: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.verdict.found, value: state.verdict }, false
+    );
+    let classification: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.classification.found, value: state.classification }, false
+    );
+    let failure_class: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.failure_class.found, value: state.failure_class }, false
+    );
+    let manifest: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.manifest.found, value: state.manifest }, true
+    );
+    let source_sha: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.source_sha256.found, value: state.source_sha256 }, true
+    );
+    let run_id: TextValueV1 = decode_text_value(
+        document, FieldLookupV1 { found: state.run_id.found, value: state.run_id }, true
+    );
+    let failure_message: MessageProjectionV1 = decode_failure_message(
+        document,
+        FieldLookupV1 { found: state.failure_message.found, value: state.failure_message },
+        state.failure_message_has_escape
+    );
+    let tests: TestRowsV1 = materialize_token_rows(state.tests);
     let source_id: [byte; up_to 1024] = widen_text_1024(id_text.bytes, id_text.length);
     let check_id: [byte; up_to 1024] = select(metadata.check_id.len > 0, metadata.check_id, source_id);
     let message_chunks: [[byte; up_to 1024]; up_to 256] =
@@ -734,21 +1553,27 @@ fn extract_test_result(
         failure_class: widen_text_128(failure_class.bytes, failure_class.length),
         result_digest: metadata.result_digest,
         source_sha256: widen_text_64(source_sha.bytes, source_sha.length),
-        summary: summary.value,
-        failure_message_present: failure_object && failure_message.present,
+        summary: state.summary,
+        failure_message_present: state.failure_is_object && failure_message.present,
         failure_message_count: failure_message.count,
         failure_message_chunks: message_chunks,
         run_id: widen_text_512(run_id.bytes, run_id.length),
         test_count: tests.count,
         tests: tests.rows[0..tests.count]
     };
-    let supported: bool = (metadata.check_id.len > 0 || (id_text.valid && id_text.length <= 1024))
-        && provider.valid && verdict.valid
-        && classification.valid && failure_class.valid && scope_valid && manifest.valid
-        && summary.valid && tests.valid && failure_message.valid && source_sha.valid
-        && run_id.valid && provider.length <= 256 && verdict.length <= 16
+    let supported: bool = state.valid && json_cursor.is_valid(state.cursor) && state.root_is_object
+        && (metadata.check_id.len > 0 || (state.id_seen && id_text.valid && id_text.length <= 1024))
+        && state.provider_seen && provider.valid
+        && state.verdict_seen && verdict.valid
+        && state.classification_seen && classification.valid
+        && state.failure_class_seen && failure_class.valid
+        && state.scope_valid && manifest.valid
+        && state.summary_valid && state.tests_valid && state.tests.valid
+        && failure_message.valid && source_sha.valid && run_id.valid
+        && provider.length <= 256 && verdict.length <= 16
         && classification.length <= 128 && failure_class.length <= 128
-        && manifest.length <= 1024 && source_sha.length <= 64 && run_id.length <= 512
+        && manifest.length <= 1024 && source_sha.length <= 64
+        && run_id.length <= 512
         && check_result.valid_request(request);
     return ExtractedTestResultV1 { supported: supported, request: request };
 }
@@ -780,9 +1605,17 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     };
     let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.document);
     let transport_valid: bool = json_order.valid_order_request(order_request, shape);
-    let parsed: json_order.ParseStateV1 = json_order.parse_checked(request.document, transport_valid);
-    let extracted: ExtractedTestResultV1 = extract_test_result(parsed.root, request.document, request);
-    let supported: bool = transport_valid && parsed.valid && extracted.supported;
+    // Keep json.v1's independent syntax pass before cursor token extraction;
+    // the streaming cursor supplies spans and events, not full JSON syntax.
+    let scanned: json.ScanState = json_order.scan_document(request.document);
+    let syntax_valid: bool = json.is_valid(scanned);
+    let tokenized: CheckResultTokenStateV1 = checked_token_scan(
+        request.document, transport_valid, syntax_valid
+    );
+    let extracted: ExtractedTestResultV1 = extract_token_result(
+        request.document, tokenized, request
+    );
+    let supported: bool = transport_valid && syntax_valid && extracted.supported;
     let selected_request: check_result.CheckResultProjectionRequestV1 = select(
         supported, extracted.request, empty_projection_request(request)
     );
