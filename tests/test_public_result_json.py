@@ -200,6 +200,30 @@ def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Pat
     ]
 
 
+def test_native_key_order_sorts_documents_larger_than_eight_kibibytes(tmp_path: Path) -> None:
+    value = {f"field-{index:02d}": "v" * 800 for index in reversed(range(12))}
+    expected = _python_result_bytes(value)
+    source = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+    assert 8192 < len(source) <= mncs_test.PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+        "test-public-result-json-token-window.json",
+    ]
+
+
 def test_non_string_mapping_keys_keep_python_sort_semantics(tmp_path: Path) -> None:
     value = {10: "ten", 2: "two"}
     expected = _python_result_bytes(value)

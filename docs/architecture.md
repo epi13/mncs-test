@@ -155,11 +155,11 @@ without objects skip key ordering and go directly to the native token
 formatter, so the host does not sort array-only results. That
 application parses the token stream into a bounded native value, compares
 decoded UTF-8 keys, and emits compact JSON in sorted key order. It accepts at
-most 8,192 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
+most 16,384 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
 and 1,024-byte scalar text. The host preflight caps candidates at 512 values
 to stay within the runner's 8,000,000-step budget. Key comparisons traverse
 only the shared decoded-key prefix. The native writer retains one active
-64-byte page and returns at most 128 completed pages, reducing the fixed-array
+64-byte page and returns at most 256 completed pages, reducing the fixed-array
 copy performed for each emitted byte. The host verifies the packed
 source digest before dispatch. Non-string mapping keys, oversized values, and
 native unsupported or budget outcomes retain Python's sorted compact-JSON

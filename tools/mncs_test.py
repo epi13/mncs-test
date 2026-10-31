@@ -58,7 +58,7 @@ PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
-PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 8192
+PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 16384
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 512
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
@@ -414,7 +414,7 @@ def _native_public_result_key_order(
     ordered = _decode_public_result_chunks(
         result,
         byte_length=byte_length,
-        maximum_chunks=128,
+        maximum_chunks=256,
         maximum_chunk_bytes=64,
     )
     return ordered

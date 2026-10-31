@@ -102,7 +102,7 @@ record JsonOrderWriterV1 {
 record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
 
 record JsonOrderChunkBuilderV1 {
-    chunks: [JsonOrderChunkV1; 128],
+    chunks: [JsonOrderChunkV1; 256],
     count: u64
 }
 
@@ -112,7 +112,7 @@ record JsonOrderResultV1 {
     input_sha256: [byte; up_to 64],
     document_length: u64,
     chunk_count: u64,
-    chunks: [JsonOrderChunkV1; up_to 128]
+    chunks: [JsonOrderChunkV1; up_to 256]
 }
 
 fn request_schema_v1() -> (result: [byte; up_to 64]) {
@@ -136,7 +136,7 @@ fn document_shape(document: JsonTokenDocumentV1) -> (result: DocumentShapeV1) {
     iterate i over document.chunks carrying shape: DocumentShapeV1 = initial {
         let chunk: JsonTokenInputChunkV1 = document.chunks[i];
         let valid_chunk: bool = chunk.length > 0 && chunk.length <= 1024
-            && chunk.length == chunk.bytes.len && shape.total +% chunk.length <= 8192;
+            && chunk.length == chunk.bytes.len && shape.total +% chunk.length <= 16384;
         next shape = DocumentShapeV1 {
             total: shape.total +% chunk.length,
             valid: shape.valid && valid_chunk
@@ -144,8 +144,8 @@ fn document_shape(document: JsonTokenDocumentV1) -> (result: DocumentShapeV1) {
     }
     return DocumentShapeV1 {
         total: shape.total,
-        valid: shape.valid && document.chunks.len > 0 && document.chunks.len <= 8
-            && document.byte_length == shape.total && document.byte_length <= 8192
+        valid: shape.valid && document.chunks.len > 0 && document.chunks.len <= 16
+            && document.byte_length == shape.total && document.byte_length <= 16384
     };
 }
 
@@ -625,7 +625,7 @@ fn writer_next_chunk(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrd
 }
 
 fn writer_byte(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
-    if !writer.ok || writer.length >= 8192 { return JsonOrderWriterV1 { ..writer, ok: false }; }
+    if !writer.ok || writer.length >= 16384 { return JsonOrderWriterV1 { ..writer, ok: false }; }
     if writer.current_length >= 64 { return writer_next_chunk(writer, value); }
     let updated: [byte; 64] = replace(writer.current_bytes, writer.current_length, value);
     return JsonOrderWriterV1 {
@@ -790,9 +790,9 @@ fn empty_output_chunk() -> (result: JsonOrderChunkV1) {
 
 fn output_completed_chunks(
     completed: JsonOrderChunkListV1,
-    chunks: [JsonOrderChunkV1; 128],
+    chunks: [JsonOrderChunkV1; 256],
     index: u64
-) -> (result: [JsonOrderChunkV1; 128]) {
+) -> (result: [JsonOrderChunkV1; 256]) {
     return match completed {
         ChunkNil => chunks,
         ChunkCons { head: head, tail: tail } => output_completed_chunks(
@@ -805,8 +805,8 @@ fn output_completed_chunks(
 
 fn output_chunks(writer: JsonOrderWriterV1) -> (result: JsonOrderChunkBuilderV1) {
     let empty: JsonOrderChunkV1 = empty_output_chunk();
-    let initial: [JsonOrderChunkV1; 128] = [empty; 128];
-    let completed: [JsonOrderChunkV1; 128] = output_completed_chunks(
+    let initial: [JsonOrderChunkV1; 256] = [empty; 256];
+    let completed: [JsonOrderChunkV1; 256] = output_completed_chunks(
         writer.completed,
         initial,
         writer.completed_count -% 1
@@ -915,7 +915,7 @@ fn writer_for_parse(parsed: ParseStateV1, document: JsonTokenDocumentV1) -> (res
 
 fn valid_order_request(request: JsonOrderRequestV1, shape: DocumentShapeV1) -> (result: bool) {
     if !same_bytes(request.schema_version, request_schema_v1()) || !shape.valid
-        || request.document.byte_length > 8192 || request.input_sha256.len != 64 {
+        || request.document.byte_length > 16384 || request.input_sha256.len != 64 {
         return false;
     }
     return same_bytes(request.input_sha256, document_digest(request.document));
