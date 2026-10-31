@@ -62,7 +62,7 @@ PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-d
 PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/3"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
-REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/2"
+REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/3"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
@@ -1127,6 +1127,23 @@ def _native_replay_schema_result(
         or result.get("input_sha256") != start_request["input_sha256"]
     ):
         raise AdapterError("MNCS replay schema app returned malformed validation metadata")
+    for text_name, length_name in (
+        ("reproduction_command_text", "reproduction_command_text_length"),
+        ("reproduction_replay_command_text", "reproduction_replay_command_text_length"),
+    ):
+        raw_text = result.get(text_name)
+        length = result.get(length_name)
+        try:
+            text_length = len(raw_text.encode("utf-8")) if isinstance(raw_text, str) else -1
+        except UnicodeEncodeError:
+            text_length = -1
+        if (
+            not isinstance(raw_text, str)
+            or type(length) is not int
+            or not 0 <= length <= 256
+            or text_length != length
+        ):
+            raise AdapterError("MNCS replay schema app returned malformed decoded text")
     if not result["supported"]:
         return None
     for field in (
@@ -1171,7 +1188,7 @@ def _native_replay_text_commands(
     cwd: Path,
     environment: dict[str, str],
 ) -> tuple[str, str] | None:
-    """Project replay command fields natively, decoding only string scalars on the host."""
+    """Project and decode bounded replay command strings in MNCS."""
     ordered = _native_public_result_key_order(
         source,
         mncs=mncs,
@@ -1193,32 +1210,24 @@ def _native_replay_text_commands(
     ):
         return None
 
-    def decode_span(present_name: str, start_name: str, length_name: str) -> str:
+    def decoded_text(present_name: str, text_name: str) -> str:
         if not result[present_name]:
+            if result[text_name] != "":
+                raise AdapterError("MNCS replay schema app returned text without a present command")
             return ""
-        start = result[start_name]
-        length = result[length_name]
-        encoded = ordered[start - 1 : start + length + 1]
-        if len(encoded) != length + 2 or encoded[0] != 34 or encoded[-1] != 34:
-            raise AdapterError("MNCS replay schema app returned a malformed JSON string span")
-        try:
-            value = json.loads(encoded.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AdapterError("MNCS replay schema app returned an invalid JSON string span") from error
+        value = result.get(text_name)
         if not isinstance(value, str):
-            raise AdapterError("MNCS replay schema app returned a non-text reproduction value")
+            raise AdapterError("MNCS replay schema app returned non-text command content")
         return value
 
     return (
-        decode_span(
+        decoded_text(
             "reproduction_command_present",
-            "reproduction_command_start",
-            "reproduction_command_length",
+            "reproduction_command_text",
         ),
-        decode_span(
+        decoded_text(
             "reproduction_replay_command_present",
-            "reproduction_replay_command_start",
-            "reproduction_replay_command_length",
+            "reproduction_replay_command_text",
         ),
     )
 

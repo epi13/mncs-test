@@ -1,8 +1,8 @@
 mncs 0.18;
 
 // Validate the stored Test result schema through the bounded MNCS JSON value
-// parser. Python can retain its json.loads fallback for noncanonical input,
-// while the canonical replay path avoids constructing a host value tree.
+// parser. Text replay returns decoded reproduction commands up to 256 UTF-8
+// bytes each; Python retains its full-result fallback for longer values.
 module mncs.test.replay_schema_v1;
 
 use mncs.std.application.v1;
@@ -25,6 +25,10 @@ record ReplaySchemaResultV1 {
     reproduction_replay_command_present: bool,
     reproduction_replay_command_start: u64,
     reproduction_replay_command_length: u64,
+    reproduction_command_text: [byte; up_to 256],
+    reproduction_command_text_length: u64,
+    reproduction_replay_command_text: [byte; up_to 256],
+    reproduction_replay_command_text_length: u64,
     document_length: u64,
     input_sha256: [byte; up_to 64]
 }
@@ -32,14 +36,21 @@ record ReplaySchemaResultV1 {
 record SchemaFieldV1 { found: bool, valid: bool }
 record FieldLookupV1 { found: bool, value: json_order.JsonValueV1 }
 record TextSpanV1 { valid: bool, present: bool, start: u64, length: u64 }
-record ReplayTextFieldsV1 { supported: bool, command: TextSpanV1, replay_command: TextSpanV1 }
+record TextValueV1 { valid: bool, present: bool, bytes: [byte; up_to 256], length: u64 }
+record ReplayTextFieldsV1 {
+    supported: bool,
+    command: TextSpanV1,
+    replay_command: TextSpanV1,
+    command_value: TextValueV1,
+    replay_command_value: TextValueV1
+}
 
 fn request_schema() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 47, 50];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 47, 51];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -98,11 +109,17 @@ fn empty_text_span() -> (result: TextSpanV1) {
     return TextSpanV1 { valid: true, present: false, start: 0, length: 0 };
 }
 
+fn empty_text_value() -> (result: TextValueV1) {
+    return TextValueV1 { valid: true, present: false, bytes: [], length: 0 };
+}
+
 fn unsupported_text_fields() -> (result: ReplayTextFieldsV1) {
     return ReplayTextFieldsV1 {
         supported: false,
         command: empty_text_span(),
-        replay_command: empty_text_span()
+        replay_command: empty_text_span(),
+        command_value: empty_text_value(),
+        replay_command_value: empty_text_value()
     };
 }
 
@@ -145,27 +162,63 @@ fn text_span(field: FieldLookupV1) -> (result: TextSpanV1) {
     };
 }
 
-fn text_fields_from_object(fields: json_order.JsonValueV1) -> (result: ReplayTextFieldsV1) {
-    let command: TextSpanV1 = text_span(lookup_field(fields, command_key()));
-    let replay_command: TextSpanV1 = text_span(lookup_field(fields, replay_command_key()));
-    return ReplayTextFieldsV1 {
-        supported: command.valid && replay_command.valid,
-        command: command,
-        replay_command: replay_command
+fn decoded_string_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
+    let decoded: json_order.KeyV1 = json_order.decode_key(document, start, length);
+    return TextValueV1 {
+        valid: decoded.valid,
+        present: true,
+        bytes: decoded.ordered,
+        length: decoded.ordered_length
     };
 }
 
-fn text_fields_from_root_object(fields: json_order.JsonValueV1) -> (result: ReplayTextFieldsV1) {
+fn decode_text_value(document: json_order.JsonTokenDocumentV1, field: FieldLookupV1) -> (result: TextValueV1) {
+    let span: TextSpanV1 = text_span(field);
+    if !span.valid { return TextValueV1 { ..empty_text_value(), valid: false }; }
+    if !span.present { return empty_text_value(); }
+    return match field.value {
+        json_order.JsonValueV1.String { start: start, length: length } => decoded_string_value(document, start, length),
+        Empty => TextValueV1 { ..empty_text_value(), valid: false },
+        Null => TextValueV1 { ..empty_text_value(), valid: false },
+        Raw { start: raw_start, length: raw_length } => TextValueV1 { ..empty_text_value(), valid: false },
+        Array { items: items } => TextValueV1 { ..empty_text_value(), valid: false },
+        Object { fields: nested } => TextValueV1 { ..empty_text_value(), valid: false },
+        ArrayNil => TextValueV1 { ..empty_text_value(), valid: false },
+        ArrayCons { head: head, tail: tail } => TextValueV1 { ..empty_text_value(), valid: false },
+        ObjectNil => TextValueV1 { ..empty_text_value(), valid: false },
+        ObjectCons { key: key, value: value, tail: tail } => TextValueV1 { ..empty_text_value(), valid: false }
+    };
+}
+
+fn text_fields_from_object(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: ReplayTextFieldsV1) {
+    let command_field: FieldLookupV1 = lookup_field(fields, command_key());
+    let replay_command_field: FieldLookupV1 = lookup_field(fields, replay_command_key());
+    let command: TextSpanV1 = text_span(command_field);
+    let replay_command: TextSpanV1 = text_span(replay_command_field);
+    let command_value: TextValueV1 = decode_text_value(document, command_field);
+    let replay_command_value: TextValueV1 = decode_text_value(document, replay_command_field);
+    return ReplayTextFieldsV1 {
+        supported: command.valid && replay_command.valid && command_value.valid && replay_command_value.valid,
+        command: command,
+        replay_command: replay_command,
+        command_value: command_value,
+        replay_command_value: replay_command_value
+    };
+}
+
+fn text_fields_from_root_object(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: ReplayTextFieldsV1) {
     let reproduction: FieldLookupV1 = lookup_field(fields, reproduction_key());
     if !reproduction.found {
         return ReplayTextFieldsV1 {
             supported: true,
             command: empty_text_span(),
-            replay_command: empty_text_span()
+            replay_command: empty_text_span(),
+            command_value: empty_text_value(),
+            replay_command_value: empty_text_value()
         };
     }
     return match reproduction.value {
-        json_order.JsonValueV1.Object { fields: nested } => text_fields_from_object(nested),
+        json_order.JsonValueV1.Object { fields: nested } => text_fields_from_object(nested, document),
         Empty => unsupported_text_fields(),
         Null => unsupported_text_fields(),
         Raw { start: start, length: length } => unsupported_text_fields(),
@@ -178,9 +231,9 @@ fn text_fields_from_root_object(fields: json_order.JsonValueV1) -> (result: Repl
     };
 }
 
-fn replay_text_fields(value: json_order.JsonValueV1) -> (result: ReplayTextFieldsV1) {
+fn replay_text_fields(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: ReplayTextFieldsV1) {
     return match value {
-        json_order.JsonValueV1.Object { fields: fields } => text_fields_from_root_object(fields),
+        json_order.JsonValueV1.Object { fields: fields } => text_fields_from_root_object(fields, document),
         Empty => unsupported_text_fields(),
         Null => unsupported_text_fields(),
         Raw { start: start, length: length } => unsupported_text_fields(),
@@ -303,6 +356,10 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
             reproduction_replay_command_present: false,
             reproduction_replay_command_start: 0,
             reproduction_replay_command_length: 0,
+            reproduction_command_text: [],
+            reproduction_command_text_length: 0,
+            reproduction_replay_command_text: [],
+            reproduction_replay_command_text_length: 0,
             document_length: 0,
             input_sha256: request.input_sha256
         };
@@ -313,7 +370,7 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
     let parsed: json_order.ParseStateV1 = json_order.parse_document(request.document);
     let supported: bool = parsed.valid && parsed.has_root;
     let result_valid: bool = supported && root_schema_matches(parsed.root, request.document);
-    let text_fields: ReplayTextFieldsV1 = replay_text_fields(parsed.root);
+    let text_fields: ReplayTextFieldsV1 = replay_text_fields(parsed.root, request.document);
     let response: ReplaySchemaResultV1 = ReplaySchemaResultV1 {
         schema_version: result_schema(),
         supported: supported,
@@ -325,6 +382,10 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
         reproduction_replay_command_present: text_fields.replay_command.present,
         reproduction_replay_command_start: text_fields.replay_command.start,
         reproduction_replay_command_length: text_fields.replay_command.length,
+        reproduction_command_text: text_fields.command_value.bytes,
+        reproduction_command_text_length: text_fields.command_value.length,
+        reproduction_replay_command_text: text_fields.replay_command_value.bytes,
+        reproduction_replay_command_text_length: text_fields.replay_command_value.length,
         document_length: request.document.byte_length,
         input_sha256: request.input_sha256
     };
