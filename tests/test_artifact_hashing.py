@@ -188,20 +188,24 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             for call in embedded_call_batch.call_args_list
         ]
         requests = [
-            call.args[0][0]["typed_args"][0]
+            call.args[0][0]
             for call in embedded_call_batch.call_args_list
         ]
+        request_arguments = [request["args"] for request in requests]
         finalize_values = [
-            request["record"]["fields"]["finalize"]["boolean"]["value"]
-            for request in requests
+            arguments[-1]["boolean"]["value"]
+            for arguments in request_arguments
         ]
-        request_fields = [request["record"]["fields"] for request in requests]
+        request_chunks = [
+            arguments[-2]["sequence"]["values"]
+            for arguments in request_arguments
+        ]
         window_byte_counts = [
             sum(
                 len(chunk["sequence"]["values"])
-                for chunk in fields["chunks"]["sequence"]["values"]
+                for chunk in chunks
             )
-            for fields in request_fields
+            for chunks in request_chunks
         ]
         window_counts = [
             (size + mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - 1)
@@ -212,15 +216,22 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
         assert expected_windows == 65
         assert max(window_byte_counts) == mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
         assert all(
-            len(fields["chunks"]["sequence"]["values"])
+            len(chunks)
             <= mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST
-            for fields in request_fields
+            for chunks in request_chunks
         )
-        assert function_batches.count(["update_stream_state"]) == expected_windows + 2
+        assert function_batches.count(["update_stream_state_from_empty"]) == 4
+        assert function_batches.count(["update_stream_state_continue"]) == expected_windows - 2
         assert len(function_batches) == expected_windows + 2
         assert all(len(batch) == 1 for batch in function_batches)
         assert "init" not in [batch[0] for batch in function_batches]
         assert "finalize_standard" not in [batch[0] for batch in function_batches]
+        assert all("typed_args" not in request for request in requests)
+        assert all(
+            isinstance(arguments[0].get("record", {}).get("fields"), list)
+            for request, arguments in zip(requests, request_arguments, strict=True)
+            if request["function"] == "update_stream_state_continue"
+        )
         assert finalize_values[:2] == [True, True]
         assert finalize_values[1 + window_counts[0]] is True
         assert finalize_values[-1] is True

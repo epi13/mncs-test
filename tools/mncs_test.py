@@ -3587,35 +3587,6 @@ def _host_record(name: str, fields: dict[str, Any]) -> dict[str, Any]:
     return {"record": record}
 
 
-def _host_value_from_execution(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or len(value) != 1:
-        raise AdapterError("mncs-embed returned a malformed execution value")
-    kind, body = next(iter(value.items()))
-    if not isinstance(body, dict):
-        raise AdapterError("mncs-embed returned a malformed tagged execution value")
-    if kind == "record":
-        raw_fields = body.get("fields")
-        if not isinstance(raw_fields, list):
-            raise AdapterError("mncs-embed returned a malformed record value")
-        fields: dict[str, Any] = {}
-        for pair in raw_fields:
-            if not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str):
-                raise AdapterError("mncs-embed returned a malformed record field")
-            fields[pair[0]] = _host_value_from_execution(pair[1])
-        name = body.get("name", "")
-        if not isinstance(name, str):
-            raise AdapterError("mncs-embed returned a malformed record name")
-        return _host_record(name, fields)
-    if kind == "sequence":
-        values = body.get("values")
-        if not isinstance(values, list):
-            raise AdapterError("mncs-embed returned a malformed sequence value")
-        return _host_sequence([_host_value_from_execution(item) for item in values])
-    if kind in ("integer", "byte", "boolean", "float") and "value" in body:
-        return {kind: {"value": body["value"]}}
-    raise AdapterError(f"mncs-embed returned an unsupported execution value: {kind}")
-
-
 class ResultIdentityEmbedHasher:
     """Reuse one admitted MNCS backend session for bounded ArtifactStore hashes."""
 
@@ -3803,27 +3774,9 @@ class ResultIdentityEmbedHasher:
             raise AdapterError("MNCS result identity returned the wrong payload count")
         return self._digest_bytes(records[0], "result identity")
 
-    def _empty_stream_state(self) -> dict[str, Any]:
-        return _host_record(
-            "ResultIdentityHashStateV1",
-            {
-                "h": _host_sequence([_host_integer(0) for _ in range(8)]),
-                "total": _host_integer(0),
-                "buf": _host_sequence([_host_byte(0) for _ in range(64)]),
-                "buffered": _host_integer(0),
-            },
-        )
-
-    def _state_fields(self, state: dict[str, Any]) -> dict[str, Any]:
-        record = state.get("record")
-        fields = record.get("fields") if isinstance(record, dict) else None
-        if not isinstance(fields, dict):
-            raise AdapterError("MNCS stream hash returned a malformed continuation state")
-        return fields
-
     def _update_stream_window(
         self,
-        state: dict[str, Any],
+        state: dict[str, Any] | None,
         window: bytes,
         *,
         total_before: int,
@@ -3831,31 +3784,15 @@ class ResultIdentityEmbedHasher:
     ) -> tuple[dict[str, Any], str | None]:
         if self.session is None:
             raise AdapterError("MNCS result identity session is closed")
-        has_state = total_before > 0
-        request_state = (
-            _host_record("ResultIdentityHashStateV1", self._state_fields(state))
-            if has_state
-            else self._empty_stream_state()
-        )
         chunks = [
             _host_sequence([_host_byte(byte) for byte in window[offset : offset + 1024]])
             for offset in range(0, len(window), 1024)
         ]
-        request = _host_record(
-            "ResultIdentityStreamRequestV1",
-            {
-                "schema_version": _host_sequence(
-                    [
-                        _host_byte(byte)
-                        for byte in TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA.encode()
-                    ]
-                ),
-                "has_state": _host_boolean(has_state),
-                "state": request_state,
-                "chunks": _host_sequence(chunks),
-                "finalize": _host_boolean(finalize),
-            },
-        )
+        function = "update_stream_state_from_empty"
+        arguments: list[Any] = [_host_sequence(chunks), _host_boolean(finalize)]
+        if state is not None:
+            function = "update_stream_state_continue"
+            arguments.insert(0, state)
         budget = result_identity_step_budget([window])
         if budget > TEST_RESULT_IDENTITY_MAX_STEP_BUDGET:
             raise AdapterError("MNCS result identity stream window exceeds its step budget")
@@ -3863,52 +3800,44 @@ class ResultIdentityEmbedHasher:
             [
                 {
                     "module": "mncs.test.result_identity_v1",
-                    "function": "update_stream_state",
-                    "typed_args": [request],
+                    "function": function,
+                    "args": arguments,
                     "step_budget": budget,
                 },
             ]
         )
         if len(outputs) != 1:
             raise AdapterError("MNCS result identity stream returned the wrong result count")
-        update = _host_value_from_execution(
-            self._returned(outputs[0], "result identity stream")
-        )
-        if not isinstance(update, dict):
+        update = self._returned(outputs[0], "result identity stream")
+        update_fields = record_fields(update)
+        if update_fields is None:
             raise AdapterError("MNCS result identity stream returned no update record")
-        record = update.get("record")
-        update_fields = record.get("fields") if isinstance(record, dict) else None
-        accepted = update_fields.get("accepted") if isinstance(update_fields, dict) else None
-        accepted_boolean = accepted.get("boolean") if isinstance(accepted, dict) else None
-        if not isinstance(accepted_boolean, dict) or accepted_boolean.get("value") is not True:
+        if boolean_value(update_fields.get("accepted")) is not True:
             raise AdapterError("MNCS result identity stream rejected the bounded hash request")
-        finalized = update_fields.get("finalized") if isinstance(update_fields, dict) else None
-        finalized_boolean = finalized.get("boolean") if isinstance(finalized, dict) else None
         if (
-            not isinstance(finalized_boolean, dict)
-            or finalized_boolean.get("value") is not finalize
+            boolean_value(update_fields.get("finalized")) is not finalize
         ):
             raise AdapterError("MNCS result identity stream returned the wrong finalization status")
-        state = update_fields.get("state")
-        if not isinstance(state, dict) or not isinstance(state.get("record"), dict):
-            raise AdapterError("MNCS result identity stream returned a malformed state record")
+        digest_state = update_fields.get("state")
         total = total_before + len(window)
-        fields = self._state_fields(state)
-        total_value = fields.get("total", {}).get("integer", {}).get("value")
-        buffered_value = fields.get("buffered", {}).get("integer", {}).get("value")
+        state_fields = record_fields(digest_state)
+        if state_fields is None:
+            raise AdapterError("MNCS result identity stream returned a malformed state record")
+        total_value = integer_value(state_fields.get("total"))
+        buffered_value = integer_value(state_fields.get("buffered"))
         if total_value != total or buffered_value != total % 64:
             raise AdapterError("MNCS result identity stream returned inconsistent SHA-256 state")
         digest = (
             self._digest_value(update_fields.get("digest"), "result identity stream finalization")
             if finalize else None
         )
-        return state, digest
+        return update, digest
 
     def digest_chunks(self, source_chunks: Iterable[bytes]) -> str:
         """Hash a byte stream through MNCS with bounded, reusable session calls."""
         if self.session is None or self._closed:
             raise AdapterError("MNCS result identity session is closed")
-        state = self._empty_stream_state()
+        state: dict[str, Any] | None = None
         total = 0
         pending = bytearray()
         for source_chunk in source_chunks:

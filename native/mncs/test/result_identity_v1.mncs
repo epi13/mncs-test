@@ -231,21 +231,34 @@ fn stream_initial_state(request: ResultIdentityStreamRequestV1) -> (result: sha2
     return sha256.init();
 }
 
-fn update_stream_state(
-    request: ResultIdentityStreamRequestV1
+fn valid_digest_state(state: sha256.DigestState) -> (result: bool) {
+    if state.buffered >= 64 || state.total % 64 != state.buffered {
+        return false;
+    }
+    iterate i over state.buf carrying valid: bool = true {
+        next valid = valid && (i < state.buffered || state.buf[i] == 0);
+    }
+    return valid;
+}
+
+fn rejected_stream_update() -> (result: ResultIdentityStreamUpdateV1) {
+    return ResultIdentityStreamUpdateV1 {
+        accepted: false,
+        finalized: false,
+        state: sha256.init(),
+        digest: [0; 32]
+    };
+}
+
+fn update_stream_digest(
+    initial: sha256.DigestState,
+    chunks: [[byte; up_to 1024]; up_to 14],
+    finalize: bool
 ) -> (result: ResultIdentityStreamUpdateV1) {
-    if !valid_stream_request(request) {
-        return ResultIdentityStreamUpdateV1 {
-            accepted: false,
-            finalized: false,
-            state: sha256.init(),
-            digest: [0; 32]
-        };
+    iterate i over chunks carrying digest: sha256.DigestState = initial {
+        next digest = absorb_chunk(digest, chunks[i]);
     }
-    iterate i over request.chunks carrying digest: sha256.DigestState = stream_initial_state(request) {
-        next digest = absorb_chunk(digest, request.chunks[i]);
-    }
-    if request.finalize {
+    if finalize {
         return ResultIdentityStreamUpdateV1 {
             accepted: true,
             finalized: true,
@@ -259,6 +272,40 @@ fn update_stream_state(
         state: digest,
         digest: [0; 32]
     };
+}
+
+// Retained-session callers pass the previous returned ExecutionValue directly
+// through the embed `args` boundary. The stream state never needs a host-side
+// typed-value tree projection or reconstruction.
+fn update_stream_state_from_empty(
+    chunks: [[byte; up_to 1024]; up_to 14],
+    finalize: bool
+) -> (result: ResultIdentityStreamUpdateV1) {
+    return update_stream_digest(sha256.init(), chunks, finalize);
+}
+
+fn update_stream_state_continue(
+    previous: ResultIdentityStreamUpdateV1,
+    chunks: [[byte; up_to 1024]; up_to 14],
+    finalize: bool
+) -> (result: ResultIdentityStreamUpdateV1) {
+    if !previous.accepted || previous.finalized || !valid_digest_state(previous.state) {
+        return rejected_stream_update();
+    }
+    return update_stream_digest(previous.state, chunks, finalize);
+}
+
+fn update_stream_state(
+    request: ResultIdentityStreamRequestV1
+) -> (result: ResultIdentityStreamUpdateV1) {
+    if !valid_stream_request(request) {
+        return rejected_stream_update();
+    }
+    return update_stream_digest(
+        stream_initial_state(request),
+        request.chunks,
+        request.finalize
+    );
 }
 
 fn stream_state_record(state: sha256.DigestState) -> (result: ResultIdentityHashStateV1) {

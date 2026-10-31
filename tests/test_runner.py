@@ -596,6 +596,41 @@ class RunnerTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_result_identity_stream_reuses_native_update_values(self):
+        payload = bytes(
+            (index * 37 + 5) % 256
+            for index in range(mncs_test.TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES + 1)
+        )
+        environment = mncs_test.native_application_environment(REPO)
+        with tempfile.TemporaryDirectory(prefix="mncs-test-identity-stream-") as directory:
+            hasher = mncs_test.ResultIdentityEmbedHasher(
+                mncs=str(MNCS),
+                cwd=Path(directory),
+                environment=environment,
+            )
+            try:
+                self.assertIsNotNone(hasher.session)
+                with mock.patch.object(
+                    hasher.session,
+                    "call_batch",
+                    wraps=hasher.session.call_batch,
+                ) as native_calls:
+                    digest = hasher.digest(payload)
+            finally:
+                hasher.close()
+
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+        requests = [call.args[0][0] for call in native_calls.call_args_list]
+        self.assertEqual(
+            [request["function"] for request in requests],
+            ["update_stream_state_from_empty"]
+            + ["update_stream_state_continue"] * 4,
+        )
+        self.assertTrue(
+            all("args" in request and "typed_args" not in request for request in requests)
+        )
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
     def test_family_inventory_join_runs_its_exact_behavioral_test(self):
         request = {
             "schema_version": "mncs.family-check-request/1",
