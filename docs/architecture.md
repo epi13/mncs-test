@@ -293,16 +293,14 @@ tokens, selects the unique requested definition, validates its supported
 selector fields, and hashes the compact key-ordered definition. Python receives
 only the manifest path, inventory identity, sorted test identities, and
 definition digest needed by the runner; it no longer builds the manifest's
-typed-value tree on this path. Definitions with escaped text, unsorted
-identities, extra fields, paths outside the native bound, or other unsupported
-shapes still use `load_family_check`, which keeps the existing validation and
-normalization behavior. Differential tests compare native projection and
-identity against that independent loader, and the family consumer test proves
-the supported path does not call it. These checks pass when the integrated
-Stdlib JSON cursor provider is selected. The Environment's default local
-Stdlib binding remains two commits behind `origin/main`; its existing
-read-only Test scope cannot reconcile that provider checkout, so provider
-selection remains an open Environment pressure.
+typed-value tree on this path. At initial delivery, escaped text and unsorted
+identities stayed on `load_family_check`'s compatibility path. Differential
+tests compare native projection and identity against that independent loader,
+and the family consumer test proves the supported path does not call it. These
+checks pass when the integrated Stdlib JSON cursor provider is selected. The
+Environment's default local Stdlib binding remains two commits behind
+`origin/main`; its existing read-only Test scope cannot reconcile that provider
+checkout, so provider selection remains an open Environment pressure.
 
 P-021 moves the family-check request's supported flat JSON projection into
 `mncs.test.family_check_request_native_v1`. MNCS validates the request schema,
@@ -316,6 +314,19 @@ The native request app reuses Test's existing JSON token parser; no duplicate
 Stdlib parser was added. Differential and compatibility tests cover the
 supported projection and fallback boundaries, and the compiler-backed live
 family-check runner passes end to end with the integrated Stdlib provider.
+
+P-022 extends the native family-check manifest projection to valid escaped
+selector text and unsorted test-identity lists of up to 32 entries. MNCS decodes
+escaped UTF-8 text through the existing token parser, sorts bounded identity
+lists natively, rejects duplicates, and hashes the loader-normalized definition
+with canonical JSON string escaping. Already sorted lists retain the existing
+256-identity bound; larger unsorted lists and representations outside the
+native text or execution bounds continue through `load_family_check`. Golden
+comparisons cover the normalized definition digest, escaped top-level and
+selector identities, quote/backslash/control escaping, a Unicode surrogate
+pair, two-item and 32-item unsorted lists, and native fallback behavior. The
+manifest suite passes with the integrated Stdlib JSON cursor provider and
+release MNCS toolchain.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

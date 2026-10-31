@@ -36,8 +36,10 @@ record IdentityListV1 {
     count: u64,
     previous: [byte; up_to 512],
     previous_length: u64,
+    ordered: bool,
     valid: bool
 }
+record IdentitySortV1 { values: [[byte; up_to 512]; 32], count: u64 }
 record CheckSearchV1 {
     remaining: json_order.JsonValueV1,
     selected: json_order.JsonValueV1,
@@ -148,12 +150,34 @@ fn copy_text_step(
 }
 
 fn text_string_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
+    if length <= 256 {
+        let decoded: json_order.KeyV1 = json_order.decode_key(document, start, length);
+        let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: decoded.valid };
+        iterate i up_to 256 carrying copied: TextCopyV1 = initial {
+            next copied = copy_decoded_key_byte(copied, decoded, i);
+        }
+        let value: TextCopyV1 = copied;
+        return TextValueV1 {
+            bytes: value.bytes[0..value.length],
+            length: value.length,
+            valid: decoded.valid && value.length == decoded.ordered_length
+        };
+    }
     let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: length <= 512 };
     iterate i up_to 512 carrying current: TextCopyV1 = initial {
         next current = copy_text_step(current, document, start, length, i);
     }
     let copied: TextCopyV1 = current;
     return TextValueV1 { bytes: copied.bytes[0..copied.length], length: copied.length, valid: copied.valid && copied.length == length };
+}
+
+fn copy_decoded_key_byte(state: TextCopyV1, key: json_order.KeyV1, index: u64) -> (result: TextCopyV1) {
+    if index >= key.ordered_length || !state.valid { return state; }
+    return TextCopyV1 {
+        ..state,
+        bytes: replace(state.bytes, state.length, key.ordered[index]),
+        length: state.length +% 1
+    };
 }
 
 fn text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
@@ -262,8 +286,8 @@ fn object_keys_allowed(fields: json_order.JsonValueV1, document: json_order.Json
     return current.valid && json_order.is_object_nil(current.remaining);
 }
 
-fn compare_identity_step(order: i64, left: [byte; up_to 512], right: [byte; up_to 512], common: u64, index: u64) -> (result: i64) {
-    if index >= common || order != 0 { return order; }
+fn compare_identity_step(order: i64, left: [byte; up_to 512], right: [byte; up_to 512], index: u64) -> (result: i64) {
+    if order != 0 { return order; }
     if left[index] < right[index] { return -1; }
     if left[index] > right[index] { return 1; }
     return order;
@@ -271,8 +295,9 @@ fn compare_identity_step(order: i64, left: [byte; up_to 512], right: [byte; up_t
 
 fn identity_order(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: i64) {
     let common: u64 = select(left.len < right.len, left.len, right.len);
-    iterate i up_to 512 carrying order: i64 = 0 {
-        next order = compare_identity_step(order, left, right, common, i);
+    let shared: [byte; up_to 512] = left[0..common];
+    iterate i over shared carrying order: i64 = 0 {
+        next order = compare_identity_step(order, left, right, i);
     }
     if order != 0 { return order; }
     if left.len < right.len { return -1; }
@@ -284,7 +309,7 @@ fn empty_identity_list(items: json_order.JsonValueV1) -> (result: IdentityListV1
     let empty: [byte; up_to 512] = [];
     return IdentityListV1 {
         remaining: items, values: [empty; 256], count: 0,
-        previous: [], previous_length: 0, valid: true
+        previous: [], previous_length: 0, ordered: true, valid: true
     };
 }
 
@@ -293,15 +318,16 @@ fn identity_string_step(state: IdentityListV1, head: json_order.JsonValueV1, tai
     if !identity.valid || identity.length == 0 || state.count >= 256 {
         return IdentityListV1 { ..state, remaining: tail, valid: false };
     }
-    let ordered: bool = state.count == 0 || identity_order(state.previous, identity.bytes) < 0;
-    if !ordered { return IdentityListV1 { ..state, remaining: tail, valid: false }; }
+    let remains_ordered: bool = state.ordered
+        && (state.count == 0 || identity_order(state.previous, identity.bytes) < 0);
     return IdentityListV1 {
         ..state,
         remaining: tail,
         values: replace(state.values, state.count, identity.bytes),
         count: state.count +% 1,
         previous: identity.bytes,
-        previous_length: identity.length
+        previous_length: identity.length,
+        ordered: remains_ordered
     };
 }
 
@@ -326,10 +352,80 @@ fn read_identity_list(items: json_order.JsonValueV1, document: json_order.JsonTo
     iterate i up_to 256 carrying current: IdentityListV1 = initial {
         next current = identity_list_step(current, document);
     }
-    return IdentityListV1 {
-        ..current,
-        valid: current.valid && json_order.is_array_nil(current.remaining) && current.count > 0
-    };
+    let collected: IdentityListV1 = current;
+    let complete: bool = collected.valid && json_order.is_array_nil(collected.remaining) && collected.count > 0;
+    if !complete { return IdentityListV1 { ..collected, valid: false }; }
+    if collected.ordered { return collected; }
+    if collected.count > 32 { return IdentityListV1 { ..collected, valid: false }; }
+    let ordered: IdentitySortV1 = sort_identity_values(collected.values, collected.count);
+    let unique: bool = identities_are_strictly_ordered(ordered);
+    let sorted: [[byte; up_to 512]; 256] = merge_identity_sort(collected.values, ordered);
+    return IdentityListV1 { ..collected, values: sorted, ordered: unique, valid: unique };
+}
+
+fn collect_identity_sort_step(state: IdentitySortV1, values: [[byte; up_to 512]; 256], index: u64) -> (result: IdentitySortV1) {
+    if index >= state.count { return state; }
+    return IdentitySortV1 { ..state, values: replace(state.values, index, values[index]) };
+}
+
+fn collect_identity_sort(values: [[byte; up_to 512]; 256], count: u64) -> (result: IdentitySortV1) {
+    let empty: [byte; up_to 512] = [];
+    let initial: IdentitySortV1 = IdentitySortV1 { values: [empty; 32], count: count };
+    iterate i up_to 32 carrying current: IdentitySortV1 = initial {
+        next current = collect_identity_sort_step(current, values, i);
+    }
+    return current;
+}
+
+fn identity_sort_pass_step(state: IdentitySortV1, index: u64) -> (result: IdentitySortV1) {
+    let right_index: u64 = index +% 1;
+    if right_index >= state.count { return state; }
+    if identity_order(state.values[index], state.values[right_index]) <= 0 { return state; }
+    let left: [byte; up_to 512] = state.values[index];
+    let right: [byte; up_to 512] = state.values[right_index];
+    let first: [[byte; up_to 512]; 32] = replace(state.values, index, right);
+    return IdentitySortV1 { ..state, values: replace(first, right_index, left) };
+}
+
+fn identity_sort_pass(values: IdentitySortV1) -> (result: IdentitySortV1) {
+    iterate i up_to 32 carrying current: IdentitySortV1 = values {
+        next current = identity_sort_pass_step(current, i);
+    }
+    return current;
+}
+
+fn sort_identity_values(values: [[byte; up_to 512]; 256], count: u64) -> (result: IdentitySortV1) {
+    let initial: IdentitySortV1 = collect_identity_sort(values, count);
+    iterate pass up_to 32 carrying current: IdentitySortV1 = initial {
+        next current = identity_sort_pass(current);
+    }
+    return current;
+}
+
+fn merge_identity_sort_step(values: [[byte; up_to 512]; 256], sorted: IdentitySortV1, index: u64) -> (result: [[byte; up_to 512]; 256]) {
+    if index >= sorted.count { return values; }
+    return replace(values, index, sorted.values[index]);
+}
+
+fn merge_identity_sort(values: [[byte; up_to 512]; 256], sorted: IdentitySortV1) -> (result: [[byte; up_to 512]; 256]) {
+    iterate i up_to 32 carrying current: [[byte; up_to 512]; 256] = values {
+        next current = merge_identity_sort_step(current, sorted, i);
+    }
+    return current;
+}
+
+fn identity_order_check_step(valid: bool, values: IdentitySortV1, index: u64) -> (result: bool) {
+    if !valid { return valid; }
+    if index == 0 { return valid; }
+    if index >= values.count { return valid; }
+    return identity_order(values.values[index -% 1], values.values[index]) < 0;
+}
+
+fn identities_are_strictly_ordered(values: IdentitySortV1) -> (result: bool) {
+    iterate i up_to 32 carrying valid: bool = true {
+        next valid = identity_order_check_step(valid, values, i);
+    }
+    return valid;
 }
 
 fn segment_is_parent(path: TextValueV1, start: u64, end: u64) -> (result: bool) {
@@ -507,7 +603,135 @@ fn empty_projection() -> (result: ManifestProjectionV1) {
     };
 }
 
-fn project_check(fields: json_order.JsonValueV1, selected: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
+fn lower_hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (48 +% value) as byte; }
+    return (87 +% value) as byte;
+}
+
+fn escaped_control(writer: json_order.JsonOrderWriterV1, value: byte) -> (result: json_order.JsonOrderWriterV1) {
+    let number: u64 = value as u64;
+    let first: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 92);
+    let second: json_order.JsonOrderWriterV1 = json_order.writer_byte(first, 117);
+    let third: json_order.JsonOrderWriterV1 = json_order.writer_byte(second, 48);
+    let fourth: json_order.JsonOrderWriterV1 = json_order.writer_byte(third, 48);
+    let fifth: json_order.JsonOrderWriterV1 = json_order.writer_byte(fourth, lower_hex_digit(number / 16));
+    return json_order.writer_byte(fifth, lower_hex_digit(number % 16));
+}
+
+fn canonical_text_step(writer: json_order.JsonOrderWriterV1, value: byte) -> (result: json_order.JsonOrderWriterV1) {
+    if !writer.ok { return writer; }
+    if value == 34 || value == 92 {
+        return json_order.writer_byte(json_order.writer_byte(writer, 92), value);
+    }
+    if value == 8 { return json_order.writer_bytes(writer, [92, 98]); }
+    if value == 9 { return json_order.writer_bytes(writer, [92, 116]); }
+    if value == 10 { return json_order.writer_bytes(writer, [92, 110]); }
+    if value == 12 { return json_order.writer_bytes(writer, [92, 102]); }
+    if value == 13 { return json_order.writer_bytes(writer, [92, 114]); }
+    if value < 32 { return escaped_control(writer, value); }
+    return json_order.writer_byte(writer, value);
+}
+
+fn write_canonical_text(writer: json_order.JsonOrderWriterV1, value: TextValueV1) -> (result: json_order.JsonOrderWriterV1) {
+    if !value.valid { return json_order.JsonOrderWriterV1 { ..writer, ok: false }; }
+    let opened: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 34);
+    iterate i over value.bytes carrying current: json_order.JsonOrderWriterV1 = opened {
+        next current = canonical_text_step(current, value.bytes[i]);
+    }
+    return json_order.writer_byte(current, 34);
+}
+
+fn write_sorted_identity_step(
+    writer: json_order.JsonOrderWriterV1,
+    identities: [[byte; up_to 512]; up_to 256],
+    count: u64,
+    index: u64
+) -> (result: json_order.JsonOrderWriterV1) {
+    if index >= count { return writer; }
+    let identity: [byte; up_to 512] = identities[index];
+    if index == 0 {
+        return write_canonical_text(writer, TextValueV1 {
+            bytes: identity, length: identity.len, valid: identity.len > 0
+        });
+    }
+    let separated: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 44);
+    return write_canonical_text(separated, TextValueV1 {
+        bytes: identity, length: identity.len, valid: identity.len > 0
+    });
+}
+
+fn write_sorted_identities(
+    writer: json_order.JsonOrderWriterV1,
+    identities: [[byte; up_to 512]; up_to 256],
+    count: u64
+) -> (result: json_order.JsonOrderWriterV1) {
+    let opened: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 91);
+    iterate i up_to 256 carrying current: json_order.JsonOrderWriterV1 = opened {
+        next current = write_sorted_identity_step(current, identities, count, i);
+    }
+    return json_order.writer_byte(current, 93);
+}
+
+fn copy_short_text_byte(state: TextCopyV1, bytes: [byte; up_to 64], index: u64) -> (result: TextCopyV1) {
+    if index >= bytes.len { return state; }
+    return TextCopyV1 {
+        ..state,
+        bytes: replace(state.bytes, state.length, bytes[index]),
+        length: state.length +% 1
+    };
+}
+
+fn short_text_value(bytes: [byte; up_to 64], valid: bool) -> (result: TextValueV1) {
+    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: valid };
+    iterate i up_to 64 carrying copied: TextCopyV1 = initial {
+        next copied = copy_short_text_byte(copied, bytes, i);
+    }
+    return TextValueV1 { bytes: copied.bytes[0..copied.length], length: copied.length, valid: copied.valid };
+}
+
+fn write_check_definition(
+    writer: json_order.JsonOrderWriterV1,
+    identity: TextValueV1,
+    contract: TextValueV1,
+    runner: TextValueV1,
+    surface: TextValueV1,
+    has_surface: bool,
+    selector: SelectorProjectionV1
+) -> (result: json_order.JsonOrderWriterV1) {
+    let opened: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 123);
+    let contract_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(opened,
+        [34,99,111,110,116,114,97,99,116,95,105,100,101,110,116,105,116,121,34,58]);
+    let contract_value: json_order.JsonOrderWriterV1 = write_canonical_text(contract_key, contract);
+    let identity_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(
+        json_order.writer_byte(contract_value, 44), [34,105,100,101,110,116,105,116,121,34,58]);
+    let identity_value: json_order.JsonOrderWriterV1 = write_canonical_text(identity_key, identity);
+    let runner_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(
+        json_order.writer_byte(identity_value, 44), [34,114,117,110,110,101,114,34,58]);
+    let runner_value: json_order.JsonOrderWriterV1 = write_canonical_text(runner_key, runner);
+    let selector_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(
+        json_order.writer_byte(runner_value, 44), [34,115,101,108,101,99,116,111,114,34,58,123]);
+    let inventory_value: TextValueV1 = short_text_value(selector.inventory_identity, selector.supported);
+    let inventory_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(selector_key,
+        [34,105,110,118,101,110,116,111,114,121,95,105,100,101,110,116,105,116,121,34,58]);
+    let inventory_written: json_order.JsonOrderWriterV1 = write_canonical_text(inventory_key, inventory_value);
+    let manifest_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(
+        json_order.writer_byte(inventory_written, 44), [34,109,97,110,105,102,101,115,116,34,58]);
+    let manifest_value: TextValueV1 = TextValueV1 {
+        bytes: selector.manifest, length: selector.manifest.len, valid: selector.supported
+    };
+    let manifest_written: json_order.JsonOrderWriterV1 = write_canonical_text(manifest_key, manifest_value);
+    let identities_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(
+        json_order.writer_byte(manifest_written, 44), [34,116,101,115,116,95,105,100,101,110,116,105,116,105,101,115,34,58]);
+    let identities_written: json_order.JsonOrderWriterV1 = write_sorted_identities(
+        identities_key, selector.test_identities, selector.identity_count);
+    let selector_closed: json_order.JsonOrderWriterV1 = json_order.writer_byte(identities_written, 125);
+    if !has_surface { return json_order.writer_byte(selector_closed, 125); }
+    let surface_key: json_order.JsonOrderWriterV1 = json_order.writer_bytes(
+        json_order.writer_byte(selector_closed, 44), [34,115,117,114,102,97,99,101,34,58]);
+    return json_order.writer_bytes(write_canonical_text(surface_key, surface), [125]);
+}
+
+fn project_check(fields: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
     if !object_keys_allowed(fields, document, false) { return empty_projection(); }
     let identity: TextValueV1 = field_text(fields, key_identity(), document);
     let contract: TextValueV1 = field_text(fields, key_contract(), document);
@@ -522,7 +746,8 @@ fn project_check(fields: json_order.JsonValueV1, selected: json_order.JsonValueV
         && runner.valid && same_text(runner.bytes, runner_value())
         && selector_field.found && selector.supported && surface_valid;
     if !valid { return empty_projection(); }
-    let writer: json_order.JsonOrderWriterV1 = json_order.write_json(selected, json_order.writer_empty(), document);
+    let writer: json_order.JsonOrderWriterV1 = write_check_definition(
+        json_order.writer_empty(), identity, contract, runner, surface, surface_field.found, selector);
     if !writer.ok || writer.length == 0 { return empty_projection(); }
     return ManifestProjectionV1 {
         supported: true,
@@ -536,7 +761,7 @@ fn project_check(fields: json_order.JsonValueV1, selected: json_order.JsonValueV
 
 fn project_selected(value: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
     return match value {
-        json_order.JsonValueV1.Object { fields: fields } => project_check(fields, value, request, document),
+        json_order.JsonValueV1.Object { fields: fields } => project_check(fields, request, document),
         json_order.JsonValueV1.Empty => empty_projection(),
         json_order.JsonValueV1.Null => empty_projection(),
         json_order.JsonValueV1.Raw { start: start, length: length } => empty_projection(),

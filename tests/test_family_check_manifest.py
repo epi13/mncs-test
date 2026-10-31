@@ -75,7 +75,7 @@ def test_native_family_check_manifest_matches_independent_loader() -> None:
     ).hexdigest()
 
 
-def test_noncanonical_manifest_stays_on_compatibility_loader(tmp_path: Path) -> None:
+def test_native_manifest_sorts_unsorted_selector_identities(tmp_path: Path) -> None:
     source = ROOT / "family-verification-checks-v1.json"
     document = json.loads(source.read_text(encoding="utf-8"))
     selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
@@ -83,29 +83,108 @@ def test_noncanonical_manifest_stays_on_compatibility_loader(tmp_path: Path) -> 
     path = tmp_path / "family-verification-checks-v1.json"
     path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
-    assert _project(path) is None
     compatibility = mncs_test.load_family_check(
         path,
         check_identity=CHECK_IDENTITY,
         contract_identity=CONTRACT_IDENTITY,
         repository_id="mncs-test",
     )
+    actual = _project(path)
+
+    assert actual is not None
+    assert compatibility["selector"]["test_identities"] == sorted(
+        selected["selector"]["test_identities"]
+    )
+    assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["check_definition_identity"] == hashlib.sha256(
+        mncs_test.compact_json(compatibility).encode("utf-8")
+    ).hexdigest()
+
+
+def test_native_manifest_sorts_unsorted_identity_list_at_native_bound(tmp_path: Path) -> None:
+    source = ROOT / "family-verification-checks-v1.json"
+    document = json.loads(source.read_text(encoding="utf-8"))
+    selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
+    selected["selector"]["test_identities"] = [f"test-{index:02d}" for index in range(31, -1, -1)]
+    path = tmp_path / "family-verification-checks-v1.json"
+    path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    compatibility = mncs_test.load_family_check(
+        path,
+        check_identity=CHECK_IDENTITY,
+        contract_identity=CONTRACT_IDENTITY,
+        repository_id="mncs-test",
+    )
+    actual = _project(path)
+
+    assert actual is not None
+    assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["check_definition_identity"] == hashlib.sha256(
+        mncs_test.compact_json(compatibility).encode("utf-8")
+    ).hexdigest()
+
+
+def test_unsorted_identity_list_above_native_sort_bound_uses_loader(tmp_path: Path) -> None:
+    source = ROOT / "family-verification-checks-v1.json"
+    document = json.loads(source.read_text(encoding="utf-8"))
+    selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
+    selected["selector"]["test_identities"] = [f"test-{index:02d}" for index in range(32, -1, -1)]
+    path = tmp_path / "family-verification-checks-v1.json"
+    path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    compatibility = mncs_test.load_family_check(
+        path,
+        check_identity=CHECK_IDENTITY,
+        contract_identity=CONTRACT_IDENTITY,
+        repository_id="mncs-test",
+    )
+
+    assert _project(path) is None
     assert compatibility["selector"]["test_identities"] == sorted(
         selected["selector"]["test_identities"]
     )
 
 
-def test_escaped_identity_uses_compatibility_loader(tmp_path: Path) -> None:
-    source = (ROOT / "family-verification-checks-v1.json").read_bytes()
-    escaped = source.replace(b"verification-plan-contract", b"verification-plan\\u002dcontract", 1)
+def test_duplicate_selector_identities_keep_loader_validation_error(tmp_path: Path) -> None:
+    source = ROOT / "family-verification-checks-v1.json"
+    document = json.loads(source.read_text(encoding="utf-8"))
+    selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
+    selected["selector"]["test_identities"].append(selected["selector"]["test_identities"][0])
+    path = tmp_path / "family-verification-checks-v1.json"
+    path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    assert _project(path) is None
+    with pytest.raises(mncs_test.ManifestError, match="selector is invalid"):
+        mncs_test.load_family_check(
+            path,
+            check_identity=CHECK_IDENTITY,
+            contract_identity=CONTRACT_IDENTITY,
+            repository_id="mncs-test",
+        )
+
+
+def test_native_manifest_decodes_escaped_identity_and_hashes_canonical_definition(tmp_path: Path) -> None:
+    source = json.loads((ROOT / "family-verification-checks-v1.json").read_text(encoding="utf-8"))
+    selected = next(item for item in source["checks"] if item["identity"] == CHECK_IDENTITY)
+    selected["surface"] = 'quote " slash \\ newline\n rocket 🚀'
+    escaped = json.dumps(source, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    escaped = escaped.replace(b"verification-plan-contract", b"verification-plan\\u002dcontract", 1)
+    escaped = escaped.replace(b"test-case:tests", b"test\\u002dcase:tests", 1)
+    escaped = escaped.replace("🚀".encode("utf-8"), b"\\ud83d\\ude80", 1)
     path = tmp_path / "family-verification-checks-v1.json"
     path.write_bytes(escaped)
 
-    assert _project(path) is None
     compatibility = mncs_test.load_family_check(
         path,
         check_identity=CHECK_IDENTITY,
         contract_identity=CONTRACT_IDENTITY,
         repository_id="mncs-test",
     )
+    actual = _project(path)
+
+    assert actual is not None
     assert compatibility["identity"] == CHECK_IDENTITY
+    assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["check_definition_identity"] == hashlib.sha256(
+        mncs_test.compact_json(compatibility).encode("utf-8")
+    ).hexdigest()
