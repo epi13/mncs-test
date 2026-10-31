@@ -124,7 +124,7 @@ def test_native_manifest_sorts_unsorted_identity_list_at_64_item_bound(tmp_path:
     ).hexdigest()
 
 
-def test_65_item_unsorted_identity_list_uses_loader_fallback(tmp_path: Path) -> None:
+def test_native_manifest_merge_sorts_unsorted_identity_list_at_65_items(tmp_path: Path) -> None:
     source = ROOT / "family-verification-checks-v1.json"
     document = json.loads(source.read_text(encoding="utf-8"))
     selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
@@ -139,10 +139,57 @@ def test_65_item_unsorted_identity_list_uses_loader_fallback(tmp_path: Path) -> 
         repository_id="mncs-test",
     )
 
-    assert _project(path) is None
+    actual = _project(path)
+
+    assert actual is not None
     assert compatibility["selector"]["test_identities"] == sorted(
         selected["selector"]["test_identities"]
     )
+    assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["check_definition_identity"] == hashlib.sha256(
+        mncs_test.compact_json(compatibility).encode("utf-8")
+    ).hexdigest()
+
+
+def test_native_merge_sorts_unsorted_identity_list_at_256_item_bound(tmp_path: Path) -> None:
+    source = ROOT / "family-verification-checks-v1.json"
+    document = json.loads(source.read_text(encoding="utf-8"))
+    selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
+    selected["selector"]["test_identities"] = [f"test-{index:03d}" for index in range(255, -1, -1)]
+    path = tmp_path / "family-verification-checks-v1.json"
+    path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    compatibility = mncs_test.load_family_check(
+        path,
+        check_identity=CHECK_IDENTITY,
+        contract_identity=CONTRACT_IDENTITY,
+        repository_id="mncs-test",
+    )
+    actual = _project(path)
+
+    assert actual is not None
+    assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["check_definition_identity"] == hashlib.sha256(
+        mncs_test.compact_json(compatibility).encode("utf-8")
+    ).hexdigest()
+
+
+def test_257_item_unsorted_identity_list_uses_loader_fallback(tmp_path: Path) -> None:
+    source = ROOT / "family-verification-checks-v1.json"
+    document = json.loads(source.read_text(encoding="utf-8"))
+    selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
+    selected["selector"]["test_identities"] = [f"test-{index:03d}" for index in range(256, -1, -1)]
+    path = tmp_path / "family-verification-checks-v1.json"
+    path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    assert _project(path) is None
+    with pytest.raises(mncs_test.ManifestError, match="selector is invalid"):
+        mncs_test.load_family_check(
+            path,
+            check_identity=CHECK_IDENTITY,
+            contract_identity=CONTRACT_IDENTITY,
+            repository_id="mncs-test",
+        )
 
 
 def test_duplicate_selector_identities_keep_loader_validation_error(tmp_path: Path) -> None:

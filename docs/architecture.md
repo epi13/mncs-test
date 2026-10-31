@@ -353,13 +353,21 @@ request, manifest, and public-result suites pass against the release MNCS
 toolchain and integrated Stdlib JSON cursor provider; the compiler-backed live
 family-check command also passes with the shared decoder in both projectors.
 
-P-025 extends the native family-check manifest projection's unsorted selector
-identity sort from 32 to 64 entries. Lists of 65 or more unsorted identities
-retain the validated Python loader fallback, while already sorted lists keep
-their existing 256-item native bound. Differential coverage verifies the
-64-item reverse-order result and its canonical definition digest against the
-independent loader, plus fallback at 65; the compiler-backed family-check
-consumer passes with the expanded native sort.
+P-025 initially extended the native family-check manifest projection's
+unsorted selector identity sort from 32 to 64 entries. At that milestone,
+65-item lists retained the validated Python loader fallback; already sorted
+lists kept their existing 256-item native bound. Differential coverage
+verified the 64-item reverse-order result and canonical definition digest
+against the independent loader.
+
+P-026 replaces that bounded quadratic sort with an iterative bottom-up MNCS
+merge sort and admits unsorted selector identity lists through the existing
+256-item contract. Differential coverage verifies native sorting at 65 and
+256 entries against the independent loader and canonical digest. A 257-item
+list remains outside the existing contract: the native projector declines it
+and the loader preserves its `ManifestError`. The full manifest suite passes
+with the release MNCS toolchain and integrated Stdlib JSON cursor provider, and
+the compiler-backed live family-check consumer passes with the updated app.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
