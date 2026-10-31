@@ -7447,6 +7447,80 @@ FAMILY_CHECK_REQUEST_SCHEMA = "mncs.family-check-request/1"
 FAMILY_CHECK_RESPONSE_SCHEMA = "mncs.family-check-response/1"
 
 
+def _native_family_check_response_payload(
+    *,
+    request: dict[str, Any],
+    result_document: bytes,
+    check_result_document: bytes,
+    verdict: Any,
+    run_identity: Any,
+    test_case_identities: list[str],
+    inventory_identity: Any,
+    runner_version: str,
+    result_sha256: str,
+    check_result_sha256: str,
+    check_definition_identity: str,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Join bounded public JSON fragments and let MNCS emit the response.
+
+    TestResult and CheckResult are already independently serialized documents.
+    Carrying them as raw JSON fragments avoids rebuilding their nested Python
+    trees just to serialize the family-check envelope a second time.
+    """
+    result_fragment = result_document.rstrip()
+    check_fragment = check_result_document.rstrip()
+    if (
+        not result_fragment.startswith(b"{")
+        or not result_fragment.endswith(b"}")
+        or not check_fragment.startswith(b"{")
+        or not check_fragment.endswith(b"}")
+    ):
+        return None
+
+    def atom(value: Any) -> bytes:
+        return compact_json(value).encode("utf-8")
+
+    def object_source(fields: list[tuple[str, bytes]]) -> bytes:
+        return b"{" + b",".join(atom(key) + b":" + value for key, value in fields) + b"}"
+
+    execution = object_source([
+        ("run_identity", atom(run_identity)),
+        ("test_case_identities", atom(test_case_identities)),
+        ("inventory_identity", atom(inventory_identity)),
+        ("runner_version", atom(runner_version)),
+        ("result_sha256", atom(result_sha256)),
+        ("check_result_sha256", atom(check_result_sha256)),
+        ("check_definition_identity", atom(check_definition_identity)),
+    ])
+    family_binding = object_source([
+        ("verification_plan_id", atom(request["verification_plan_id"])),
+        ("family_graph_identity", atom(request["family_graph_identity"])),
+        ("edge_fingerprint", atom(request["edge_fingerprint"])),
+        ("source_change_sha256", atom(request["source_change_sha256"])),
+    ])
+    source = object_source([
+        ("schema_version", atom(FAMILY_CHECK_RESPONSE_SCHEMA)),
+        ("check_identity", atom(request["check_identity"])),
+        ("contract_identity", atom(request["contract_identity"])),
+        ("contract_revision", atom(request["contract_revision"])),
+        ("runner", atom("mncs-test")),
+        ("verdict", atom(verdict)),
+        ("test_result", result_fragment),
+        ("check_result", check_fragment),
+        ("execution", execution),
+        ("family_binding", family_binding),
+    ])
+    return _native_public_result_token_tape(
+        source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+
+
 def load_family_check(
     path: Path,
     *,
@@ -7603,8 +7677,10 @@ def run_family_check(args: argparse.Namespace) -> int:
                     "mncs-test family check did not produce the required TestResult/CheckResult artifacts: "
                     + (completed.stderr.strip() or completed.stdout.strip())
                 )
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-            produced_check = json.loads(check_path.read_text(encoding="utf-8"))
+            result_document_bytes = result_path.read_bytes()
+            check_document_bytes = check_path.read_bytes()
+            result = json.loads(result_document_bytes)
+            produced_check = json.loads(check_document_bytes)
             with ArtifactStore(
                 root / "result-digest-store",
                 mncs=args.mncs,
@@ -7639,47 +7715,68 @@ def run_family_check(args: argparse.Namespace) -> int:
             check_id=request["check_identity"],
             claim="The exact repository-owned behavioral family check was executed by mncs-test",
         )
-        _, check_result_digest = _public_result_json_payload(
+        check_result_payload, check_result_digest = _public_result_json_payload(
             check_result_document,
             mncs=args.mncs,
             cwd=cwd,
             environment=check_result_environment,
         )
         check_definition_identity = sha256_bytes(compact_json(check).encode())
-        response = {
-            "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
-            "check_identity": request["check_identity"],
-            "contract_identity": request["contract_identity"],
-            "contract_revision": request["contract_revision"],
-            "runner": "mncs-test",
-            "verdict": result.get("verdict", "UNKNOWN"),
-            "test_result": result,
-            "check_result": check_result_document,
-            "execution": {
-                "run_identity": result.get("experiment", {}).get("run_identity"),
-                "test_case_identities": selected,
-                "inventory_identity": inventory_identity,
-                "runner_version": RUNNER_VERSION,
-                "result_sha256": result_digest,
-                "check_result_sha256": check_result_digest,
-                "check_definition_identity": check_definition_identity,
-            },
-            "family_binding": {
-                key: request[key]
-                for key in (
-                    "verification_plan_id",
-                    "family_graph_identity",
-                    "edge_fingerprint",
-                    "source_change_sha256",
-                )
-            },
+        run_identity = result.get("experiment", {}).get("run_identity")
+        family_binding = {
+            key: request[key]
+            for key in (
+                "verification_plan_id",
+                "family_graph_identity",
+                "edge_fingerprint",
+                "source_change_sha256",
+            )
         }
-        response_payload, _ = _public_result_json_payload(
-            response,
+        native_response = _native_family_check_response_payload(
+            request=request,
+            result_document=result_document_bytes,
+            check_result_document=check_result_payload,
+            verdict=result.get("verdict", "UNKNOWN"),
+            run_identity=run_identity,
+            test_case_identities=selected,
+            inventory_identity=inventory_identity,
+            runner_version=RUNNER_VERSION,
+            result_sha256=result_digest,
+            check_result_sha256=check_result_digest,
+            check_definition_identity=check_definition_identity,
             mncs=args.mncs,
             cwd=cwd,
             environment=check_result_environment,
         )
+        if native_response is not None:
+            response_payload, _ = native_response
+        else:
+            response = {
+                "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
+                "check_identity": request["check_identity"],
+                "contract_identity": request["contract_identity"],
+                "contract_revision": request["contract_revision"],
+                "runner": "mncs-test",
+                "verdict": result.get("verdict", "UNKNOWN"),
+                "test_result": result,
+                "check_result": check_result_document,
+                "execution": {
+                    "run_identity": run_identity,
+                    "test_case_identities": selected,
+                    "inventory_identity": inventory_identity,
+                    "runner_version": RUNNER_VERSION,
+                    "result_sha256": result_digest,
+                    "check_result_sha256": check_result_digest,
+                    "check_definition_identity": check_definition_identity,
+                },
+                "family_binding": family_binding,
+            }
+            response_payload, _ = _public_result_json_payload(
+                response,
+                mncs=args.mncs,
+                cwd=cwd,
+                environment=check_result_environment,
+            )
         sys.stdout.write(response_payload.decode("utf-8"))
         return int(result.get("exit_code", completed.returncode))
     except (ManifestError, AdapterError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:

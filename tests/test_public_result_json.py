@@ -630,6 +630,92 @@ def test_non_string_mapping_keys_keep_python_sort_semantics(tmp_path: Path) -> N
     ]
 
 
+def test_family_check_response_sends_nested_results_as_raw_native_tokens(
+    tmp_path: Path,
+) -> None:
+    request = {
+        "check_identity": "mncs-test:family-check",
+        "contract_identity": "mncs.test-contract/1",
+        "contract_revision": "0.18",
+        "verification_plan_id": "a" * 64,
+        "family_graph_identity": "b" * 64,
+        "edge_fingerprint": "c" * 64,
+        "source_change_sha256": "d" * 64,
+    }
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "verdict": "PASS",
+        "nested": {"items": ["東京", 7, True]},
+    }
+    check_result = {
+        "schema_version": mncs_test.CHECK_SCHEMA,
+        "id": request["check_identity"],
+        "verdict": "PASS",
+    }
+    result_document = mncs_test.json_bytes(result)
+    check_document = mncs_test.json_bytes(check_result)
+    expected = {
+        "schema_version": mncs_test.FAMILY_CHECK_RESPONSE_SCHEMA,
+        "check_identity": request["check_identity"],
+        "contract_identity": request["contract_identity"],
+        "contract_revision": request["contract_revision"],
+        "runner": "mncs-test",
+        "verdict": "PASS",
+        "test_result": result,
+        "check_result": check_result,
+        "execution": {
+            "run_identity": "run-1",
+            "test_case_identities": ["case-a", "case-b"],
+            "inventory_identity": "c" * 64,
+            "runner_version": mncs_test.RUNNER_VERSION,
+            "result_sha256": "d" * 64,
+            "check_result_sha256": "e" * 64,
+            "check_definition_identity": "f" * 64,
+        },
+        "family_binding": {
+            "verification_plan_id": request["verification_plan_id"],
+            "family_graph_identity": request["family_graph_identity"],
+            "edge_fingerprint": request["edge_fingerprint"],
+            "source_change_sha256": request["source_change_sha256"],
+        },
+    }
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, native_request: dict[str, object], **kwargs: object):
+        observed.append((name, native_request))
+        return original_run_native_app(name, native_request, **kwargs)
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", side_effect=observe_native_app
+    ):
+        actual = mncs_test._native_family_check_response_payload(
+            request=request,
+            result_document=result_document,
+            check_result_document=check_document,
+            verdict="PASS",
+            run_identity="run-1",
+            test_case_identities=["case-a", "case-b"],
+            inventory_identity="c" * 64,
+            runner_version=mncs_test.RUNNER_VERSION,
+            result_sha256="d" * 64,
+            check_result_sha256="e" * 64,
+            check_definition_identity="f" * 64,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    expected_bytes = mncs_test.json_bytes(expected)
+    assert actual == (expected_bytes, hashlib.sha256(expected_bytes).hexdigest())
+    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
+    source_request = observed[0][1]
+    document = source_request["document"]
+    source = "".join(chunk["bytes"] for chunk in document["chunks"]).encode("utf-8")
+    assert result_document.rstrip() in source
+    assert check_document.rstrip() in source
+
+
 def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> None:
     value = {
         "payload": "x" * 1010 + "東京" + "y" * 4,

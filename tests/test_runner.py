@@ -871,6 +871,13 @@ class RunnerTests(unittest.TestCase):
                 native_applications.append(name)
                 return response
 
+            public_payload_inputs = []
+            original_public_payload = mncs_test._public_result_json_payload
+
+            def observe_public_payload(value, **kwargs):
+                public_payload_inputs.append(value)
+                return original_public_payload(value, **kwargs)
+
             output = io.StringIO()
             with (
                 mock.patch.object(
@@ -880,6 +887,11 @@ class RunnerTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     mncs_test, "run_native_app", side_effect=observe_native_app
+                ),
+                mock.patch.object(
+                    mncs_test,
+                    "_public_result_json_payload",
+                    side_effect=observe_public_payload,
                 ),
                 redirect_stdout(output),
             ):
@@ -893,6 +905,15 @@ class RunnerTests(unittest.TestCase):
             sum(name in public_json_apps for name in native_applications),
             2,
             native_applications,
+        )
+        self.assertEqual(
+            len(public_payload_inputs),
+            1,
+            "the response path should pass serialized result fragments to MNCS",
+        )
+        self.assertEqual(
+            public_payload_inputs[0]["schema_version"],
+            mncs_test.CHECK_SCHEMA,
         )
         self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(response))
         public_json = mncs_test.json_bytes(response["check_result"])

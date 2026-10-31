@@ -195,12 +195,15 @@ path. The digest matches the public JSON bytes, including ordering,
 indentation, and the final newline. Values outside the native bounds or runs
 that exhaust the native step budget retain the compatibility serializer.
 
-The successful `mncs.family-check-response/1` envelope is also emitted through
-the bounded public-result serializer when its complete JSON tree fits. Its
-UTF-8 bytes match the compatibility formatter; over-bound trees and exhausted
-native step budgets retain the host formatter. The infrastructure-failure
-envelope remains host-formatted so it can still be emitted when native setup
-or execution fails.
+The successful `mncs.family-check-response/1` envelope now carries its already
+serialized TestResult and CheckResult documents as raw JSON fragments. Python
+still decodes them for policy validation and CheckResult projection, but it no
+longer rebuilds and re-encodes both nested trees for the response. MNCS
+tokenizes, validates, orders, pretty-prints, and hashes the composed document;
+its UTF-8 bytes match the compatibility formatter. Over-bound inputs and
+exhausted native step budgets retain the host formatter. The
+infrastructure-failure envelope remains host-formatted so it can still be
+emitted when native setup or execution fails.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
