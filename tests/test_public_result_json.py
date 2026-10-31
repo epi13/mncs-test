@@ -938,6 +938,99 @@ def test_native_public_result_key_order_handles_512_scalar_members(
     assert formatter["supported"] is True
 
 
+@pytest.mark.parametrize(
+    "indices",
+    [tuple(range(640)), tuple(reversed(range(640)))],
+    ids=["ascending-input", "descending-input"],
+)
+def test_native_public_result_key_order_handles_640_scalar_members(
+    indices: tuple[int, ...], tmp_path: Path,
+) -> None:
+    value = {f"field-{index:03d}": index for index in indices}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    compact.assert_called_once_with(value, sort_keys=False)
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    formatter = next(
+        result for name, result in observed
+        if name == "test-public-result-json-token.json"
+    )
+    assert formatter["supported"] is True
+
+
+def test_native_public_result_key_order_falls_back_at_641_members(
+    tmp_path: Path,
+) -> None:
+    value = {f"field-{index:03d}": index for index in range(641)}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert compact.call_args_list == [
+        mock.call(value, sort_keys=False),
+        mock.call(value),
+    ]
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is False
+
+
 def test_native_public_result_key_order_merges_unsorted_256_members(
     tmp_path: Path,
 ) -> None:
@@ -956,7 +1049,7 @@ def test_native_public_result_key_order_merges_unsorted_256_members(
     assert actual == expected
 
 
-def test_native_public_result_key_order_falls_back_at_513_members(
+def test_native_public_result_key_order_handles_513_members(
     tmp_path: Path,
 ) -> None:
     value = {f"field-{index:03d}": index for index in range(513)}
@@ -971,8 +1064,13 @@ def test_native_public_result_key_order_falls_back_at_513_members(
         observed.append((name, result))
         return result
 
-    with mock.patch.object(
-        mncs_test, "run_native_app", side_effect=observe_native_app
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
     ):
         actual, digest = mncs_test._public_result_json_payload(
             value,
@@ -983,22 +1081,17 @@ def test_native_public_result_key_order_falls_back_at_513_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
+    compact.assert_called_once_with(value, sort_keys=False)
     key_order = next(
         result for name, result in observed
         if name == "test-public-result-json-key-order.json"
     )
-    assert key_order["supported"] is False
+    assert key_order["supported"] is True
     formatter = next(
         result for name, result in observed
         if name == "test-public-result-json-token.json"
     )
     assert formatter["supported"] is True
-    formatter_windows = [
-        result for name, result in observed
-        if name == "test-public-result-json-token-window.json"
-    ]
-    assert formatter_windows
-    assert any(result["supported"] is False for result in formatter_windows)
 
 
 def test_native_public_result_merge_sort_rejects_duplicate_keys_after_128_members(

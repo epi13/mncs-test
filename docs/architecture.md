@@ -921,3 +921,16 @@ the compatibility serializer preserves exact bytes and digest. The complete
 public-result JSON suite passes all 50 tests with the integrated Stdlib JSON
 cursor provider; the fixed value, depth, key-length, input-byte, and execution
 limits remain in force.
+
+P-040 extends the native key-order and cursor formatter member bound from 512
+to 640. Ascending and descending 640-member scalar objects now pass through the
+full public-result path, with Python compacting once using `sort_keys=False` and
+the final bytes and SHA-256 matching independent goldens. The 513-member case
+also moves from the P-039 compatibility path to native ordering. At 641
+members the key-order application declines and the exact sorted compatibility
+output remains. Experiments against the unchanged 8,000,000-step ceiling
+showed 672-, 768-, and 1,023-member monotonic inputs exhaust the native budget;
+the implementation therefore bounds its merge/reverse work at 640 instead of
+raising the execution limit. The existing 1,024-value ceiling remains
+independent of this object-member bound. All 53 public-result JSON regressions
+pass with the release MNCS binary and integrated Stdlib JSON cursor provider.
