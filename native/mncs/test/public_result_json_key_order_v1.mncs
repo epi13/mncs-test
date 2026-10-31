@@ -530,7 +530,7 @@ fn append_value(
             valid: !is_empty_value(prepended)
         };
     }
-    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 64 {
+    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 128 {
         let inserted: JsonValueV1 = insert_field(frame.items, frame.pending_key, value);
         let updated_frame: FrameV1 = FrameV1 {
             ..frame,

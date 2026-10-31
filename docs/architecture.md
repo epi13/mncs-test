@@ -882,3 +882,15 @@ bounds. It contains no alternative work model. Aggregate receipt lengths
 keep the largest preflight within the existing structured-node limit.
 The additional preflight process is explicit in verification statistics as
 `selection_work_runs`; it is not evidence of reduced total execution cost.
+
+P-037 raises the Test public-result key-order parser and cursor formatter object
+member bound together from 64 to 128. The 128-member fixture uses one-element
+arrays, which makes the input exceed the legacy 512-token tape while keeping
+native sorting and formatting within their execution budget. The output bytes
+and SHA-256 match an independent Python golden through the native key-order and
+cursor-formatting applications. At 129 members, both applications decline and
+the established compatibility path preserves the exact bytes and digest.
+Larger or more expensive objects, including 256-member objects and long-key
+shapes that exceed the 8,000,000-step budget, continue to use that fallback.
+Verification passed all 42 public-result JSON tests and the validate-manifest
+regression using the integrated Stdlib JSON cursor provider at 3d9e077.

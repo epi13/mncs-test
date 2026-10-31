@@ -716,6 +716,86 @@ def test_native_key_order_handles_exact_value_bound_with_object_in_array(
     compact.assert_called_once_with(value, sort_keys=False)
 
 
+def test_native_public_result_key_order_handles_128_object_members(
+    tmp_path: Path,
+) -> None:
+    value = {f"field-{index:03d}": [index] for index in range(128)}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", side_effect=observe_native_app
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
+    assert observed[0][1]["supported"] is False
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    formatter = next(
+        result for name, result in observed
+        if name == "test-public-result-json-token.json"
+    )
+    assert formatter["supported"] is True
+
+
+def test_native_public_result_key_order_falls_back_at_129_members(
+    tmp_path: Path,
+) -> None:
+    value = {f"field-{index:03d}": [index] for index in range(129)}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", side_effect=observe_native_app
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is False
+    formatter = next(
+        result for name, result in observed
+        if name == "test-public-result-json-token.json"
+    )
+    assert formatter["supported"] is False
+
+
 def test_native_key_order_compacts_whitespace_around_scalar_array(
     tmp_path: Path,
 ) -> None:

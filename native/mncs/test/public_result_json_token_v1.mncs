@@ -245,7 +245,7 @@ fn count_value_token(
         let parent_index: u64 = depth -% 1;
         let parent_kind: byte = before.stack[parent_index];
         let child_count: u64 = state.child_counts[parent_index] +% 1;
-        if parent_kind == 1 && child_count > 64 {
+        if parent_kind == 1 && child_count > 128 {
             return JsonTokenStateV1 { ..state, valid: false };
         }
         let incremented: [u64; 64] = replace(state.child_counts, parent_index, child_count);
@@ -291,7 +291,7 @@ fn bound_token(
         }
         let index: u64 = (after.token_depth as u64) -% 1;
         let count: u64 = state.key_counts[index] +% 1;
-        if count > 64 { return JsonTokenStateV1 { ..state, valid: false }; }
+        if count > 128 { return JsonTokenStateV1 { ..state, valid: false }; }
         return JsonTokenStateV1 {
             ..state,
             key_counts: replace(state.key_counts, index, count)
