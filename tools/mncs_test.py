@@ -530,9 +530,28 @@ def _initial_native_sha256_state() -> dict[str, Any]:
             1541459225,
         ],
         "total": 0,
-        "buf": "\x00" * 64,
+        "buf": [0] * 64,
         "buffered": 0,
     }
+
+
+def _native_byte_buffer_shape(value: Any, *, length: int = 64) -> bool:
+    """Accept the JSON string or numeric-array form of a native byte buffer."""
+    if isinstance(value, str):
+        try:
+            return len(value.encode("utf-8")) == length
+        except UnicodeEncodeError:
+            return False
+    return (
+        isinstance(value, list)
+        and len(value) == length
+        and all(
+            isinstance(byte, int)
+            and not isinstance(byte, bool)
+            and 0 <= byte <= 255
+            for byte in value
+        )
+    )
 
 
 def _native_public_result_source_digest(
@@ -697,8 +716,7 @@ def _native_public_result_digest_document(
             not isinstance(h, list)
             or len(h) != 8
             or any(type(word) is not int or not 0 <= word <= 0xFFFFFFFF for word in h)
-            or not isinstance(buf, str)
-            or len(buf.encode("utf-8")) != 64
+            or not _native_byte_buffer_shape(buf)
             or type(total) is not int
             or type(buffered) is not int
             or buffered >= 64
@@ -1081,15 +1099,14 @@ def _native_public_result_document_payload(
             not isinstance(hash_h, list)
             or len(hash_h) != 8
             or any(type(word) is not int or not 0 <= word <= 0xFFFFFFFF for word in hash_h)
-            or not isinstance(hash_buf, str)
-            or len(hash_buf.encode("utf-8")) != 64
+            or not _native_byte_buffer_shape(hash_buf)
             or type(hash_total) is not int
             or type(hash_buffered) is not int
             or type(buffered) is not int
             or hash_total + buffered != next_offset
             or buffered != next_offset % 64
             or hash_buffered != 0
-            or not isinstance(result.get("hash_buffer"), str)
+            or not _native_byte_buffer_shape(result.get("hash_buffer"))
         ):
             raise AdapterError("MNCS public-result JSON app returned malformed digest continuation state")
 

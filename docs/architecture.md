@@ -469,6 +469,19 @@ UTF-8-safe 1 KiB chunk boundary, and expansion-limit fallback. MNCS uses the
 existing Stdlib cursor and UTF-8 decoder; this slice adds no duplicate shared
 parser.
 
+P-036 fixes the large Unicode continuation path exposed by P-035. MNCS
+serializes the fixed SHA-256 block buffer as a 64-byte integer array, while
+the Test adapter had accepted only a string representation. The adapter now
+validates and forwards both wire forms and seeds native digest continuation
+with the canonical byte-array form. An independent 22,017-byte Unicode
+document passes through two native digest windows and matches `hashlib`; the
+11,000-character CLI case completes native tokenization and digesting before
+retaining the exact compatibility output when ASCII expansion exceeds the
+65,536-byte native bound. Verification passed all 40 public-result JSON tests
+and the `validate-manifest` CLI regression. It selected the integrated Stdlib
+provider at `3d9e077`; the local Stdlib root at `c606f8` predates the JSON
+cursor API used by these applications.
+
 `mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
 `mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded
 UTF-8 fields as strings in the existing typed request, avoiding one JSON

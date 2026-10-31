@@ -459,14 +459,9 @@ def test_ascii_json_mode_keeps_bounded_expansion_fallback(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     value = {"text": "Ω" * 11000}
-    document = mncs_test.json_bytes(value)
     with mock.patch.object(
         mncs_test, "run_native_app", wraps=mncs_test.run_native_app
-    ) as native_app, mock.patch.object(
-        mncs_test,
-        "_public_result_json_payload",
-        return_value=(document, hashlib.sha256(document).hexdigest()),
-    ):
+    ) as native_app:
         mncs_test.print_cli_json(
             value,
             mncs=str(MNCS),
@@ -479,7 +474,28 @@ def test_ascii_json_mode_keeps_bounded_expansion_fallback(
     expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
     assert output == expected
     assert output.isascii()
-    assert native_app.call_args_list[-1].args[0] == "test-public-result-json-ascii-escape.json"
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert applications.count("test-public-result-json-native-token-tape.json") >= 1
+    assert applications[-1] == "test-public-result-json-ascii-escape.json"
+
+
+def test_native_public_result_digest_accepts_byte_array_continuation(
+    tmp_path: Path,
+) -> None:
+    payload = mncs_test.json_bytes({"text": "Ω" * 11000})
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        digest = mncs_test._native_public_result_output_digest(
+            payload,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert digest == hashlib.sha256(payload).hexdigest()
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert applications.count("test-public-result-json-source-digest.json") >= 2
 
 
 def test_cli_json_falls_back_when_native_formatter_is_unavailable(
