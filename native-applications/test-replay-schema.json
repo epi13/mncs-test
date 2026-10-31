@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.replay-schema",
+  "source": "../native/mncs/test/replay_schema_v1.mncs",
+  "module": "mncs.test.replay_schema_v1",
+  "entry_function": "replay_schema_app_v1",
+  "profile": "0.18",
+  "interface_identity": "f03114c062c74595587dfcd873697a32b3a1467fc1d7f17da783e1ee4c4e677f",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

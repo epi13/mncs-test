@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -234,6 +234,7 @@ class RunnerTests(unittest.TestCase):
                 },
             }
             result_path.write_bytes(mncs_test.json_bytes(stored))
+            source_text = result_path.read_text(encoding="utf-8")
             arguments = mncs_test.parser().parse_args(
                 [
                     "replay",
@@ -245,18 +246,30 @@ class RunnerTests(unittest.TestCase):
             )
             output = io.StringIO()
             native_results = []
+            source_tree_parses = []
             real_run_native_app = mncs_test.run_native_app
+            real_json_loads = mncs_test.json.loads
 
             def run_native_app(*args, **kwargs):
                 result = real_run_native_app(*args, **kwargs)
                 native_results.append((args[0], result))
                 return result
 
+            def json_loads(value, *args, **kwargs):
+                if value == source_text:
+                    source_tree_parses.append(value)
+                    raise AssertionError("canonical replay must validate without Python json.loads")
+                return real_json_loads(value, *args, **kwargs)
+
             with mock.patch.object(
                 mncs_test,
                 "run_native_app",
                 side_effect=run_native_app,
-            ) as native_app, redirect_stdout(output):
+            ) as native_app, mock.patch.object(
+                mncs_test.json,
+                "loads",
+                side_effect=json_loads,
+            ), redirect_stdout(output):
                 exit_code = mncs_test.replay_command(arguments)
 
             replay = {
@@ -270,14 +283,17 @@ class RunnerTests(unittest.TestCase):
                 [call.args[0] for call in native_app.call_args_list],
                 [
                     "test-public-result-json-key-order.json",
+                    "test-replay-schema.json",
                     "test-public-result-json-token.json",
                     "test-public-result-json-token.json",
                 ],
             )
             self.assertEqual(
                 [result.get("supported") for _, result in native_results],
-                [True, True, True],
+                [True, True, True, True],
             )
+            self.assertTrue(native_results[1][1]["result_schema_valid"])
+            self.assertEqual(source_tree_parses, [])
             self.assertFalse(marker.exists())
 
     @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
@@ -309,6 +325,41 @@ class RunnerTests(unittest.TestCase):
             }
             self.assertEqual(exit_code, mncs_test.EXIT_SUCCESS)
             self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(replay))
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_replay_json_rejects_native_schema_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-replay-invalid-schema-") as directory:
+            result_path = Path(directory) / "result.json"
+            result_path.write_bytes(b'{"schema_version":"not-a-test-result"}')
+            arguments = mncs_test.parser().parse_args(
+                ["replay", "--result", str(result_path), "--mncs", str(MNCS)]
+            )
+            output = io.StringIO()
+            errors = io.StringIO()
+            native_apps = []
+            run_native_app = mncs_test.run_native_app
+
+            def record_native_app(*args, **kwargs):
+                native_apps.append(args[0])
+                return run_native_app(*args, **kwargs)
+
+            with mock.patch.object(
+                mncs_test,
+                "run_native_app",
+                side_effect=record_native_app,
+            ), redirect_stdout(output), redirect_stderr(errors):
+                exit_code = mncs_test.replay_command(arguments)
+
+            self.assertEqual(exit_code, mncs_test.EXIT_INVALID_INVOCATION)
+            self.assertEqual(output.getvalue(), "")
+            self.assertIn("result is not mncs.test-result/1", errors.getvalue())
+            self.assertEqual(
+                native_apps,
+                [
+                    "test-public-result-json-key-order.json",
+                    "test-replay-schema.json",
+                ],
+            )
 
     def test_replay_json_keeps_offline_formatter_when_compiler_is_unavailable(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-replay-offline-") as directory:

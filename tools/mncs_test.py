@@ -54,6 +54,8 @@ PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
+REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
+REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/1"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
@@ -652,6 +654,14 @@ def _native_replay_json_payload(
     )
     if ordered is None:
         return None
+    schema_valid = _native_replay_schema_valid(
+        ordered,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if schema_valid is not True:
+        return None
     canonical = _native_public_result_document_payload(
         ordered,
         mncs=mncs,
@@ -671,6 +681,54 @@ def _native_replay_json_payload(
         cwd=cwd,
         environment=environment,
     )
+
+
+def _native_replay_schema_valid(
+    document: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bool | None:
+    """Check a bounded result document's schema through the MNCS JSON parser."""
+    packed = _native_public_result_document_request(document)
+    if packed is None:
+        return None
+    start_request, source_length = packed
+    request = {
+        "schema_version": REPLAY_SCHEMA_REQUEST_SCHEMA,
+        "document": start_request["document"],
+        "input_sha256": start_request["input_sha256"],
+    }
+    try:
+        result = run_native_app(
+            "test-replay-schema.json",
+            request,
+            request_schema=REPLAY_SCHEMA_REQUEST_SCHEMA,
+            result_schema=REPLAY_SCHEMA_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeBudgetExhaustedError, NativeInputBoundError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test replay schema validation failed: {error}") from error
+
+    if result.get("schema_version") != REPLAY_SCHEMA_RESULT_SCHEMA:
+        raise AdapterError("MNCS replay schema app returned an unsupported result schema")
+    if (
+        type(result.get("supported")) is not bool
+        or type(result.get("result_schema_valid")) is not bool
+        or type(result.get("document_length")) is not int
+        or result.get("document_length") != source_length
+        or result.get("input_sha256") != start_request["input_sha256"]
+    ):
+        raise AdapterError("MNCS replay schema app returned malformed validation metadata")
+    if not result["supported"]:
+        return None
+    return result["result_schema_valid"]
 
 
 def _public_result_input_chunks(document: bytes) -> list[bytes]:
@@ -8271,8 +8329,32 @@ def replay_command(args: argparse.Namespace) -> int:
     path = resolve_path(args.result, cwd)
     try:
         source_document = path.read_bytes()
+    except OSError as error:
+        print(f"mncs-test replay: cannot read structured result: {error}", file=sys.stderr)
+        return EXIT_INVALID_INVOCATION
+    selected_mncs = resolve_mncs(args.mncs, cwd) if args.mncs else None
+    if selected_mncs is not None:
+        executable = Path(selected_mncs)
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            selected_mncs = None
+    environment = native_application_environment(cwd)
+    if args.format == "json" and selected_mncs is not None:
+        try:
+            native_payload = _native_replay_json_payload(
+                source_document,
+                mncs=selected_mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+        except AdapterError:
+            native_payload = None
+        if native_payload is not None:
+            sys.stdout.write(native_payload[0].decode("utf-8"))
+            return EXIT_SUCCESS
+
+    try:
         result = json.loads(source_document.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         print(f"mncs-test replay: cannot read structured result: {error}", file=sys.stderr)
         return EXIT_INVALID_INVOCATION
     if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
@@ -8282,36 +8364,16 @@ def replay_command(args: argparse.Namespace) -> int:
         print(result.get("reproduction", {}).get("command", ""))
         print(result.get("reproduction", {}).get("replay_command", ""))
     else:
-        selected_mncs = resolve_mncs(args.mncs, cwd) if args.mncs else None
-        if selected_mncs is not None:
-            executable = Path(selected_mncs)
-            if not executable.is_file() or not os.access(executable, os.X_OK):
-                selected_mncs = None
-        environment = native_application_environment(cwd)
-        native_payload = None
-        if selected_mncs is not None:
-            try:
-                native_payload = _native_replay_json_payload(
-                    source_document,
-                    mncs=selected_mncs,
-                    cwd=cwd,
-                    environment=environment,
-                )
-            except AdapterError:
-                native_payload = None
-        if native_payload is not None:
-            sys.stdout.write(native_payload[0].decode("utf-8"))
-        else:
-            print_cli_json(
-                {
-                    "schema_version": "mncs.test-replay/1",
-                    "result": result,
-                    "execute": False,
-                },
-                mncs=selected_mncs,
-                cwd=cwd,
-                environment=environment,
-            )
+        print_cli_json(
+            {
+                "schema_version": "mncs.test-replay/1",
+                "result": result,
+                "execute": False,
+            },
+            mncs=selected_mncs,
+            cwd=cwd,
+            environment=environment,
+        )
     return EXIT_SUCCESS
 
 
