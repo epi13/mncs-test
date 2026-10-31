@@ -145,37 +145,36 @@ supplies bounded fields and preserves the opaque `selection` object. Failure
 messages cross the 1,024-byte native field bound as UTF-8-safe chunks; the
 adapter rejoins those chunks when it writes the public JSON document. The
 compact count text reuses `mncs.std.json_emit.v1::put_u64`.
-`mncs.test.public_result_json_token_v1` consumes one compact JSON document in
-UTF-8-safe chunks and uses `mncs.std.json_cursor.v1` to validate and traverse
-its native token stream. The adapter no longer recursively projects Python
-values into a typed-value node/edge tree. For bounded values with built-in
-string object keys, the adapter uses a conservative size preflight and sends
-unsorted compact JSON to `mncs.test.public_result_json_key_order_v1`. Values
-without objects skip key ordering and go directly to the native token
-formatter, so the host does not sort array-only results. That
-application parses the token stream into a bounded native value, compares
-decoded UTF-8 keys, and emits compact JSON in sorted key order. It accepts at
-most 16,384 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
-and 1,024-byte scalar text. The host preflight caps candidates at 512 values
-to stay within the runner's 8,000,000-step budget. Key comparisons traverse
-only the shared decoded-key prefix. The native writer retains one active
-64-byte page and returns at most 256 completed pages, reducing the fixed-array
-copy performed for each emitted byte. The host verifies the packed
-source digest before dispatch. Non-string mapping keys, oversized values, and
-native unsupported or budget outcomes retain Python's sorted compact-JSON
-compatibility path. MNCS then scans the ordered document, enforces token,
-depth, member, text, and byte bounds, and emits the indented public format with
-a trailing newline. It returns output in 8,192-byte windows while carrying
-cursor and SHA-256 state. The aggregate
-compact-input and formatted-output limits are each 65,536 bytes; the native
-path accepts at most 512 values, depth 63, 64 children per object, 256-byte
-keys, and 1,024-byte scalar text. Each continuation repeats the bounded source
-document and MNCS recomputes its SHA-256 before accepting the carried cursor
-and output-hash state. Python rejoins returned UTF-8-safe pages, writes files,
-and independently checks the final output digest. Values outside native
-bounds and native budget exhaustion retain the host compatibility serializer;
-native transport and runtime errors remain errors. The 33 KB differential
-case stays on the native path without per-byte structured-input node growth.
+`mncs.test.public_result_json_token_tape_v1` receives a bounded typed token
+tape and UTF-8 payload chunks directly from the Python boundary adapter. The
+adapter walks supported Python values but does not build a Python value tree,
+sort keys, or serialize a compact JSON document. MNCS validates the tape and
+scalar JSON spellings, constructs a bounded native value, sorts object keys by
+decoded UTF-8, and writes the public indented JSON with a trailing newline.
+Flat scalar arrays retain token ranges instead of allocating linked native
+value nodes. This path accepts at most 512 tokens, 65,536 payload bytes, depth
+12, 64 object members, 256-byte keys, 1,024-byte scalar text, 65,536 output
+bytes, and the runner's 8,000,000-step budget. Python preserves its float
+spelling at the scalar boundary; MNCS owns structure, ordering, escaping,
+formatting, bounds, and output bytes. The adapter rejoins bounded native
+output chunks and computes the public payload digest over those exact bytes.
+Differential tests compare the result with the independent Python golden,
+including Unicode, escaping, nested containers, and a 33 KB result; that large
+case uses one native application call without invoking the host JSON serializer.
+
+Values outside the typed-tape contract and native input or step-budget outcomes
+retain the compatibility path. For those values Python may produce compact
+JSON; `mncs.test.public_result_json_key_order_v1` sorts bounded documents when
+needed, and `mncs.test.public_result_json_token_v1` plus its window continuation
+format the result. Their existing byte, depth, value, member, key, and scalar
+bounds remain in force. Native transport or runtime errors remain errors
+rather than being hidden by compatibility output.
+
+The shared `mncs.std.json.v1` scanner validates scalar JSON spellings. The
+existing `mncs.std.json_emit.v1` writer is a compact, caller-ordered 64-byte
+primitive, so it does not meet this consumer's sorted, indented 65,536-byte
+contract. The new value construction and writer therefore remain Test-specific
+until another consumer demonstrates the need for a reusable Stdlib abstraction.
 
 The family-check response records `execution.check_result_sha256` from the
 serialized `mncs.check-result/1` document produced by this same public-result
@@ -296,8 +295,8 @@ The result has two layers:
   records are not nested into the check, so Actions and Forge can reason from
   a small machine-readable witness and retrieve the raw result only when
   needed. The native check-result projection application assembles this policy
-  envelope; the host adapter still serializes it as JSON and publishes its
-  artifact.
+  envelope; the host adapter passes it through the bounded native public-result
+  serializer and publishes its artifact.
 
 ## Minimum-sufficient verification
 

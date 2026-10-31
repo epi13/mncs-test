@@ -54,6 +54,8 @@ PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
+PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/2"
+PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/2"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
@@ -62,6 +64,7 @@ PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 16384
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 512
+PUBLIC_RESULT_JSON_TOKEN_TAPE_MAX_INPUT_BYTES = 65536
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/2"
@@ -274,6 +277,46 @@ def _decode_public_result_chunks(
     return bytes(document)
 
 
+def _decode_public_result_token_tape_chunks(result: dict[str, Any], *, byte_length: int) -> bytes:
+    grouped = result.get("chunks")
+    chunk_count = result.get("chunk_count")
+    if (
+        not isinstance(grouped, list)
+        or not isinstance(chunk_count, int)
+        or isinstance(chunk_count, bool)
+        or chunk_count != len(grouped)
+        or not 0 < chunk_count <= 64
+    ):
+        raise AdapterError("MNCS public-result token tape app returned malformed grouped chunks")
+    flat_chunks: list[dict[str, Any]] = []
+    for group in grouped:
+        if not isinstance(group, dict):
+            raise AdapterError("MNCS public-result token tape app returned a malformed chunk group")
+        parts = group.get("parts")
+        length = group.get("length")
+        if not isinstance(parts, list) or len(parts) != 16:
+            raise AdapterError("MNCS public-result token tape app returned malformed chunk parts")
+        if not isinstance(length, int) or isinstance(length, bool) or not 0 <= length <= 1024:
+            raise AdapterError("MNCS public-result token tape app returned an invalid group length")
+        part_total = 0
+        for part in parts:
+            if not isinstance(part, dict):
+                raise AdapterError("MNCS public-result token tape app returned a malformed byte part")
+            part_length = part.get("length")
+            if not isinstance(part_length, int) or isinstance(part_length, bool) or not 0 <= part_length <= 64:
+                raise AdapterError("MNCS public-result token tape app returned an invalid part length")
+            part_total += part_length
+            flat_chunks.append(part)
+        if part_total != length:
+            raise AdapterError("MNCS public-result token tape group length does not match its parts")
+    return _decode_public_result_chunks(
+        {"chunks": flat_chunks, "chunk_count": len(flat_chunks)},
+        byte_length=byte_length,
+        maximum_chunks=1024,
+        maximum_chunk_bytes=64,
+    )
+
+
 def _public_result_ordering_preflight(value: Any) -> tuple[bool, bool]:
     """Bound native key ordering and detect when Python key sorting is needed."""
     maximum = PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES
@@ -429,7 +472,16 @@ def _native_public_result_payload(
     cwd: Path,
     environment: dict[str, str],
 ) -> tuple[bytes, str] | None:
-    """Run the MNCS token formatter over packed compact-JSON byte windows."""
+    """Render supported values from a native typed token tape."""
+    native_document = _native_public_result_token_tape(
+        value,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if native_document is not None:
+        return native_document, hashlib.sha256(native_document).hexdigest()
+
     key_order_candidate, requires_sorted_keys = _public_result_ordering_preflight(value)
     if key_order_candidate and requires_sorted_keys:
         try:
@@ -460,6 +512,176 @@ def _native_public_result_payload(
         cwd=cwd,
         environment=environment,
     )
+
+
+def _public_result_token_tape(value: Any) -> tuple[list[dict[str, int]], list[bytes], int] | None:
+    """Pack typed tokens and bounded UTF-8 chunks without JSON serialization."""
+    tokens: list[dict[str, int]] = []
+    payload = bytearray()
+    payload_bytes = 0
+    pending: list[tuple[str, Any, int]] = [("value", value, 0)]
+    active: set[int] = set()
+    value_count = 0
+
+    def append_token(kind: int, data: bytes = b"") -> bool:
+        nonlocal payload_bytes
+        if (
+            len(tokens) >= 512
+            or len(data) > 1024
+            or payload_bytes + len(data) > PUBLIC_RESULT_JSON_TOKEN_TAPE_MAX_INPUT_BYTES
+        ):
+            return False
+        tokens.append({"kind": kind, "offset": payload_bytes, "length": len(data)})
+        payload.extend(data)
+        payload_bytes += len(data)
+        return True
+
+    while pending:
+        event, current, depth = pending.pop()
+        if event == "object_end":
+            active.remove(current)
+            if not append_token(ord("}")):
+                return None
+            continue
+        if event == "array_end":
+            active.remove(current)
+            if not append_token(ord("]")):
+                return None
+            continue
+        if event == "key":
+            try:
+                encoded_key = current.encode("utf-8")
+            except (UnicodeEncodeError, AttributeError):
+                return None
+            if len(encoded_key) > 256 or not append_token(ord("K"), encoded_key):
+                return None
+            continue
+
+        value_count += 1
+        if value_count > PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES:
+            return None
+        if current is None:
+            if not append_token(ord("V"), b"null"):
+                return None
+        elif type(current) is bool:
+            if not append_token(ord("V"), b"true" if current else b"false"):
+                return None
+        elif type(current) is str:
+            try:
+                encoded = current.encode("utf-8")
+            except UnicodeEncodeError:
+                return None
+            if not append_token(ord("S"), encoded):
+                return None
+        elif type(current) is int:
+            if not append_token(ord("V"), str(current).encode("ascii")):
+                return None
+        elif type(current) is float:
+            try:
+                # Python owns the scalar float spelling for compatibility;
+                # MNCS owns structure, escaping, ordering, and serialization.
+                scalar = json.dumps(current, allow_nan=False, separators=(",", ":"))
+                encoded = scalar.encode("ascii")
+            except (TypeError, ValueError, UnicodeEncodeError):
+                return None
+            if not append_token(ord("V"), encoded):
+                return None
+        elif type(current) is dict:
+            if depth >= 12:
+                return None
+            identity = id(current)
+            if identity in active:
+                return None
+            entries = list(current.items())
+            if len(entries) > 64 or any(type(key) is not str for key, _child in entries):
+                return None
+            active.add(identity)
+            if not append_token(ord("{")):
+                return None
+            pending.append(("object_end", identity, depth))
+            for key, child in reversed(entries):
+                pending.append(("value", child, depth + 1))
+                pending.append(("key", key, depth + 1))
+        elif type(current) in (list, tuple):
+            if depth >= 12:
+                return None
+            identity = id(current)
+            if identity in active:
+                return None
+            active.add(identity)
+            if not append_token(ord("[")):
+                return None
+            pending.append(("array_end", identity, depth))
+            pending.extend(("value", child, depth + 1) for child in reversed(current))
+        else:
+            return None
+
+    if not tokens:
+        return None
+    payload_chunks = _public_result_input_chunks(bytes(payload))
+    if len(payload_chunks) > 64:
+        return None
+    chunk_offsets = list(_chunk_offsets(payload_chunks))
+    for token in tokens:
+        chunk_index, chunk_offset = _payload_chunk_position(chunk_offsets, token["offset"])
+        token["chunk_index"] = chunk_index
+        token["chunk_offset"] = chunk_offset
+    return tokens, payload_chunks, payload_bytes
+
+
+def _native_public_result_token_tape(
+    value: Any,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bytes | None:
+    """Ask MNCS to render a bounded typed token tape as public JSON."""
+    prepared = _public_result_token_tape(value)
+    if prepared is None:
+        return None
+    tokens, payload_chunks, payload_bytes = prepared
+    request = {
+        "schema_version": PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
+        "tape": {
+            "tokens": tokens,
+            "chunks": [
+                {"bytes": chunk.decode("utf-8"), "length": len(chunk), "offset": start}
+                for start, chunk in _chunk_offsets(payload_chunks)
+            ],
+            "byte_length": payload_bytes,
+        },
+    }
+    try:
+        result = run_native_app(
+            "test-public-result-json-token-tape.json",
+            request,
+            request_schema=PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
+            result_schema=PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeBudgetExhaustedError, NativeInputBoundError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test public-result token tape failed: {error}") from error
+
+    if result.get("schema_version") != PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA:
+        raise AdapterError("MNCS public-result token tape app returned an unsupported result schema")
+    if type(result.get("supported")) is not bool:
+        raise AdapterError("MNCS public-result token tape app returned malformed support metadata")
+    if not result["supported"]:
+        return None
+    byte_length = result.get("document_length")
+    if (
+        type(byte_length) is not int
+        or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+    ):
+        raise AdapterError("MNCS public-result token tape app returned malformed document metadata")
+    document = _decode_public_result_token_tape_chunks(result, byte_length=byte_length)
+    return document
 
 
 def _native_public_result_document_payload(
@@ -842,6 +1064,27 @@ def _public_result_input_chunks(document: bytes) -> list[bytes]:
         chunks.append(document[start:end])
         start = end
     return chunks
+
+
+def _chunk_offsets(chunks: list[bytes]) -> Iterable[tuple[int, bytes]]:
+    offset = 0
+    for chunk in chunks:
+        yield offset, chunk
+        offset += len(chunk)
+
+
+def _payload_chunk_position(chunks: list[tuple[int, bytes]], offset: int) -> tuple[int, int]:
+    if not chunks:
+        return 0, 0
+    for index, (start, chunk) in enumerate(chunks):
+        end = start + len(chunk)
+        if offset < end:
+            return index, offset - start
+        if offset == end:
+            if index + 1 < len(chunks):
+                return index + 1, 0
+            return index, len(chunk)
+    raise AdapterError("public-result token offset exceeds the packed UTF-8 payload")
 
 def compact_json(value: Any, *, sort_keys: bool = True) -> str:
     return json.dumps(value, sort_keys=sort_keys, separators=(",", ":"), ensure_ascii=False)

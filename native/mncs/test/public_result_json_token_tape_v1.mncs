@@ -1,0 +1,1018 @@
+mncs 0.18;
+
+// Sort and format a bounded typed token tape in MNCS. The host adapter
+// supplies raw UTF-8 scalar payloads; native code validates the representation,
+// constructs values, orders keys, escapes text, and emits public JSON.
+module mncs.test.public_result_json_token_tape_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json.v1 as json;
+
+record TokenMetaV1 { kind: byte, offset: u64, chunk_index: u64, chunk_offset: u64, length: u64 }
+record TokenRangeV1 { chunk_index: u64, chunk_offset: u64, length: u64 }
+record PayloadChunkV1 { offset: u64, bytes: [byte; up_to 1024], length: u64 }
+record TokenTapeV1 {
+    tokens: [TokenMetaV1; up_to 512],
+    chunks: [PayloadChunkV1; up_to 64],
+    byte_length: u64
+}
+record TapeRequestV1 {
+    schema_version: [byte; up_to 64],
+    tape: TokenTapeV1
+}
+
+record KeyV1 {
+    raw_token: u64,
+    raw_length: u64,
+    ordered: [byte; up_to 256],
+    ordered_length: u64,
+    valid: bool
+}
+record KeyCopyStateV1 { ordered: [byte; 256], position: u64 }
+
+enum ValueV1 {
+    Empty,
+    Null,
+    Raw { token: u64, length: u64 },
+    String { token: u64, length: u64 },
+    ArrayEmpty,
+    Array { items: ValueV1 },
+    ArrayTokens { start: u64, end: u64 },
+    ObjectEmpty,
+    Object { fields: ValueV1 },
+    ArrayNil,
+    ArrayCons { head: ValueV1, tail: ValueV1 },
+    ObjectNil,
+    ObjectCons { key: KeyV1, value: ValueV1, tail: ValueV1 }
+}
+
+record FrameV1 {
+    kind: byte,
+    items: ValueV1,
+    pending_key: KeyV1,
+    has_pending_key: bool,
+    child_count: u64,
+    start_index: u64,
+    flat_array: bool
+}
+record FlatProbeV1 { done: bool, flat: bool }
+record ShapeV1 { total_bytes: u64, failure_index: u64, valid: bool }
+record PayloadShapeV1 { total_bytes: u64, valid: bool }
+record ParseStateV1 {
+    frames: [FrameV1; 12],
+    depth: u64,
+    root: ValueV1,
+    has_root: bool,
+    position: u64,
+    value_count: u64,
+    valid: bool
+}
+enum KeyOrderV1 { Before, Equal, After }
+
+record OutputChunkV1 { bytes: [byte; 64], length: u64 }
+enum OutputListV1 { ChunkNil, ChunkCons { head: OutputChunkV1, tail: OutputListV1 } }
+record OutputResultChunkV1 { parts: [OutputChunkV1; 16], length: u64 }
+enum OutputResultListV1 { ChunkNil, ChunkCons { head: OutputResultChunkV1, tail: OutputResultListV1 } }
+record WriterV1 {
+    current_bytes: [byte; 64],
+    current_length: u64,
+    pending: OutputListV1,
+    pending_count: u64,
+    pending_length: u64,
+    completed: OutputResultListV1,
+    completed_count: u64,
+    length: u64,
+    ok: bool
+}
+record FlatWriteV1 { writer: WriterV1, first: bool, valid: bool }
+record AppendStateV1 { writer: WriterV1, offset: u64 }
+record ChunkBuilderV1 { chunks: [OutputResultChunkV1; 64], count: u64 }
+record TapeResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    request_valid: bool,
+    tape_shape_valid: bool,
+    tape_shape_code: u64,
+    parse_valid: bool,
+    writer_valid: bool,
+    consumed_tokens: u64,
+    parsed_depth: u64,
+    value_count: u64,
+    document_length: u64,
+    chunk_count: u64,
+    chunks: [OutputResultChunkV1; up_to 64]
+}
+
+fn request_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
+}
+
+fn result_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 47, 50];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (value +% 48) as byte; }
+    return (value -% 10 +% 97) as byte;
+}
+
+fn request_tape_shape_code(tape: TokenTapeV1) -> (result: u64) {
+    if tape.tokens.len == 0 || tape.tokens.len > 512 { return 1; }
+    if tape.chunks.len > 64 { return 2; }
+    let initial: ShapeV1 = ShapeV1 { total_bytes: 0, failure_index: 0, valid: true };
+    iterate i over tape.tokens carrying shape: ShapeV1 = initial {
+        let token: TokenMetaV1 = tape.tokens[i];
+        next shape = advance_shape(shape, tape, token, i);
+    }
+    let initial_payload: PayloadShapeV1 = PayloadShapeV1 { total_bytes: 0, valid: true };
+    iterate i over tape.chunks carrying payload: PayloadShapeV1 = initial_payload {
+        let chunk: PayloadChunkV1 = tape.chunks[i];
+        let chunk_valid: bool = chunk.offset == payload.total_bytes && chunk.length == chunk.bytes.len && chunk.length <= 1024
+            && payload.total_bytes +% chunk.length <= 65536;
+        next payload = PayloadShapeV1 {
+            total_bytes: payload.total_bytes +% chunk.length,
+            valid: payload.valid && chunk_valid
+        };
+    }
+    if !shape.valid { return 100 +% shape.failure_index; }
+    if !payload.valid { return 4; }
+    if tape.byte_length > 65536 { return 7; }
+    if tape.byte_length != shape.total_bytes || tape.byte_length != payload.total_bytes { return 8; }
+    return 0;
+}
+
+fn tape_shape(tape: TokenTapeV1) -> (result: bool) {
+    return request_tape_shape_code(tape) == 0;
+}
+
+fn advance_shape(shape: ShapeV1, tape: TokenTapeV1, token: TokenMetaV1, index: u64) -> (result: ShapeV1) {
+    if !shape.valid || token.offset != shape.total_bytes || token.length > 1024 || !token_range_valid(tape, token)
+        || shape.total_bytes +% token.length > 65536 { return ShapeV1 { ..shape, failure_index: index, valid: false }; }
+    return ShapeV1 {
+        total_bytes: shape.total_bytes +% token.length,
+        failure_index: shape.failure_index,
+        valid: true
+    };
+}
+
+fn token_range_valid(tape: TokenTapeV1, token: TokenMetaV1) -> (result: bool) {
+    if token.offset > tape.byte_length || token.length > tape.byte_length -% token.offset { return false; }
+    if tape.chunks.len == 0 { return token.length == 0 && token.offset == 0 && token.chunk_index == 0 && token.chunk_offset == 0; }
+    if token.chunk_index >= tape.chunks.len { return false; }
+    let first: PayloadChunkV1 = tape.chunks[token.chunk_index];
+    if token.chunk_offset > first.length || first.offset +% token.chunk_offset != token.offset { return false; }
+    if token.length == 0 { return true; }
+    let first_available: u64 = first.length -% token.chunk_offset;
+    if token.length <= first_available { return true; }
+    if token.chunk_index +% 1 >= tape.chunks.len { return false; }
+    let second: PayloadChunkV1 = tape.chunks[token.chunk_index +% 1];
+    if second.offset != first.offset +% first.length { return false; }
+    let after_second: u64 = token.length -% first_available;
+    if after_second <= second.length { return true; }
+    if token.chunk_index +% 2 >= tape.chunks.len { return false; }
+    let third: PayloadChunkV1 = tape.chunks[token.chunk_index +% 2];
+    return third.offset == second.offset +% second.length && after_second -% second.length <= third.length;
+}
+
+fn valid_request(request: TapeRequestV1, shape_valid: bool) -> (result: bool) {
+    return same_bytes(request.schema_version, request_schema_v1()) && shape_valid;
+}
+
+fn empty_key() -> (result: KeyV1) {
+    return KeyV1 { raw_token: 0, raw_length: 0, ordered: [0; 0], ordered_length: 0, valid: true };
+}
+
+fn copy_key_source_step(state: KeyCopyStateV1, source: [byte; up_to 1024], index: u64) -> (result: KeyCopyStateV1) {
+    return KeyCopyStateV1 {
+        ordered: replace(state.ordered, state.position, source[index]),
+        position: state.position +% 1
+    };
+}
+
+fn copy_key_source(state: KeyCopyStateV1, source: [byte; up_to 1024]) -> (result: KeyCopyStateV1) {
+    iterate i over source carrying copied: KeyCopyStateV1 = state {
+        next copied = copy_key_source_step(copied, source, i);
+    }
+    return copied;
+}
+
+fn copy_key_piece(state: KeyCopyStateV1, tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: KeyCopyStateV1) {
+    let piece: TokenRangeV1 = token_range_piece(tape, range, segment);
+    if piece.length == 0 { return state; }
+    return copy_key_source(state, range_source(tape, piece));
+}
+
+fn make_key(token: TokenMetaV1, tape: TokenTapeV1, index: u64) -> (result: KeyV1) {
+    let initial: KeyCopyStateV1 = KeyCopyStateV1 { ordered: [0; 256], position: 0 };
+    let range: TokenRangeV1 = TokenRangeV1 { chunk_index: token.chunk_index, chunk_offset: token.chunk_offset, length: token.length };
+    iterate i up_to 3 carrying copied: KeyCopyStateV1 = initial {
+        next copied = copy_key_piece(copied, tape, range, i);
+    }
+    return KeyV1 {
+        raw_token: index,
+        raw_length: token.length,
+        ordered: copied.ordered[0..token.length],
+        ordered_length: token.length,
+        valid: token.length <= 256 && copied.position == token.length
+    };
+}
+
+fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64) -> (result: i64) {
+    if order != 0 { return order; }
+    if left.ordered[index] < right.ordered[index] { return -1; }
+    if left.ordered[index] > right.ordered[index] { return 1; }
+    return 0;
+}
+
+fn compare_key(left: KeyV1, right: KeyV1) -> (result: KeyOrderV1) {
+    let common: u64 = select(left.ordered_length < right.ordered_length, left.ordered_length, right.ordered_length);
+    let shared: [byte; up_to 256] = left.ordered[0..common];
+    iterate i over shared carrying order: i64 = 0 {
+        next order = compare_key_step(order, left, right, i);
+    }
+    if order < 0 { return KeyOrderV1.Before; }
+    if order > 0 { return KeyOrderV1.After; }
+    if left.ordered_length < right.ordered_length { return KeyOrderV1.Before; }
+    if left.ordered_length > right.ordered_length { return KeyOrderV1.After; }
+    return KeyOrderV1.Equal;
+}
+
+fn is_empty(value: ValueV1) -> (result: bool) {
+    return match value {
+        Empty => true,
+        Null => false,
+        Raw { token: token, length: length } => false,
+        String { token: token, length: length } => false,
+        ArrayEmpty => false,
+        Array { items: items } => false,
+        ArrayTokens { start: start, end: end } => false,
+        ObjectEmpty => false,
+        Object { fields: fields } => false,
+        ArrayNil => false,
+        ArrayCons { head: head, tail: tail } => false,
+        ObjectNil => false,
+        ObjectCons { key: key, value: inner, tail: tail } => false
+    };
+}
+
+fn wrap_inserted_field(key: KeyV1, value: ValueV1, tail: ValueV1) -> (result: ValueV1) {
+    if is_empty(tail) { return ValueV1.Empty; }
+    return ValueV1.ObjectCons { key: key, value: value, tail: tail };
+}
+
+fn insert_field(fields: ValueV1, key: KeyV1, value: ValueV1) -> (result: ValueV1) {
+    return match fields {
+        ObjectNil => ValueV1.ObjectCons { key: key, value: value, tail: ValueV1.ObjectNil },
+        ObjectCons { key: current_key, value: current_value, tail: tail } => match compare_key(key, current_key) {
+            Before => ValueV1.ObjectCons { key: key, value: value, tail: fields },
+            Equal => ValueV1.Empty,
+            After => wrap_inserted_field(current_key, current_value, insert_field(tail, key, value))
+        },
+        Empty => ValueV1.Empty,
+        Null => ValueV1.Empty,
+        Raw { token: token, length: length } => ValueV1.Empty,
+        String { token: token, length: length } => ValueV1.Empty,
+        ArrayEmpty => ValueV1.Empty,
+        Array { items: items } => ValueV1.Empty,
+        ArrayTokens { start: start, end: end } => ValueV1.Empty,
+        ObjectEmpty => ValueV1.Empty,
+        Object { fields: nested } => ValueV1.Empty,
+        ArrayNil => ValueV1.Empty,
+        ArrayCons { head: head, tail: tail } => ValueV1.Empty
+    };
+}
+
+fn prepend_array(items: ValueV1, value: ValueV1) -> (result: ValueV1) {
+    return match items {
+        ArrayNil => ValueV1.ArrayCons { head: value, tail: ValueV1.ArrayNil },
+        ArrayCons { head: head, tail: tail } => ValueV1.ArrayCons { head: value, tail: items },
+        Empty => ValueV1.Empty,
+        Null => ValueV1.Empty,
+        Raw { token: token, length: length } => ValueV1.Empty,
+        String { token: token, length: length } => ValueV1.Empty,
+        ArrayEmpty => ValueV1.Empty,
+        Array { items: nested } => ValueV1.Empty,
+        ArrayTokens { start: start, end: end } => ValueV1.Empty,
+        ObjectEmpty => ValueV1.Empty,
+        Object { fields: fields } => ValueV1.Empty,
+        ObjectNil => ValueV1.Empty,
+        ObjectCons { key: key, value: inner, tail: tail } => ValueV1.Empty
+    };
+}
+
+fn reverse_array(items: ValueV1, accumulated: ValueV1) -> (result: ValueV1) {
+    return match items {
+        ArrayNil => accumulated,
+        ArrayCons { head: head, tail: tail } => reverse_array(tail, ValueV1.ArrayCons { head: head, tail: accumulated }),
+        Empty => accumulated,
+        Null => accumulated,
+        Raw { token: token, length: length } => accumulated,
+        String { token: token, length: length } => accumulated,
+        ArrayEmpty => accumulated,
+        Array { items: nested } => accumulated,
+        ArrayTokens { start: start, end: end } => accumulated,
+        ObjectEmpty => accumulated,
+        Object { fields: fields } => accumulated,
+        ObjectNil => accumulated,
+        ObjectCons { key: key, value: inner, tail: tail } => accumulated
+    };
+}
+
+fn flat_array_probe_step(probe: FlatProbeV1, tape: TokenTapeV1, start: u64, index: u64) -> (result: FlatProbeV1) {
+    if probe.done || index <= start { return probe; }
+    let kind: byte = tape.tokens[index].kind;
+    if kind == 93 { return FlatProbeV1 { done: true, flat: true }; }
+    if kind == 91 || kind == 123 { return FlatProbeV1 { done: true, flat: false }; }
+    return probe;
+}
+
+fn flat_array_tokens(tape: TokenTapeV1, start: u64) -> (result: bool) {
+    let initial: FlatProbeV1 = FlatProbeV1 { done: false, flat: false };
+    iterate i over tape.tokens carrying probe: FlatProbeV1 = initial {
+        next probe = flat_array_probe_step(probe, tape, start, i);
+    }
+    return probe.done && probe.flat;
+}
+
+fn empty_frame(kind: byte) -> (result: FrameV1) {
+    return FrameV1 {
+        kind: kind,
+        items: select(kind == 1, ValueV1.ObjectNil, ValueV1.ArrayNil),
+        pending_key: empty_key(),
+        has_pending_key: false,
+        child_count: 0,
+        start_index: 0,
+        flat_array: false
+    };
+}
+
+fn empty_parse_state() -> (result: ParseStateV1) {
+    let frame: FrameV1 = empty_frame(0);
+    return ParseStateV1 {
+        frames: [frame; 12], depth: 0, root: ValueV1.Empty, has_root: false,
+        position: 0, value_count: 0, valid: true
+    };
+}
+
+fn add_value_count(state: ParseStateV1) -> (result: ParseStateV1) {
+    if state.value_count >= 512 { return ParseStateV1 { ..state, valid: false }; }
+    return ParseStateV1 { ..state, value_count: state.value_count +% 1 };
+}
+
+fn append_value(state: ParseStateV1, value: ValueV1) -> (result: ParseStateV1) {
+    if !state.valid { return state; }
+    if state.depth == 0 {
+        if state.has_root { return ParseStateV1 { ..state, valid: false }; }
+        return ParseStateV1 { ..state, root: value, has_root: true };
+    }
+    let frame_index: u64 = state.depth -% 1;
+    let frame: FrameV1 = state.frames[frame_index];
+    if frame.kind == 2 {
+        if frame.flat_array {
+            if is_empty(value) { return ParseStateV1 { ..state, valid: false }; }
+            let updated_frame: FrameV1 = FrameV1 { ..frame, child_count: frame.child_count +% 1 };
+            return ParseStateV1 { ..state, frames: replace(state.frames, frame_index, updated_frame) };
+        }
+        let prepended: ValueV1 = prepend_array(frame.items, value);
+        return ParseStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, FrameV1 { ..frame, items: prepended, child_count: frame.child_count +% 1 }),
+            valid: !is_empty(prepended)
+        };
+    }
+    if frame.kind == 1 && frame.has_pending_key && frame.child_count < 64 {
+        let inserted: ValueV1 = insert_field(frame.items, frame.pending_key, value);
+        return ParseStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, FrameV1 {
+                ..frame, items: inserted, pending_key: empty_key(), has_pending_key: false,
+                child_count: frame.child_count +% 1
+            }),
+            valid: !is_empty(inserted)
+        };
+    }
+    return ParseStateV1 { ..state, valid: false };
+}
+
+fn start_container(state: ParseStateV1, kind: byte, index: u64, tape: TokenTapeV1) -> (result: ParseStateV1) {
+    if state.depth >= 12 { return ParseStateV1 { ..state, valid: false }; }
+    let counted: ParseStateV1 = add_value_count(state);
+    if !counted.valid { return counted; }
+    let depth: u64 = counted.depth +% 1;
+    let frame: FrameV1 = FrameV1 {
+        ..empty_frame(kind),
+        start_index: index,
+        flat_array: kind == 2 && flat_array_tokens(tape, index)
+    };
+    return ParseStateV1 {
+        ..counted,
+        frames: replace(counted.frames, depth -% 1, frame),
+        depth: depth,
+        position: index +% 1
+    };
+}
+
+fn finish_container(state: ParseStateV1, kind: byte, index: u64) -> (result: ParseStateV1) {
+    if state.depth == 0 { return ParseStateV1 { ..state, valid: false }; }
+    let frame_index: u64 = state.depth -% 1;
+    let frame: FrameV1 = state.frames[frame_index];
+    if frame.kind != kind || frame.has_pending_key { return ParseStateV1 { ..state, valid: false }; }
+    let popped: ParseStateV1 = ParseStateV1 { ..state, depth: frame_index, position: index +% 1 };
+    if kind == 1 {
+        if object_fields_empty(frame.items) { return append_value(popped, ValueV1.ObjectEmpty); }
+        return append_value(popped, ValueV1.Object { fields: frame.items });
+    }
+    if frame.flat_array {
+        if frame.start_index +% 1 == index { return append_value(popped, ValueV1.ArrayEmpty); }
+        return append_value(popped, ValueV1.ArrayTokens { start: frame.start_index, end: index });
+    }
+    if array_items_empty(frame.items) { return append_value(popped, ValueV1.ArrayEmpty); }
+    return append_value(popped, ValueV1.Array { items: reverse_array(frame.items, ValueV1.ArrayNil) });
+}
+
+fn valid_scalar(tape: TokenTapeV1, token: TokenMetaV1) -> (result: bool) {
+    let initial: json.ScanState = json.init();
+    let range: TokenRangeV1 = TokenRangeV1 { chunk_index: token.chunk_index, chunk_offset: token.chunk_offset, length: token.length };
+    let scanned: json.ScanState = feed_payload_range(initial, tape, range);
+    return json.is_valid(json.finish(scanned));
+}
+
+fn set_key(state: ParseStateV1, token: TokenMetaV1, tape: TokenTapeV1, index: u64) -> (result: ParseStateV1) {
+    if state.depth == 0 || token.length > 256 { return ParseStateV1 { ..state, valid: false }; }
+    let frame_index: u64 = state.depth -% 1;
+    let frame: FrameV1 = state.frames[frame_index];
+    if frame.kind != 1 || frame.has_pending_key { return ParseStateV1 { ..state, valid: false }; }
+    let key: KeyV1 = make_key(token, tape, index);
+    return ParseStateV1 {
+        ..state,
+        frames: replace(state.frames, frame_index, FrameV1 { ..frame, pending_key: key, has_pending_key: key.valid }),
+        position: index +% 1,
+        valid: key.valid
+    };
+}
+
+fn append_scalar(state: ParseStateV1, token: TokenMetaV1, tape: TokenTapeV1, index: u64, string_value: bool) -> (result: ParseStateV1) {
+    if !string_value && !valid_scalar(tape, token) { return ParseStateV1 { ..state, valid: false }; }
+    let counted: ParseStateV1 = add_value_count(state);
+    if !counted.valid { return counted; }
+    if string_value {
+        return ParseStateV1 { ..append_value(counted, ValueV1.String { token: index, length: token.length }), position: index +% 1 };
+    }
+    return ParseStateV1 { ..append_value(counted, ValueV1.Raw { token: index, length: token.length }), position: index +% 1 };
+}
+
+fn parse_token(state: ParseStateV1, document: TokenTapeV1, index: u64) -> (result: ParseStateV1) {
+    if !state.valid { return state; }
+    if index != state.position || index >= document.tokens.len { return ParseStateV1 { ..state, valid: false }; }
+    let token: TokenMetaV1 = document.tokens[index];
+    if token.kind == 123 { return start_container(state, 1, index, document); }
+    if token.kind == 91 { return start_container(state, 2, index, document); }
+    if token.kind == 125 { return finish_container(state, 1, index); }
+    if token.kind == 93 { return finish_container(state, 2, index); }
+    if token.kind == 75 { return set_key(state, token, document, index); }
+    if token.kind == 83 { return append_scalar(state, token, document, index, true); }
+    if token.kind == 86 { return append_scalar(state, token, document, index, false); }
+    return ParseStateV1 { ..state, valid: false };
+}
+
+fn parse_tape(document: TokenTapeV1) -> (result: ParseStateV1) {
+    let initial: ParseStateV1 = empty_parse_state();
+    iterate i over document.tokens carrying parsed: ParseStateV1 = initial {
+        next parsed = parse_token(parsed, document, i);
+    }
+    return ParseStateV1 {
+        ..parsed,
+        valid: parsed.valid && parsed.position == document.tokens.len && parsed.depth == 0 && parsed.has_root
+    };
+}
+
+fn writer_empty() -> (result: WriterV1) {
+    return WriterV1 {
+        current_bytes: [0; 64], current_length: 0,
+        pending: OutputListV1.ChunkNil, pending_count: 0, pending_length: 0,
+        completed: OutputResultListV1.ChunkNil, completed_count: 0,
+        length: 0, ok: true
+    };
+}
+
+fn writer_flush_full(writer: WriterV1) -> (result: WriterV1) {
+    if writer.current_length != 64 { return WriterV1 { ..writer, ok: false }; }
+    let finished: OutputChunkV1 = OutputChunkV1 { bytes: writer.current_bytes, length: 64 };
+    let empty_current: WriterV1 = WriterV1 { ..writer, current_bytes: [0; 64], current_length: 0 };
+    return writer_add_chunk(empty_current, finished);
+}
+
+fn writer_next_chunk(writer: WriterV1, value: byte) -> (result: WriterV1) {
+    let flushed: WriterV1 = writer_flush_full(writer);
+    if !flushed.ok { return flushed; }
+    return WriterV1 {
+        ..flushed,
+        current_bytes: replace(flushed.current_bytes, 0, value),
+        current_length: 1,
+        length: writer.length +% 1
+    };
+}
+
+fn writer_byte(writer: WriterV1, value: byte) -> (result: WriterV1) {
+    if !writer.ok || writer.length >= 65536 { return WriterV1 { ..writer, ok: false }; }
+    if writer.current_length >= 64 { return writer_next_chunk(writer, value); }
+    return WriterV1 { ..writer, current_bytes: replace(writer.current_bytes, writer.current_length, value), current_length: writer.current_length +% 1, length: writer.length +% 1 };
+}
+
+fn writer_literal(writer: WriterV1, bytes: [byte; up_to 8]) -> (result: WriterV1) {
+    iterate i over bytes carrying output: WriterV1 = writer {
+        next output = writer_byte(output, bytes[i]);
+    }
+    return output;
+}
+
+fn writer_escaped_byte(writer: WriterV1, value: byte) -> (result: WriterV1) {
+    if value == 34 || value == 92 { return writer_literal(writer, [92, value]); }
+    if value == 8 { return writer_literal(writer, [92, 98]); }
+    if value == 9 { return writer_literal(writer, [92, 116]); }
+    if value == 10 { return writer_literal(writer, [92, 110]); }
+    if value == 12 { return writer_literal(writer, [92, 102]); }
+    if value == 13 { return writer_literal(writer, [92, 114]); }
+    if value < 32 {
+        return writer_literal(writer, [92, 117, 48, 48, hex_digit((value as u64) / 16), hex_digit((value as u64) % 16)]);
+    }
+    return writer_byte(writer, value);
+}
+
+fn writer_source_byte(writer: WriterV1, value: byte, escaped: bool) -> (result: WriterV1) {
+    if escaped { return writer_escaped_byte(writer, value); }
+    return writer_byte(writer, value);
+}
+
+fn writer_full_chunk(writer: WriterV1, bytes: [byte; 64]) -> (result: WriterV1) {
+    if writer.current_length != 0 || writer.length +% 64 > 65536 {
+        return WriterV1 { ..writer, ok: false };
+    }
+    let chunk: OutputChunkV1 = OutputChunkV1 { bytes: bytes, length: 64 };
+    let appended: WriterV1 = writer_add_chunk(writer, chunk);
+    return WriterV1 { ..appended, length: writer.length +% 64 };
+}
+
+fn source_fixed_chunk(source: [byte; up_to 1024], offset: u64) -> (result: [byte; 64]) {
+    let initial: [byte; 64] = [0; 64];
+    iterate i up_to 64 carrying copied: [byte; 64] = initial {
+        next copied = copy_source_byte(copied, source, offset, i);
+    }
+    return copied;
+}
+
+fn copy_source_byte(copied: [byte; 64], source: [byte; up_to 1024], offset: u64, index: u64) -> (result: [byte; 64]) {
+    return replace(copied, index, source[offset +% index]);
+}
+
+fn copy_source_into_current(current: [byte; 64], source: [byte; up_to 1024], source_offset: u64, current_offset: u64, count: u64, index: u64) -> (result: [byte; 64]) {
+    if index >= count { return current; }
+    return replace(current, current_offset +% index, source[source_offset +% index]);
+}
+
+fn source_current_bytes(writer: WriterV1, source: [byte; up_to 1024], source_offset: u64, count: u64) -> (result: [byte; 64]) {
+    iterate i up_to 64 carrying copied: [byte; 64] = writer.current_bytes {
+        next copied = copy_source_into_current(copied, source, source_offset, writer.current_length, count, i);
+    }
+    return copied;
+}
+
+fn append_source_data(state: AppendStateV1, source: [byte; up_to 1024]) -> (result: AppendStateV1) {
+    if !state.writer.ok || state.offset >= source.len { return state; }
+    let remaining: u64 = source.len -% state.offset;
+    if state.writer.current_length == 0 && remaining >= 64 {
+        return AppendStateV1 {
+            writer: writer_full_chunk(state.writer, source_fixed_chunk(source, state.offset)),
+            offset: state.offset +% 64
+        };
+    }
+    let available: u64 = 64 -% state.writer.current_length;
+    let count: u64 = select(remaining < available, remaining, available);
+    if state.writer.length +% count > 65536 { return AppendStateV1 { ..state, writer: WriterV1 { ..state.writer, ok: false } }; }
+    let bytes: [byte; 64] = source_current_bytes(state.writer, source, state.offset, count);
+    let next_length: u64 = state.writer.current_length +% count;
+    let copied: WriterV1 = WriterV1 {
+        ..state.writer,
+        current_bytes: bytes,
+        current_length: next_length,
+        length: state.writer.length +% count
+    };
+    if next_length == 64 { return AppendStateV1 { writer: writer_flush_full(copied), offset: state.offset +% count }; }
+    return AppendStateV1 { writer: copied, offset: state.offset +% count };
+}
+
+fn append_source_step(state: AppendStateV1, source: [byte; up_to 1024], part: u64) -> (result: AppendStateV1) {
+    if !state.writer.ok || state.offset >= source.len { return state; }
+    if state.writer.current_length == 64 {
+        return append_source_data(AppendStateV1 { ..state, writer: writer_flush_full(state.writer) }, source);
+    }
+    return append_source_data(state, source);
+}
+
+fn append_source(writer: WriterV1, source: [byte; up_to 1024]) -> (result: WriterV1) {
+    let initial: AppendStateV1 = AppendStateV1 { writer: writer, offset: 0 };
+    iterate part up_to 17 carrying output: AppendStateV1 = initial {
+        next output = append_source_step(output, source, part);
+    }
+    return output.writer;
+}
+
+fn source_needs_escape(source: [byte; up_to 1024]) -> (result: bool) {
+    iterate i over source carrying needed: bool = false {
+        next needed = needed || source[i] == 34 || source[i] == 92 || source[i] < 32;
+    }
+    return needed;
+}
+
+fn writer_escaped_source_step(writer: WriterV1, source: [byte; up_to 1024], index: u64) -> (result: WriterV1) {
+    if index >= source.len { return writer; }
+    return writer_escaped_byte(writer, source[index]);
+}
+
+fn token_range_piece(tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: TokenRangeV1) {
+    if range.length == 0 || range.chunk_index >= tape.chunks.len { return TokenRangeV1 { chunk_index: 0, chunk_offset: 0, length: 0 }; }
+    let first: PayloadChunkV1 = tape.chunks[range.chunk_index];
+    let first_available: u64 = first.length -% range.chunk_offset;
+    let first_length: u64 = select(range.length < first_available, range.length, first_available);
+    if segment == 0 { return TokenRangeV1 { chunk_index: range.chunk_index, chunk_offset: range.chunk_offset, length: first_length }; }
+    if range.length <= first_length { return TokenRangeV1 { chunk_index: 0, chunk_offset: 0, length: 0 }; }
+    let after_first: u64 = range.length -% first_length;
+    if range.chunk_index +% 1 >= tape.chunks.len { return TokenRangeV1 { chunk_index: 0, chunk_offset: 0, length: 0 }; }
+    let second: PayloadChunkV1 = tape.chunks[range.chunk_index +% 1];
+    let second_length: u64 = select(after_first < second.length, after_first, second.length);
+    if segment == 1 { return TokenRangeV1 { chunk_index: range.chunk_index +% 1, chunk_offset: 0, length: second_length }; }
+    if after_first <= second_length || range.chunk_index +% 2 >= tape.chunks.len {
+        return TokenRangeV1 { chunk_index: 0, chunk_offset: 0, length: 0 };
+    }
+    return TokenRangeV1 {
+        chunk_index: range.chunk_index +% 2,
+        chunk_offset: 0,
+        length: after_first -% second_length
+    };
+}
+
+fn range_source(tape: TokenTapeV1, range: TokenRangeV1) -> (result: [byte; up_to 1024]) {
+    return tape.chunks[range.chunk_index].bytes[range.chunk_offset..range.chunk_offset +% range.length];
+}
+
+fn copy_range_bytes_step(copied: [byte; 64], source: [byte; up_to 1024], offset: u64, length: u64, index: u64) -> (result: [byte; 64]) {
+    if index >= length { return copied; }
+    return replace(copied, index, source[offset +% index]);
+}
+
+fn range_bytes64(tape: TokenTapeV1, range: TokenRangeV1, offset: u64, length: u64) -> (result: [byte; up_to 64]) {
+    let source: [byte; up_to 1024] = range_source(tape, range);
+    let initial: [byte; 64] = [0; 64];
+    iterate i up_to 64 carrying copied: [byte; 64] = initial {
+        next copied = copy_range_bytes_step(copied, source, offset, length, i);
+    }
+    return copied[0..length];
+}
+
+fn feed_range_subpart(scanned: json.ScanState, tape: TokenTapeV1, range: TokenRangeV1, part: u64) -> (result: json.ScanState) {
+    let offset: u64 = part *% 64;
+    if offset >= range.length { return scanned; }
+    let remaining: u64 = range.length -% offset;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    return json.feed_chunk(scanned, range_bytes64(tape, range, offset, size));
+}
+
+fn feed_range_piece(scanned: json.ScanState, tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: json.ScanState) {
+    let piece: TokenRangeV1 = token_range_piece(tape, range, segment);
+    if piece.length == 0 { return scanned; }
+    iterate part up_to 16 carrying current: json.ScanState = scanned {
+        next current = feed_range_subpart(current, tape, piece, part);
+    }
+    return current;
+}
+
+fn feed_payload_range(scanned: json.ScanState, tape: TokenTapeV1, range: TokenRangeV1) -> (result: json.ScanState) {
+    iterate i up_to 3 carrying current: json.ScanState = scanned {
+        next current = feed_range_piece(current, tape, range, i);
+    }
+    return current;
+}
+
+fn append_range_piece(writer: WriterV1, tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: WriterV1) {
+    let piece: TokenRangeV1 = token_range_piece(tape, range, segment);
+    if piece.length == 0 { return writer; }
+    return append_source(writer, range_source(tape, piece));
+}
+
+fn append_payload_range(writer: WriterV1, tape: TokenTapeV1, range: TokenRangeV1) -> (result: WriterV1) {
+    iterate i up_to 3 carrying output: WriterV1 = writer {
+        next output = append_range_piece(output, tape, range, i);
+    }
+    return output;
+}
+
+fn escape_range_piece(needed: bool, tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: bool) {
+    if needed { return true; }
+    let piece: TokenRangeV1 = token_range_piece(tape, range, segment);
+    if piece.length == 0 { return false; }
+    return source_needs_escape(range_source(tape, piece));
+}
+
+fn range_needs_escape(tape: TokenTapeV1, range: TokenRangeV1) -> (result: bool) {
+    iterate i up_to 3 carrying needed: bool = false {
+        next needed = escape_range_piece(needed, tape, range, i);
+    }
+    return needed;
+}
+
+fn escaped_range_piece(writer: WriterV1, tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: WriterV1) {
+    let piece: TokenRangeV1 = token_range_piece(tape, range, segment);
+    if piece.length == 0 { return writer; }
+    let source: [byte; up_to 1024] = range_source(tape, piece);
+    iterate i over source carrying output: WriterV1 = writer {
+        next output = writer_escaped_source_step(output, source, i);
+    }
+    return output;
+}
+
+fn escaped_payload_range(writer: WriterV1, tape: TokenTapeV1, range: TokenRangeV1) -> (result: WriterV1) {
+    iterate i up_to 3 carrying output: WriterV1 = writer {
+        next output = escaped_range_piece(output, tape, range, i);
+    }
+    return output;
+}
+
+fn writer_source_range(writer: WriterV1, tape: TokenTapeV1, token_index: u64, length: u64, escaped: bool) -> (result: WriterV1) {
+    if token_index >= tape.tokens.len || length > tape.tokens[token_index].length { return WriterV1 { ..writer, ok: false }; }
+    let token: TokenMetaV1 = tape.tokens[token_index];
+    let range: TokenRangeV1 = TokenRangeV1 { chunk_index: token.chunk_index, chunk_offset: token.chunk_offset, length: length };
+    if !escaped || !range_needs_escape(tape, range) { return append_payload_range(writer, tape, range); }
+    return escaped_payload_range(writer, tape, range);
+}
+
+fn writer_key(writer: WriterV1, key: KeyV1, tape: TokenTapeV1) -> (result: WriterV1) {
+    return writer_byte(writer_source_range(writer_byte(writer, 34), tape, key.raw_token, key.raw_length, true), 34);
+}
+
+fn indent_step(writer: WriterV1, depth: u64, index: u64) -> (result: WriterV1) {
+    if index < depth *% 2 { return writer_byte(writer, 32); }
+    return writer;
+}
+
+fn write_indent(writer: WriterV1, depth: u64) -> (result: WriterV1) {
+    iterate i up_to 24 carrying output: WriterV1 = writer {
+        next output = indent_step(output, depth, i);
+    }
+    return output;
+}
+
+fn write_line_indent(writer: WriterV1, depth: u64) -> (result: WriterV1) {
+    return write_indent(writer_byte(writer, 10), depth);
+}
+
+fn array_item_prefix(writer: WriterV1, first: bool, depth: u64) -> (result: WriterV1) {
+    if first { return write_line_indent(writer, depth); }
+    return write_line_indent(writer_byte(writer, 44), depth);
+}
+
+fn object_field_prefix(writer: WriterV1, first: bool, depth: u64) -> (result: WriterV1) {
+    if first { return write_line_indent(writer, depth); }
+    return write_line_indent(writer_byte(writer, 44), depth);
+}
+
+fn array_items_empty(items: ValueV1) -> (result: bool) {
+    return match items {
+        ArrayNil => true,
+        ArrayCons { head: head, tail: tail } => false,
+        Empty => true,
+        Null => false,
+        Raw { token: token, length: length } => false,
+        String { token: token, length: length } => false,
+        ArrayEmpty => false,
+        Array { items: nested } => false,
+        ArrayTokens { start: start, end: end } => false,
+        ObjectEmpty => false,
+        Object { fields: fields } => false,
+        ObjectNil => false,
+        ObjectCons { key: key, value: value, tail: tail } => false
+    };
+}
+
+fn object_fields_empty(fields: ValueV1) -> (result: bool) {
+    return match fields {
+        ObjectNil => true,
+        ObjectCons { key: key, value: value, tail: tail } => false,
+        Empty => true,
+        Null => false,
+        Raw { token: token, length: length } => false,
+        String { token: token, length: length } => false,
+        ArrayEmpty => false,
+        Array { items: items } => false,
+        ArrayTokens { start: start, end: end } => false,
+        ObjectEmpty => false,
+        Object { fields: nested } => false,
+        ArrayNil => false,
+        ArrayCons { head: head, tail: tail } => false
+    };
+}
+
+fn write_flat_scalar(writer: WriterV1, tape: TokenTapeV1, token: TokenMetaV1, index: u64) -> (result: WriterV1) {
+    if token.kind == 83 {
+        return writer_byte(writer_source_range(writer_byte(writer, 34), tape, index, token.length, true), 34);
+    }
+    if token.kind == 86 { return writer_source_range(writer, tape, index, token.length, false); }
+    return WriterV1 { ..writer, ok: false };
+}
+
+fn flat_array_step(state: FlatWriteV1, tape: TokenTapeV1, start: u64, end: u64, depth: u64, index: u64) -> (result: FlatWriteV1) {
+    if !state.valid || index <= start || index >= end { return state; }
+    let token: TokenMetaV1 = tape.tokens[index];
+    let prefix: WriterV1 = array_item_prefix(state.writer, state.first, depth);
+    let value: WriterV1 = write_flat_scalar(prefix, tape, token, index);
+    return FlatWriteV1 { writer: value, first: false, valid: value.ok };
+}
+
+fn write_flat_array(tape: TokenTapeV1, writer: WriterV1, start: u64, end: u64, depth: u64) -> (result: WriterV1) {
+    if start +% 1 == end { return writer_literal(writer, [91, 93]); }
+    let opened: WriterV1 = writer_byte(writer, 91);
+    let initial: FlatWriteV1 = FlatWriteV1 { writer: opened, first: true, valid: opened.ok };
+    iterate i over tape.tokens carrying state: FlatWriteV1 = initial {
+        next state = flat_array_step(state, tape, start, end, depth +% 1, i);
+    }
+    if !state.valid { return WriterV1 { ..state.writer, ok: false }; }
+    return writer_byte(write_indent(writer_byte(state.writer, 10), depth), 93);
+}
+
+fn write_json(value: ValueV1, writer: WriterV1, tape: TokenTapeV1, depth: u64, mode: byte, first: bool) -> (result: WriterV1) {
+    if mode == 1 {
+        return match value {
+            ArrayNil => writer_byte(write_indent(writer_byte(writer, 10), depth -% 1), 93),
+            ArrayCons { head: head, tail: tail } => write_json(tail, write_json(head, array_item_prefix(writer, first, depth), tape, depth, 0, true), tape, depth, 1, false),
+            Empty => WriterV1 { ..writer, ok: false },
+            Null => WriterV1 { ..writer, ok: false },
+            Raw { token: token, length: length } => WriterV1 { ..writer, ok: false },
+            String { token: token, length: length } => WriterV1 { ..writer, ok: false },
+            ArrayEmpty => WriterV1 { ..writer, ok: false },
+            Array { items: nested } => WriterV1 { ..writer, ok: false },
+            ArrayTokens { start: start, end: end } => WriterV1 { ..writer, ok: false },
+            ObjectEmpty => WriterV1 { ..writer, ok: false },
+            Object { fields: nested } => WriterV1 { ..writer, ok: false },
+            ObjectNil => WriterV1 { ..writer, ok: false },
+            ObjectCons { key: key, value: inner, tail: rest } => WriterV1 { ..writer, ok: false }
+        };
+    }
+    if mode == 2 {
+        return match value {
+            ObjectNil => writer_byte(write_indent(writer_byte(writer, 10), depth -% 1), 125),
+            ObjectCons { key: key, value: inner, tail: tail } => write_json(tail, write_json(inner, writer_literal(writer_key(object_field_prefix(writer, first, depth), key, tape), [58, 32]), tape, depth, 0, true), tape, depth, 2, false),
+            Empty => WriterV1 { ..writer, ok: false },
+            Null => WriterV1 { ..writer, ok: false },
+            Raw { token: token, length: length } => WriterV1 { ..writer, ok: false },
+            String { token: token, length: length } => WriterV1 { ..writer, ok: false },
+            ArrayEmpty => WriterV1 { ..writer, ok: false },
+            Array { items: items } => WriterV1 { ..writer, ok: false },
+            ArrayTokens { start: start, end: end } => WriterV1 { ..writer, ok: false },
+            ObjectEmpty => WriterV1 { ..writer, ok: false },
+            Object { fields: nested } => WriterV1 { ..writer, ok: false },
+            ArrayNil => WriterV1 { ..writer, ok: false },
+            ArrayCons { head: head, tail: tail } => WriterV1 { ..writer, ok: false }
+        };
+    }
+    return match value {
+        Empty => WriterV1 { ..writer, ok: false },
+        Null => writer_literal(writer, [110, 117, 108, 108]),
+        Raw { token: token, length: length } => writer_source_range(writer, tape, token, length, false),
+        String { token: token, length: length } => writer_byte(writer_source_range(writer_byte(writer, 34), tape, token, length, true), 34),
+        ArrayEmpty => writer_literal(writer, [91, 93]),
+        Array { items: items } => write_json(items, writer_byte(writer, 91), tape, depth +% 1, 1, true),
+        ArrayTokens { start: start, end: end } => write_flat_array(tape, writer, start, end, depth),
+        ObjectEmpty => writer_literal(writer, [123, 125]),
+        Object { fields: fields } => write_json(fields, writer_byte(writer, 123), tape, depth +% 1, 2, true),
+        ArrayNil => writer_literal(writer, [91, 93]),
+        ArrayCons { head: head, tail: tail } => WriterV1 { ..writer, ok: false },
+        ObjectNil => writer_literal(writer, [123, 125]),
+        ObjectCons { key: key, value: inner, tail: tail } => WriterV1 { ..writer, ok: false }
+    };
+}
+
+fn empty_result_parts() -> (result: [OutputChunkV1; 16]) {
+    let empty: OutputChunkV1 = OutputChunkV1 { bytes: [0; 64], length: 0 };
+    return [empty; 16];
+}
+
+fn collect_pending_parts(pending: OutputListV1, parts: [OutputChunkV1; 16], index: u64) -> (result: [OutputChunkV1; 16]) {
+    return match pending {
+        ChunkNil => parts,
+        ChunkCons { head: head, tail: tail } => collect_pending_parts(tail, replace(parts, index, head), index -% 1)
+    };
+}
+
+fn writer_close_group(writer: WriterV1) -> (result: WriterV1) {
+    if writer.pending_count == 0 { return writer; }
+    if writer.completed_count >= 64 { return WriterV1 { ..writer, ok: false }; }
+    let parts: [OutputChunkV1; 16] = collect_pending_parts(writer.pending, empty_result_parts(), writer.pending_count -% 1);
+    let group: OutputResultChunkV1 = OutputResultChunkV1 { parts: parts, length: writer.pending_length };
+    return WriterV1 {
+        ..writer,
+        pending: OutputListV1.ChunkNil, pending_count: 0, pending_length: 0,
+        completed: OutputResultListV1.ChunkCons { head: group, tail: writer.completed },
+        completed_count: writer.completed_count +% 1
+    };
+}
+
+fn writer_add_chunk(writer: WriterV1, chunk: OutputChunkV1) -> (result: WriterV1) {
+    if !writer.ok || chunk.length == 0 || chunk.length > 64 || writer.pending_count >= 16
+        || writer.pending_length +% chunk.length > 1024 {
+        return WriterV1 { ..writer, ok: false };
+    }
+    let updated: WriterV1 = WriterV1 {
+        ..writer,
+        pending: OutputListV1.ChunkCons { head: chunk, tail: writer.pending },
+        pending_count: writer.pending_count +% 1,
+        pending_length: writer.pending_length +% chunk.length
+    };
+    if updated.pending_count == 16 || updated.pending_length == 1024 { return writer_close_group(updated); }
+    return updated;
+}
+
+fn complete_result_chunks(completed: OutputResultListV1, chunks: [OutputResultChunkV1; 64], index: u64) -> (result: [OutputResultChunkV1; 64]) {
+    return match completed {
+        OutputResultListV1.ChunkNil => chunks,
+        OutputResultListV1.ChunkCons { head: head, tail: tail } => complete_result_chunks(tail, replace(chunks, index, head), index -% 1)
+    };
+}
+
+fn writer_add_partial(writer: WriterV1) -> (result: WriterV1) {
+    if writer.current_length == 0 { return writer; }
+    return writer_add_chunk(
+        WriterV1 { ..writer, current_bytes: [0; 64], current_length: 0 },
+        OutputChunkV1 { bytes: writer.current_bytes, length: writer.current_length }
+    );
+}
+
+fn output_chunks(writer: WriterV1) -> (result: ChunkBuilderV1) {
+    if !writer.ok { return ChunkBuilderV1 { chunks: [OutputResultChunkV1 { parts: empty_result_parts(), length: 0 }; 64], count: 0 }; }
+    let with_partial: WriterV1 = writer_add_partial(writer);
+    let finished: WriterV1 = writer_close_group(with_partial);
+    let empty: OutputResultChunkV1 = OutputResultChunkV1 { parts: empty_result_parts(), length: 0 };
+    let initial_chunks: [OutputResultChunkV1; 64] = [empty; 64];
+    if !finished.ok || finished.completed_count == 0 { return ChunkBuilderV1 { chunks: initial_chunks, count: 0 }; }
+    let chunks: [OutputResultChunkV1; 64] = complete_result_chunks(finished.completed, initial_chunks, finished.completed_count -% 1);
+    return ChunkBuilderV1 { chunks: chunks, count: finished.completed_count };
+}
+
+fn checked_parse(request: TapeRequestV1, request_valid: bool) -> (result: ParseStateV1) {
+    if request_valid { return parse_tape(request.tape); }
+    return empty_parse_state();
+}
+
+fn checked_writer(parsed: ParseStateV1, tape: TokenTapeV1) -> (result: WriterV1) {
+    if parsed.valid { return writer_byte(write_json(parsed.root, writer_empty(), tape, 0, 0, true), 10); }
+    return WriterV1 { ..writer_empty(), ok: false };
+}
+
+fn result_value(supported: bool, request_valid: bool, tape_shape_valid: bool, tape_shape_code: u64, parsed: ParseStateV1, writer: WriterV1, builder: ChunkBuilderV1) -> (result: TapeResultV1) {
+    let ready: bool = supported && writer.ok && builder.count > 0;
+    return TapeResultV1 {
+        schema_version: result_schema_v1(),
+        supported: ready,
+        request_valid: request_valid,
+        tape_shape_valid: tape_shape_valid,
+        tape_shape_code: tape_shape_code,
+        parse_valid: parsed.valid,
+        writer_valid: writer.ok,
+        consumed_tokens: parsed.position,
+        parsed_depth: parsed.depth,
+        value_count: parsed.value_count,
+        document_length: select(ready, writer.length, 0),
+        chunk_count: select(ready, builder.count, 0),
+        chunks: select(ready, builder.chunks[0..builder.count], builder.chunks[0..0])
+    };
+}
+
+fn public_result_json_token_tape_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: TapeRequestV1 = structured_read(context.argv[0], request_schema_v1());
+    let tape_shape_code: u64 = request_tape_shape_code(request.tape);
+    let tape_shape_valid: bool = tape_shape_code == 0;
+    let request_valid: bool = valid_request(request, tape_shape_valid);
+    let parsed: ParseStateV1 = checked_parse(request, request_valid);
+    let writer: WriterV1 = checked_writer(parsed, request.tape);
+    let builder: ChunkBuilderV1 = output_chunks(writer);
+    let supported: bool = request_valid && parsed.valid && writer.ok && builder.count > 0;
+    let result: TapeResultV1 = result_value(supported, request_valid, tape_shape_valid, tape_shape_code, parsed, writer, builder);
+    let published: u64 = structured_write(context.argv[1], result_schema_v1(), result);
+    if published == 0 {
+        return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

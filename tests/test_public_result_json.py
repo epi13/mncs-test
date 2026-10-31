@@ -142,8 +142,7 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -193,8 +192,7 @@ def test_family_check_error_response_uses_native_json_serializer(
         json.dumps(document, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -227,8 +225,7 @@ def test_discover_json_uses_native_public_result_serializer(
     assert exit_code == mncs_test.EXIT_SUCCESS
     assert output == _python_result_bytes(document)
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -252,10 +249,7 @@ def test_validate_manifest_json_uses_native_serializer_for_ascii_output(
     document = json.loads(output)
     assert exit_code == mncs_test.EXIT_SUCCESS
     assert output == _python_result_bytes(document)
-    assert [call.args[0] for call in native_app.call_args_list[-2:]] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
-    ]
+    assert native_app.call_args_list[-1].args[0] == "test-public-result-json-token-tape.json"
 
 
 def test_ascii_json_mode_keeps_escaped_unicode_compatibility(
@@ -337,8 +331,7 @@ def test_artifact_store_json_uses_native_serializer_and_keeps_golden_digest(
         }
     ]
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -367,9 +360,9 @@ def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path)
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_args_list[0].args[0] == (
-        "test-public-result-json-key-order.json"
-    )
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-token-tape.json",
+    ]
 
 
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
@@ -390,8 +383,7 @@ def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Pat
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -413,9 +405,7 @@ def test_native_key_order_sorts_documents_larger_than_eight_kibibytes(tmp_path: 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
-        "test-public-result-json-token-window.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -459,8 +449,7 @@ def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> N
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
     ]
 
 
@@ -497,9 +486,7 @@ def test_native_json_supports_results_larger_than_legacy_window(tmp_path: Path) 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert calls[0] == "test-public-result-json-token.json"
-    assert all(name == "test-public-result-json-token-window.json" for name in calls[1:])
-    assert 1 < len(calls) <= 6
+    assert calls == ["test-public-result-json-token-tape.json"]
 
 
 def test_results_through_expanded_native_window_use_native_json(
@@ -530,7 +517,7 @@ def test_results_through_expanded_native_window_use_native_json(
     assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
 
 
-def test_packed_text_keeps_large_public_result_on_native_windows(
+def test_packed_typed_tokens_keep_large_result_native_without_host_json_projection(
     tmp_path: Path,
 ) -> None:
     value = ["x" * 600 for _ in range(55)]
@@ -556,12 +543,8 @@ def test_packed_text_keeps_large_public_result_on_native_windows(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert 1 < len(calls) <= 6
-    assert calls[0] == "test-public-result-json-token.json"
-    assert "test-public-result-json-key-order.json" not in calls
-    assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
-    assert compact.call_args_list
-    assert all(call.kwargs.get("sort_keys", True) is False for call in compact.call_args_list)
+    assert calls == ["test-public-result-json-token-tape.json"]
+    compact.assert_not_called()
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(
@@ -638,8 +621,10 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
+        "test-public-result-json-token-tape.json",
         "test-public-result-json-key-order.json",
         "test-public-result-json-token.json",
+        "test-public-result-json-token-tape.json",
         "test-public-result-json-token.json",
     ]
 
@@ -689,6 +674,9 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
         document = request.get("document")
         if isinstance(document, dict):
             call["document_bytes"] = document.get("byte_length", 0)
+        tape = request.get("tape")
+        if isinstance(tape, dict):
+            call["tape_bytes"] = tape.get("byte_length", 0)
         call["has_typed_tree"] = "nodes" in request or "edges" in request
         app_calls.append(call)
         try:
@@ -754,10 +742,13 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
     assert captured.out.encode("utf-8") == result_path.read_bytes()
     assert public_calls
     assert all(call["status"] == "success" for call in public_calls)
-    assert all(call.get("document_bytes", 0) > 0 for call in public_calls)
+    assert all(
+        call.get("document_bytes", 0) > 0 or call.get("tape_bytes", 0) > 0
+        for call in public_calls
+    )
     assert any(
-        call["application"] == "test-public-result-json-key-order.json"
-        and call.get("document_bytes", 0) > 4096
+        call["application"] == "test-public-result-json-token-tape.json"
+        and call.get("tape_bytes", 0) > 4096
         for call in public_calls
     )
     assert all(not call.get("has_typed_tree") for call in public_calls)

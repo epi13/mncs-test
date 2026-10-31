@@ -60,6 +60,7 @@ from family_contract import verification_plan_contract  # noqa: E402
 class RunnerTests(unittest.TestCase):
     def invoke(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
+        environment["MNCS"] = str(MNCS)
         selected_roots = [
             str(STDLIB_LIBRARY),
             str(REPO / "native"),
@@ -710,6 +711,7 @@ class RunnerTests(unittest.TestCase):
             serializer_applications
             and set(serializer_applications)
             <= {
+                "test-public-result-json-token-tape.json",
                 "test-public-result-json-key-order.json",
                 "test-public-result-json-token.json",
                 "test-public-result-json-token-window.json",
@@ -814,6 +816,7 @@ class RunnerTests(unittest.TestCase):
             native_applications: list[str] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
+                "test-public-result-json-token-tape.json",
                 "test-public-result-json-key-order.json",
                 "test-public-result-json-token.json",
                 "test-public-result-json-token-window.json",

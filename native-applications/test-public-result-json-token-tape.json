@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.public-result-json-token-tape",
+  "source": "../native/mncs/test/public_result_json_token_tape_v1.mncs",
+  "module": "mncs.test.public_result_json_token_tape_v1",
+  "entry_function": "public_result_json_token_tape_app_v1",
+  "profile": "0.18",
+  "interface_identity": "b9994778551804c9d222b847cb4c489828de5ae4826752858fdf22c1c4ac4af9",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}
