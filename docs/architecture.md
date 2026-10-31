@@ -894,3 +894,15 @@ Larger or more expensive objects, including 256-member objects and long-key
 shapes that exceed the 8,000,000-step budget, continue to use that fallback.
 Verification passed all 42 public-result JSON tests and the validate-manifest
 regression using the integrated Stdlib JSON cursor provider at 3d9e077.
+
+P-038 adds a bottom-up native merge-sort tier for objects above 128 members and
+raises the Test key-order and cursor formatter bounds together to 256. The
+129-member transition, ascending and descending 256-member objects, and
+duplicate-key rejection after the transition are covered directly. Both
+256-member input orders match independently generated JSON bytes and
+SHA-256; at 257 members the native applications decline and the existing
+compatibility route preserves exact output. The native token-document bound
+change also required refreshing the dependent CheckResult app binding; its
+medium-result consumer regression and all 46 public-result JSON tests pass
+with the integrated Stdlib JSON cursor provider at 3d9e077. Existing value,
+depth, key-length, input-byte, and execution limits remain in force.

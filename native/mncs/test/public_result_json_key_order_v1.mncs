@@ -2,8 +2,8 @@ mncs 0.18;
 
 // Canonicalize compact public-result JSON without a host-built value tree.
 // Input and output stay within sixty-four UTF-8-safe 1 KiB chunks. JSON values are
-// represented as bounded recursive MNCS variants; object members are inserted
-// into Unicode-ordered lists as the token cursor closes each value.
+// represented as bounded recursive MNCS variants; small objects use ordered
+// insertion, while larger bounded objects use bottom-up merge sorting on close.
 module mncs.test.public_result_json_key_order_v1;
 
 use mncs.std.application.v1;
@@ -52,11 +52,42 @@ record FrameV1 {
     contains_object: bool,
     compact: bool,
     child_count: u64,
+    merge_sort_needed: bool,
     writer_steps: u64,
     expect: byte
 }
 
-record ContainerValueV1 { value: JsonValueV1, writer_steps: u64 }
+record ContainerValueV1 { value: JsonValueV1, writer_steps: u64, valid: bool }
+record ObjectSortResultV1 { fields: JsonValueV1, valid: bool }
+record ObjectReverseStateV1 {
+    remaining: JsonValueV1,
+    reversed: JsonValueV1,
+    count: u64,
+    index: u64,
+    valid: bool
+}
+record ObjectMergeStateV1 {
+    source_count: u64,
+    width: u64,
+    remaining: JsonValueV1,
+    remaining_count: u64,
+    left: JsonValueV1,
+    left_count: u64,
+    right: JsonValueV1,
+    right_count: u64,
+    right_total: u64,
+    pair_count: u64,
+    run_remaining: u64,
+    output: JsonValueV1,
+    output_count: u64,
+    valid: bool
+}
+record ObjectMergeSortStateV1 {
+    fields: JsonValueV1,
+    count: u64,
+    width: u64,
+    valid: bool
+}
 
 record ParseStateV1 {
     frames: [FrameV1; 12],
@@ -396,6 +427,316 @@ fn insert_field(fields: JsonValueV1, key: KeyV1, value: JsonValueV1) -> (result:
     };
 }
 
+fn append_object_field(fields: JsonValueV1, key: KeyV1, value: JsonValueV1) -> (result: JsonValueV1) {
+    return JsonValueV1.ObjectCons { key: key, value: value, tail: fields };
+}
+
+fn append_object_field_by_mode(
+    fields: JsonValueV1, key: KeyV1, value: JsonValueV1, use_merge_sort: bool
+) -> (result: JsonValueV1) {
+    if use_merge_sort { return append_object_field(fields, key, value); }
+    return insert_field(fields, key, value);
+}
+
+fn object_field_tail(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return match fields {
+        ObjectCons { key: key, value: value, tail: tail } => tail,
+        ObjectNil => JsonValueV1.ObjectNil,
+        Empty => JsonValueV1.Empty,
+        Null => JsonValueV1.Empty,
+        Raw { start: start, length: length } => JsonValueV1.Empty,
+        String { start: start, length: length } => JsonValueV1.Empty,
+        Array { items: items } => JsonValueV1.Empty,
+        Object { fields: nested } => JsonValueV1.Empty,
+        ArrayNil => JsonValueV1.Empty,
+        ArrayCons { head: head, tail: tail } => JsonValueV1.Empty
+    };
+}
+
+fn advance_object_fields_2(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return object_field_tail(object_field_tail(fields));
+}
+
+fn advance_object_fields_4(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return advance_object_fields_2(advance_object_fields_2(fields));
+}
+
+fn advance_object_fields_8(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return advance_object_fields_4(advance_object_fields_4(fields));
+}
+
+fn advance_object_fields_16(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return advance_object_fields_8(advance_object_fields_8(fields));
+}
+
+fn advance_object_fields_32(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return advance_object_fields_16(advance_object_fields_16(fields));
+}
+
+fn advance_object_fields_64(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return advance_object_fields_32(advance_object_fields_32(fields));
+}
+
+fn advance_object_fields_128(fields: JsonValueV1) -> (result: JsonValueV1) {
+    return advance_object_fields_64(advance_object_fields_64(fields));
+}
+
+fn advance_object_fields_by_width(fields: JsonValueV1, width: u64) -> (result: JsonValueV1) {
+    if width == 1 { return object_field_tail(fields); }
+    if width == 2 { return advance_object_fields_2(fields); }
+    if width == 4 { return advance_object_fields_4(fields); }
+    if width == 8 { return advance_object_fields_8(fields); }
+    if width == 16 { return advance_object_fields_16(fields); }
+    if width == 32 { return advance_object_fields_32(fields); }
+    if width == 64 { return advance_object_fields_64(fields); }
+    if width == 128 { return advance_object_fields_128(fields); }
+    return JsonValueV1.Empty;
+}
+
+fn reverse_object_field_step(state: ObjectReverseStateV1) -> (result: ObjectReverseStateV1) {
+    if !state.valid || state.index >= state.count { return state; }
+    return match state.remaining {
+        ObjectCons { key: key, value: value, tail: tail } => ObjectReverseStateV1 {
+            ..state,
+            remaining: tail,
+            reversed: JsonValueV1.ObjectCons {
+                key: key, value: value, tail: state.reversed
+            },
+            index: state.index +% 1
+        },
+        ObjectNil => ObjectReverseStateV1 { ..state, valid: false },
+        Empty => ObjectReverseStateV1 { ..state, valid: false },
+        Null => ObjectReverseStateV1 { ..state, valid: false },
+        Raw { start: start, length: length } => ObjectReverseStateV1 { ..state, valid: false },
+        String { start: start, length: length } => ObjectReverseStateV1 { ..state, valid: false },
+        Array { items: items } => ObjectReverseStateV1 { ..state, valid: false },
+        Object { fields: fields } => ObjectReverseStateV1 { ..state, valid: false },
+        ArrayNil => ObjectReverseStateV1 { ..state, valid: false },
+        ArrayCons { head: head, tail: tail } => ObjectReverseStateV1 { ..state, valid: false }
+    };
+}
+
+fn reverse_object_fields(fields: JsonValueV1, count: u64) -> (result: ObjectReverseStateV1) {
+    let initial: ObjectReverseStateV1 = ObjectReverseStateV1 {
+        remaining: fields,
+        reversed: JsonValueV1.ObjectNil,
+        count: count,
+        index: 0,
+        valid: count <= 256
+    };
+    iterate i up_to 256 carrying reversed: ObjectReverseStateV1 = initial {
+        next reversed = reverse_object_field_step(reversed);
+    }
+    return reversed;
+}
+
+fn begin_object_merge_run(state: ObjectMergeStateV1) -> (result: ObjectMergeStateV1) {
+    if !state.valid || state.remaining_count == 0 { return state; }
+    let left_count: u64 = select(state.width < state.remaining_count, state.width, state.remaining_count);
+    let right_start: JsonValueV1 = advance_object_fields_by_width(state.remaining, state.width);
+    let after_left: u64 = state.remaining_count -% left_count;
+    let right_count: u64 = select(state.width < after_left, state.width, after_left);
+    return ObjectMergeStateV1 {
+        ..state,
+        left: state.remaining,
+        left_count: left_count,
+        right: right_start,
+        right_count: right_count,
+        right_total: right_count,
+        pair_count: left_count +% right_count,
+        run_remaining: left_count +% right_count
+    };
+}
+
+fn advance_object_merge_run(state: ObjectMergeStateV1) -> (result: ObjectMergeStateV1) {
+    if state.right_total == 0 {
+        return ObjectMergeStateV1 {
+            ..state,
+            remaining: state.left,
+            remaining_count: state.remaining_count -% state.pair_count,
+            left: JsonValueV1.ObjectNil,
+            left_count: 0,
+            right: JsonValueV1.ObjectNil,
+            right_count: 0,
+            right_total: 0,
+            pair_count: 0,
+            run_remaining: 0
+        };
+    }
+    return ObjectMergeStateV1 {
+        ..state,
+        remaining: state.right,
+        remaining_count: state.remaining_count -% state.pair_count,
+        left: JsonValueV1.ObjectNil,
+        left_count: 0,
+        right: JsonValueV1.ObjectNil,
+        right_count: 0,
+        right_total: 0,
+        pair_count: 0,
+        run_remaining: 0
+    };
+}
+
+fn take_object_merge_left(state: ObjectMergeStateV1) -> (result: ObjectMergeStateV1) {
+    return match state.left {
+        ObjectCons { key: key, value: value, tail: tail } => ObjectMergeStateV1 {
+            ..state,
+            left: tail,
+            left_count: state.left_count -% 1,
+            run_remaining: state.run_remaining -% 1,
+            output: JsonValueV1.ObjectCons { key: key, value: value, tail: state.output },
+            output_count: state.output_count +% 1
+        },
+        ObjectNil => ObjectMergeStateV1 { ..state, valid: false },
+        Empty => ObjectMergeStateV1 { ..state, valid: false },
+        Null => ObjectMergeStateV1 { ..state, valid: false },
+        Raw { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
+        String { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
+        Array { items: items } => ObjectMergeStateV1 { ..state, valid: false },
+        Object { fields: fields } => ObjectMergeStateV1 { ..state, valid: false },
+        ArrayNil => ObjectMergeStateV1 { ..state, valid: false },
+        ArrayCons { head: head, tail: tail } => ObjectMergeStateV1 { ..state, valid: false }
+    };
+}
+
+fn take_object_merge_right(state: ObjectMergeStateV1) -> (result: ObjectMergeStateV1) {
+    return match state.right {
+        ObjectCons { key: key, value: value, tail: tail } => ObjectMergeStateV1 {
+            ..state,
+            right: tail,
+            right_count: state.right_count -% 1,
+            run_remaining: state.run_remaining -% 1,
+            output: JsonValueV1.ObjectCons { key: key, value: value, tail: state.output },
+            output_count: state.output_count +% 1
+        },
+        ObjectNil => ObjectMergeStateV1 { ..state, valid: false },
+        Empty => ObjectMergeStateV1 { ..state, valid: false },
+        Null => ObjectMergeStateV1 { ..state, valid: false },
+        Raw { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
+        String { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
+        Array { items: items } => ObjectMergeStateV1 { ..state, valid: false },
+        Object { fields: fields } => ObjectMergeStateV1 { ..state, valid: false },
+        ArrayNil => ObjectMergeStateV1 { ..state, valid: false },
+        ArrayCons { head: head, tail: tail } => ObjectMergeStateV1 { ..state, valid: false }
+    };
+}
+
+fn object_merge_compared(
+    active: ObjectMergeStateV1, left_key: KeyV1, right_key: KeyV1
+) -> (result: ObjectMergeStateV1) {
+    return match compare_key(left_key, right_key) {
+        Before => take_object_merge_left(active),
+        Equal => ObjectMergeStateV1 { ..active, valid: false },
+        After => take_object_merge_right(active)
+    };
+}
+
+fn object_merge_item_active(active: ObjectMergeStateV1) -> (result: ObjectMergeStateV1) {
+    if !active.valid { return active; }
+    if active.left_count == 0 { return take_object_merge_right(active); }
+    if active.right_count == 0 { return take_object_merge_left(active); }
+    return match active.left {
+        ObjectCons { key: left_key, value: left_value, tail: left_tail } => match active.right {
+            ObjectCons { key: right_key, value: right_value, tail: right_tail } =>
+                object_merge_compared(active, left_key, right_key),
+            ObjectNil => ObjectMergeStateV1 { ..active, valid: false },
+            Empty => ObjectMergeStateV1 { ..active, valid: false },
+            Null => ObjectMergeStateV1 { ..active, valid: false },
+            Raw { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
+            String { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
+            Array { items: items } => ObjectMergeStateV1 { ..active, valid: false },
+            Object { fields: fields } => ObjectMergeStateV1 { ..active, valid: false },
+            ArrayNil => ObjectMergeStateV1 { ..active, valid: false },
+            ArrayCons { head: head, tail: tail } => ObjectMergeStateV1 { ..active, valid: false }
+        },
+        ObjectNil => ObjectMergeStateV1 { ..active, valid: false },
+        Empty => ObjectMergeStateV1 { ..active, valid: false },
+        Null => ObjectMergeStateV1 { ..active, valid: false },
+        Raw { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
+        String { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
+        Array { items: items } => ObjectMergeStateV1 { ..active, valid: false },
+        Object { fields: fields } => ObjectMergeStateV1 { ..active, valid: false },
+        ArrayNil => ObjectMergeStateV1 { ..active, valid: false },
+        ArrayCons { head: head, tail: tail } => ObjectMergeStateV1 { ..active, valid: false }
+    };
+}
+
+fn object_merge_item_step(state: ObjectMergeStateV1) -> (result: ObjectMergeStateV1) {
+    if !state.valid || state.output_count >= state.source_count { return state; }
+    if state.run_remaining == 0 {
+        let next_run: ObjectMergeStateV1 = advance_object_merge_run(state);
+        return object_merge_item_active(begin_object_merge_run(next_run));
+    }
+    return object_merge_item_active(state);
+}
+
+fn merge_object_fields_pass(fields: JsonValueV1, count: u64, width: u64) -> (result: ObjectSortResultV1) {
+    let initial: ObjectMergeStateV1 = ObjectMergeStateV1 {
+        source_count: count,
+        width: width,
+        remaining: fields,
+        remaining_count: count,
+        left: JsonValueV1.ObjectNil,
+        left_count: 0,
+        right: JsonValueV1.ObjectNil,
+        right_count: 0,
+        right_total: 0,
+        pair_count: 0,
+        run_remaining: 0,
+        output: JsonValueV1.ObjectNil,
+        output_count: 0,
+        valid: count <= 256
+    };
+    let first_run: ObjectMergeStateV1 = begin_object_merge_run(initial);
+    iterate i up_to 256 carrying merged: ObjectMergeStateV1 = first_run {
+        next merged = object_merge_item_step(merged);
+    }
+    if !merged.valid || merged.output_count != count {
+        return ObjectSortResultV1 { fields: JsonValueV1.Empty, valid: false };
+    }
+    let restored: ObjectReverseStateV1 = reverse_object_fields(merged.output, count);
+    return ObjectSortResultV1 {
+        fields: restored.reversed,
+        valid: restored.valid && restored.index == count
+    };
+}
+
+fn object_merge_sort_step(sorted: ObjectMergeSortStateV1) -> (result: ObjectMergeSortStateV1) {
+    if !sorted.valid || sorted.width >= sorted.count { return sorted; }
+    let merged: ObjectSortResultV1 = merge_object_fields_pass(
+        sorted.fields, sorted.count, sorted.width
+    );
+    return ObjectMergeSortStateV1 {
+        fields: merged.fields,
+        count: sorted.count,
+        width: sorted.width *% 2,
+        valid: merged.valid
+    };
+}
+
+fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectSortResultV1) {
+    let initial: ObjectMergeSortStateV1 = ObjectMergeSortStateV1 {
+        fields: fields,
+        count: count,
+        width: 1,
+        valid: count <= 256
+    };
+    iterate pass up_to 8 carrying sorted: ObjectMergeSortStateV1 = initial {
+        next sorted = object_merge_sort_step(sorted);
+    }
+    return ObjectSortResultV1 {
+        fields: sorted.fields,
+        valid: sorted.valid && sorted.width >= sorted.count
+    };
+}
+
+fn sort_object_fields_at_close(frame: FrameV1) -> (result: ObjectSortResultV1) {
+    if frame.merge_sort_needed {
+        return sort_object_fields_merge(frame.items, frame.child_count);
+    }
+    return ObjectSortResultV1 { fields: frame.items, valid: true };
+}
+
 fn prepend_array(items: JsonValueV1, value: JsonValueV1) -> (result: JsonValueV1) {
     return match items {
         ArrayNil => JsonValueV1.ArrayCons { head: value, tail: JsonValueV1.ArrayNil },
@@ -475,6 +816,7 @@ fn empty_frame(kind: byte) -> (result: FrameV1) {
         contains_object: false,
         compact: true,
         child_count: 0,
+        merge_sort_needed: false,
         writer_steps: 0,
         expect: select(kind == 1, 1, 5)
     };
@@ -530,14 +872,18 @@ fn append_value(
             valid: !is_empty_value(prepended)
         };
     }
-    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 128 {
-        let inserted: JsonValueV1 = insert_field(frame.items, frame.pending_key, value);
+    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 256 {
+        let use_merge_sort: bool = frame.merge_sort_needed || frame.child_count >= 128;
+        let inserted: JsonValueV1 = append_object_field_by_mode(
+            frame.items, frame.pending_key, value, use_merge_sort
+        );
         let updated_frame: FrameV1 = FrameV1 {
             ..frame,
             items: inserted,
             pending_key: empty_key(),
             has_pending_key: false,
             child_count: frame.child_count +% 1,
+            merge_sort_needed: use_merge_sort,
             writer_steps: frame.writer_steps +% writer_steps +% 1,
             expect: 4
         };
@@ -572,22 +918,33 @@ fn maybe_finalize_scalar(state: ParseStateV1, position: u64, boundary: bool) -> 
 fn container_value(
     frame: FrameV1, end_position: u64, span_compact_arrays: bool
 ) -> (result: ContainerValueV1) {
-    if frame.kind == 1 { return ContainerValueV1 {
-        value: JsonValueV1.Object { fields: frame.items },
-        writer_steps: frame.writer_steps +% 2
-    }; }
+    if frame.kind == 1 {
+        let ordered: ObjectSortResultV1 = sort_object_fields_at_close(frame);
+        if !ordered.valid { return ContainerValueV1 {
+            value: JsonValueV1.Empty,
+            writer_steps: frame.writer_steps +% 2,
+            valid: false
+        }; }
+        return ContainerValueV1 {
+            value: JsonValueV1.Object { fields: ordered.fields },
+            writer_steps: frame.writer_steps +% 2,
+            valid: true
+        };
+    }
     if span_compact_arrays && !frame.contains_object && frame.compact {
         return ContainerValueV1 {
             value: JsonValueV1.Raw {
                 start: frame.source_start,
                 length: end_position -% frame.source_start +% 1
             },
-            writer_steps: 1
+            writer_steps: 1,
+            valid: true
         };
     }
     return ContainerValueV1 {
         value: JsonValueV1.Array { items: reverse_array(frame.items, JsonValueV1.ArrayNil) },
-        writer_steps: frame.writer_steps +% 2
+        writer_steps: frame.writer_steps +% 2,
+        valid: true
     };
 }
 
@@ -709,6 +1066,7 @@ fn parse_close_container(state: ParseStateV1, position: u64, value: byte) -> (re
     let container: ContainerValueV1 = container_value(
         frame, position, state.span_compact_arrays
     );
+    if !container.valid { return ParseStateV1 { ..state, valid: false }; }
     let popped: ParseStateV1 = ParseStateV1 { ..state, depth: frame_index };
     return append_value(popped, container.value, container.writer_steps);
 }
