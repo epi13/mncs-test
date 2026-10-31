@@ -199,9 +199,11 @@ The successful `mncs.family-check-response/1` envelope now carries its already
 serialized TestResult and CheckResult documents as raw JSON fragments. Python
 uses the native token result for policy validation and carries the fragments
 into the outer response without decoding them for response assembly. MNCS
-tokenizes, validates, orders, pretty-prints, and hashes the composed document;
-its UTF-8 bytes match the compatibility formatter. Over-bound inputs and
-exhausted native step budgets retain the host formatter. The
+validates, traverses, pretty-prints, and hashes the canonically ordered compact envelope;
+its UTF-8 bytes match the compatibility formatter. The family adapter selects
+4,096-byte native output windows to stay within each app call’s step ceiling;
+other direct document serialization keeps the default 8,192-byte windows.
+Over-bound inputs and exhausted native step budgets retain the host formatter. The
 infrastructure-failure envelope remains host-formatted so it can still be
 emitted when native setup or execution fails.
 
@@ -421,10 +423,12 @@ Both digest comparison and explicit identity-list comparison now complete at
 the 256-item bound. The list path returns native identity metadata, while the
 family runner's digest path carries comparison fields and the opaque selection
 source span. No additional Stdlib parser or higher execution ceiling was
-needed. A synthetic 256-identity family envelope still exceeds the separate
-public response formatter's 512-value limit because TestResult, CheckResult,
-and execution each retain the declared identities; that outer envelope keeps
-its established compatibility formatter until its token bound is extended.
+needed. P-032 routes the canonically ordered family envelope directly through
+the MNCS cursor document formatter instead of the legacy 512-token tape. The
+cursor formatter admits 1,024 values and emits 4,096-byte continuation windows
+so each application call stays within its 8,000,000-step ceiling. The 256-ID
+family envelope now matches independent JSON bytes and SHA-256 expectations
+through native execution.
 
 `mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
 `mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded

@@ -165,6 +165,7 @@ def test_native_continuation_rejects_a_changed_source_document(tmp_path: Path) -
         "schema_version": mncs_test.PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
         "document": document,
         "input_sha256": start_request["input_sha256"],
+        "output_window_bytes": start_request["output_window_bytes"],
         "scan_state": first["scan_state"],
         "input_offset": first["input_offset"],
         "input_chunk_index": first["input_chunk_index"],
@@ -708,12 +709,105 @@ def test_family_check_response_sends_nested_results_as_raw_native_tokens(
 
     expected_bytes = mncs_test.json_bytes(expected)
     assert actual == (expected_bytes, hashlib.sha256(expected_bytes).hexdigest())
-    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
+    assert observed[0][0] == "test-public-result-json-token.json"
     source_request = observed[0][1]
     document = source_request["document"]
     source = "".join(chunk["bytes"] for chunk in document["chunks"]).encode("utf-8")
     assert result_document.rstrip() in source
     assert check_document.rstrip() in source
+
+
+def test_family_check_response_with_256_id_envelope_uses_native_formatter(
+    tmp_path: Path,
+) -> None:
+    request = {
+        "check_identity": "mncs-test:family-check",
+        "contract_identity": "mncs.test-contract/1",
+        "contract_revision": "0.18",
+        "verification_plan_id": "a" * 64,
+        "family_graph_identity": "b" * 64,
+        "edge_fingerprint": "c" * 64,
+        "source_change_sha256": "d" * 64,
+    }
+    selected = [f"case-{index:03d}" for index in range(256)]
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "verdict": "PASS",
+        "test_case_identities": selected,
+    }
+    check_result = {
+        "schema_version": mncs_test.CHECK_SCHEMA,
+        "id": request["check_identity"],
+        "selected_test_case_identities": selected,
+        "verdict": "PASS",
+    }
+    observed: list[str] = []
+    value_counts: list[int] = []
+    window_limits: list[int] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, native_request: dict[str, object], **kwargs: object):
+        result = original_run_native_app(name, native_request, **kwargs)
+        observed.append(name)
+        value_counts.append(result.get("value_count", 0))
+        if name in {
+            "test-public-result-json-token.json",
+            "test-public-result-json-token-window.json",
+        }:
+            window_limits.append(native_request["output_window_bytes"])
+        return result
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", side_effect=observe_native_app
+    ):
+        actual = mncs_test._native_family_check_response_payload(
+            request=request,
+            result_document=mncs_test.json_bytes(result),
+            check_result_document=mncs_test.json_bytes(check_result),
+            verdict="PASS",
+            run_identity="run-1",
+            test_case_identities=selected,
+            inventory_identity="e" * 64,
+            runner_version=mncs_test.RUNNER_VERSION,
+            result_sha256="f" * 64,
+            check_result_sha256="0" * 64,
+            check_definition_identity="1" * 64,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    expected = {
+        "schema_version": mncs_test.FAMILY_CHECK_RESPONSE_SCHEMA,
+        "check_identity": request["check_identity"],
+        "contract_identity": request["contract_identity"],
+        "contract_revision": request["contract_revision"],
+        "runner": "mncs-test",
+        "verdict": "PASS",
+        "test_result": result,
+        "check_result": check_result,
+        "execution": {
+            "run_identity": "run-1",
+            "test_case_identities": selected,
+            "inventory_identity": "e" * 64,
+            "runner_version": mncs_test.RUNNER_VERSION,
+            "result_sha256": "f" * 64,
+            "check_result_sha256": "0" * 64,
+            "check_definition_identity": "1" * 64,
+        },
+        "family_binding": {
+            "verification_plan_id": request["verification_plan_id"],
+            "family_graph_identity": request["family_graph_identity"],
+            "edge_fingerprint": request["edge_fingerprint"],
+            "source_change_sha256": request["source_change_sha256"],
+        },
+    }
+    expected_bytes = mncs_test.json_bytes(expected)
+    assert actual == (expected_bytes, hashlib.sha256(expected_bytes).hexdigest())
+    assert observed[0] == "test-public-result-json-token.json"
+    assert "test-public-result-json-native-token-tape.json" not in observed
+    assert max(value_counts) > 512
+    assert window_limits and set(window_limits) == {4096}
 
 
 def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> None:

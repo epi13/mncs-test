@@ -51,9 +51,9 @@ CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-requ
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
 CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/5"
 CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/5"
-PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
+PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/3"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
-PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
+PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/3"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-start-request/1"
@@ -71,8 +71,10 @@ FAMILY_CHECK_MANIFEST_NATIVE_MAX_BYTES = 65_536
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS = 64
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
-PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
+PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 8192
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
+PUBLIC_RESULT_JSON_MAX_VALUES = 1024
+PUBLIC_RESULT_JSON_FAMILY_WINDOW_BYTES = 4096
 CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES = 16384
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 512
@@ -218,9 +220,15 @@ def _native_public_result_request(
 
 def _native_public_result_document_request(
     encoded: bytes,
+    *,
+    output_window_bytes: int = PUBLIC_RESULT_JSON_WINDOW_BYTES,
 ) -> tuple[dict[str, Any], int] | None:
     """Pack an existing compact JSON byte stream for native token processing."""
-    if not encoded or len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+    if (
+        not encoded
+        or len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+        or output_window_bytes not in (4096, 8192)
+    ):
         return None
     chunks = _public_result_input_chunks(encoded)
     if len(chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS:
@@ -236,6 +244,7 @@ def _native_public_result_document_request(
                 "byte_length": len(encoded),
             },
             "input_sha256": hashlib.sha256(encoded).hexdigest(),
+            "output_window_bytes": output_window_bytes,
         },
         len(encoded),
     )
@@ -866,9 +875,13 @@ def _native_public_result_document_payload(
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
+    output_window_bytes: int = PUBLIC_RESULT_JSON_WINDOW_BYTES,
 ) -> tuple[bytes, str] | None:
     """Format an already encoded document without rebuilding its value tree."""
-    prepared = _native_public_result_document_request(source)
+    prepared = _native_public_result_document_request(
+        source,
+        output_window_bytes=output_window_bytes,
+    )
     if prepared is None:
         return None
     start_request, source_length = prepared
@@ -888,7 +901,7 @@ def _native_public_result_document_payload(
 
     output = bytearray()
     state: dict[str, Any] | None = None
-    maximum_windows = (PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES // PUBLIC_RESULT_JSON_WINDOW_BYTES) + 2
+    maximum_windows = (PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES // output_window_bytes) + 2
     for _ in range(maximum_windows):
         if state is None:
             app_name = "test-public-result-json-token.json"
@@ -901,6 +914,7 @@ def _native_public_result_document_payload(
                 "schema_version": PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
                 "document": document,
                 "input_sha256": input_hash,
+                "output_window_bytes": output_window_bytes,
                 "scan_state": state["scan_state"],
                 "input_offset": state["input_offset"],
                 "input_chunk_index": state["input_chunk_index"],
@@ -951,7 +965,7 @@ def _native_public_result_document_payload(
             type(returned_start) is not int
             or returned_start != window_start
             or type(byte_length) is not int
-            or not 0 <= byte_length <= PUBLIC_RESULT_JSON_WINDOW_BYTES
+            or not 0 <= byte_length <= output_window_bytes
             or type(next_offset) is not int
             or next_offset != window_start + byte_length
             or next_offset > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
@@ -975,7 +989,7 @@ def _native_public_result_document_payload(
             or scan_state.get("valid") is not True
             or type(result.get("pending_open")) is not bool
             or type(result.get("value_count")) is not int
-            or not 0 <= result["value_count"] <= 512
+            or not 0 <= result["value_count"] <= PUBLIC_RESULT_JSON_MAX_VALUES
             or not isinstance(result.get("child_counts"), list)
             or len(result["child_counts"]) != 64
             or not isinstance(result.get("key_counts"), list)
@@ -7791,37 +7805,38 @@ def _native_family_check_response_payload(
         return b"{" + b",".join(atom(key) + b":" + value for key, value in fields) + b"}"
 
     execution = object_source([
-        ("run_identity", atom(run_identity)),
-        ("test_case_identities", atom(test_case_identities)),
-        ("inventory_identity", atom(inventory_identity)),
-        ("runner_version", atom(runner_version)),
-        ("result_sha256", atom(result_sha256)),
-        ("check_result_sha256", atom(check_result_sha256)),
         ("check_definition_identity", atom(check_definition_identity)),
+        ("check_result_sha256", atom(check_result_sha256)),
+        ("inventory_identity", atom(inventory_identity)),
+        ("result_sha256", atom(result_sha256)),
+        ("run_identity", atom(run_identity)),
+        ("runner_version", atom(runner_version)),
+        ("test_case_identities", atom(test_case_identities)),
     ])
     family_binding = object_source([
-        ("verification_plan_id", atom(request["verification_plan_id"])),
-        ("family_graph_identity", atom(request["family_graph_identity"])),
         ("edge_fingerprint", atom(request["edge_fingerprint"])),
+        ("family_graph_identity", atom(request["family_graph_identity"])),
         ("source_change_sha256", atom(request["source_change_sha256"])),
+        ("verification_plan_id", atom(request["verification_plan_id"])),
     ])
     source = object_source([
-        ("schema_version", atom(FAMILY_CHECK_RESPONSE_SCHEMA)),
         ("check_identity", atom(request["check_identity"])),
+        ("check_result", check_fragment),
         ("contract_identity", atom(request["contract_identity"])),
         ("contract_revision", atom(request["contract_revision"])),
-        ("runner", atom("mncs-test")),
-        ("verdict", atom(verdict)),
-        ("test_result", result_fragment),
-        ("check_result", check_fragment),
         ("execution", execution),
         ("family_binding", family_binding),
+        ("runner", atom("mncs-test")),
+        ("schema_version", atom(FAMILY_CHECK_RESPONSE_SCHEMA)),
+        ("test_result", result_fragment),
+        ("verdict", atom(verdict)),
     ])
-    return _native_public_result_token_tape(
+    return _native_public_result_document_payload(
         source,
         mncs=mncs,
         cwd=cwd,
         environment=environment,
+        output_window_bytes=PUBLIC_RESULT_JSON_FAMILY_WINDOW_BYTES,
     )
 
 
