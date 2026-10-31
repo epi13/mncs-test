@@ -454,6 +454,21 @@ exactly 1,024 values, sorts natively, and matches independent output bytes and
 SHA-256. The parser's value, depth, member, key, input-size, and execution
 bounds remain unchanged.
 
+P-035 moves the CLI's `ensure_ascii=True` Unicode handling into
+`mncs.test.public_result_json_ascii_v1`. The adapter first obtains the
+formatted UTF-8 document, then sends non-ASCII documents to MNCS, which
+validates JSON with the shared cursor, decodes scalars with the Stdlib UTF-8
+stepper, and emits lowercase `\uXXXX` escapes or UTF-16 surrogate pairs.
+Existing ASCII escapes and document formatting remain byte-for-byte intact.
+Python no longer traverses the value graph to choose the ASCII path; it checks
+the serialized byte string and keeps the exact `json.dumps` compatibility
+fallback when input or expanded output exceeds 65,536 bytes or native execution
+is unavailable. Differential coverage includes Unicode keys and values,
+control and literal escapes, supplementary characters, a scalar at the
+UTF-8-safe 1 KiB chunk boundary, and expansion-limit fallback. MNCS uses the
+existing Stdlib cursor and UTF-8 decoder; this slice adds no duplicate shared
+parser.
+
 `mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
 `mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded
 UTF-8 fields as strings in the existing typed request, avoiding one JSON

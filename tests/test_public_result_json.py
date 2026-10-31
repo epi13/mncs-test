@@ -398,8 +398,14 @@ def test_ascii_json_mode_keeps_escaped_unicode_compatibility(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    value = {"message": "Lúna 東京"}
-    with mock.patch.object(mncs_test, "run_native_app") as native_app:
+    value = {
+        "message": "Lúna 東京 😀",
+        "🗝": "escaped=\\u03bb; control=\n",
+        "z": {"a": "é", "b": "\U0001f9ed"},
+    }
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
         mncs_test.print_cli_json(
             value,
             mncs=str(MNCS),
@@ -411,7 +417,69 @@ def test_ascii_json_mode_keeps_escaped_unicode_compatibility(
     output = capsys.readouterr().out.encode("utf-8")
     expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
     assert output == expected
-    native_app.assert_not_called()
+    assert output.isascii()
+    assert "test-public-result-json-ascii-escape.json" in [
+        call.args[0] for call in native_app.call_args_list
+    ]
+
+
+def test_ascii_json_native_escaper_handles_utf8_at_input_chunk_boundary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    empty_document = _python_result_bytes({"text": ""})
+    string_start = empty_document.index(b'""') + 1
+    value = {"text": "a" * (1023 - string_start) + "é😀"}
+    source = _python_result_bytes(value)
+    chunks = mncs_test._public_result_input_chunks(source)
+    assert source.index("é".encode("utf-8")) == 1023
+    assert chunks[0].endswith(b"a")
+    assert chunks[1].startswith("é😀".encode("utf-8"))
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        mncs_test.print_cli_json(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+            ensure_ascii=True,
+        )
+
+    output = capsys.readouterr().out.encode("utf-8")
+    expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert output == expected
+    assert output.isascii()
+    assert native_app.call_args_list[-1].args[0] == "test-public-result-json-ascii-escape.json"
+
+
+def test_ascii_json_mode_keeps_bounded_expansion_fallback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    value = {"text": "Ω" * 11000}
+    document = mncs_test.json_bytes(value)
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app, mock.patch.object(
+        mncs_test,
+        "_public_result_json_payload",
+        return_value=(document, hashlib.sha256(document).hexdigest()),
+    ):
+        mncs_test.print_cli_json(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+            ensure_ascii=True,
+        )
+
+    output = capsys.readouterr().out.encode("utf-8")
+    expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert output == expected
+    assert output.isascii()
+    assert native_app.call_args_list[-1].args[0] == "test-public-result-json-ascii-escape.json"
 
 
 def test_cli_json_falls_back_when_native_formatter_is_unavailable(

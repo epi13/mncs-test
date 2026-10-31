@@ -1,0 +1,342 @@
+mncs 0.18;
+
+// Convert raw non-ASCII UTF-8 inside a validated JSON document to the
+// lowercase \u escapes used by Python's json.dumps(ensure_ascii=True).
+// Input and output are bounded to 64 KiB and carried in 1 KiB chunks.
+module mncs.test.public_result_json_ascii_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json_cursor.v1 as json_cursor;
+use mncs.std.sha256.v1 as sha256;
+use mncs.std.text_utf8.v1 as text_utf8;
+
+record JsonInputChunkV1 { bytes: [byte; up_to 1024], length: u64 }
+record JsonInputDocumentV1 { chunks: [JsonInputChunkV1; up_to 64], byte_length: u64 }
+record AsciiRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: JsonInputDocumentV1,
+    input_sha256: [byte; up_to 64]
+}
+record DocumentShapeV1 { total: u64, valid: bool }
+record AsciiChunkV1 { bytes: [byte; 1024], length: u64 }
+enum AsciiChunkListV1 {
+    ChunkNil,
+    ChunkCons { head: AsciiChunkV1, tail: AsciiChunkListV1 }
+}
+record AsciiWriterV1 {
+    current_bytes: [byte; 1024],
+    current_length: u64,
+    completed: AsciiChunkListV1,
+    completed_count: u64,
+    length: u64,
+    ok: bool
+}
+record AsciiChunkBuilderV1 { chunks: [AsciiChunkV1; 64], count: u64 }
+record EscapeStateV1 {
+    writer: AsciiWriterV1,
+    cursor: json_cursor.Cursor,
+    in_string: bool,
+    escaped: bool,
+    skip_bytes: u64,
+    valid: bool
+}
+record AsciiResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    input_sha256: [byte; up_to 64],
+    document_length: u64,
+    chunk_count: u64,
+    chunks: [AsciiChunkV1; up_to 64]
+}
+
+fn request_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 97, 115, 99, 105, 105, 45, 101, 115, 99, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 97, 115, 99, 105, 105, 45, 101, 115, 99, 97, 112, 101, 47, 49];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn document_shape(document: JsonInputDocumentV1) -> (result: DocumentShapeV1) {
+    let initial: DocumentShapeV1 = DocumentShapeV1 { total: 0, valid: true };
+    iterate i over document.chunks carrying shape: DocumentShapeV1 = initial {
+        let chunk: JsonInputChunkV1 = document.chunks[i];
+        let valid_chunk: bool = chunk.length > 0 && chunk.length <= 1024
+            && chunk.length == chunk.bytes.len && shape.total +% chunk.length <= 65536;
+        next shape = DocumentShapeV1 {
+            total: shape.total +% chunk.length,
+            valid: shape.valid && valid_chunk
+        };
+    }
+    return DocumentShapeV1 {
+        total: shape.total,
+        valid: shape.valid && document.chunks.len > 0 && document.chunks.len <= 64
+            && document.byte_length == shape.total && document.byte_length <= 65536
+    };
+}
+
+fn document_digest_part(hashed: sha256.DigestState, chunk: JsonInputChunkV1, part: u64) -> (result: sha256.DigestState) {
+    let start: u64 = part *% 64;
+    if start >= chunk.length { return hashed; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    let bytes: [byte; up_to 64] = chunk.bytes[start..start +% size];
+    return sha256.update_standard(hashed, bytes, size);
+}
+
+fn document_digest_chunk(hashed: sha256.DigestState, chunk: JsonInputChunkV1) -> (result: sha256.DigestState) {
+    iterate i up_to 16 carrying current: sha256.DigestState = hashed {
+        next current = document_digest_part(current, chunk, i);
+    }
+    return current;
+}
+
+fn hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (value +% 48) as byte; }
+    return (value -% 10 +% 87) as byte;
+}
+
+fn encode_digest(raw: [byte; 32]) -> (result: [byte; up_to 64]) {
+    let initial: [byte; 64] = [0; 64];
+    iterate i over raw carrying encoded: [byte; 64] = initial {
+        let value: u64 = raw[i] as u64;
+        let high: [byte; 64] = replace(encoded, i *% 2, hex_digit(value / 16));
+        next encoded = replace(high, i *% 2 +% 1, hex_digit(value % 16));
+    }
+    return encoded;
+}
+
+fn document_digest(document: JsonInputDocumentV1) -> (result: [byte; up_to 64]) {
+    let initial: sha256.DigestState = sha256.init();
+    iterate i over document.chunks carrying hashed: sha256.DigestState = initial {
+        next hashed = document_digest_chunk(hashed, document.chunks[i]);
+    }
+    return encode_digest(sha256.finalize_standard(hashed));
+}
+
+fn valid_request(request: AsciiRequestV1, shape: DocumentShapeV1) -> (result: bool) {
+    if !same_bytes(request.schema_version, request_schema_v1()) || !shape.valid
+        || request.input_sha256.len != 64 {
+        return false;
+    }
+    return same_bytes(request.input_sha256, document_digest(request.document));
+}
+
+fn writer_empty() -> (result: AsciiWriterV1) {
+    return AsciiWriterV1 {
+        current_bytes: [0; 1024],
+        current_length: 0,
+        completed: AsciiChunkListV1.ChunkNil,
+        completed_count: 0,
+        length: 0,
+        ok: true
+    };
+}
+
+fn writer_next_chunk(writer: AsciiWriterV1, value: byte) -> (result: AsciiWriterV1) {
+    let finished: AsciiChunkV1 = AsciiChunkV1 { bytes: writer.current_bytes, length: 1024 };
+    let empty: [byte; 1024] = [0; 1024];
+    return AsciiWriterV1 {
+        ..writer,
+        current_bytes: replace(empty, 0, value),
+        current_length: 1,
+        completed: AsciiChunkListV1.ChunkCons { head: finished, tail: writer.completed },
+        completed_count: writer.completed_count +% 1,
+        length: writer.length +% 1
+    };
+}
+
+fn writer_byte(writer: AsciiWriterV1, value: byte) -> (result: AsciiWriterV1) {
+    if !writer.ok || writer.length >= 65536 {
+        return AsciiWriterV1 { ..writer, ok: false };
+    }
+    if writer.current_length >= 1024 { return writer_next_chunk(writer, value); }
+    return AsciiWriterV1 {
+        ..writer,
+        current_bytes: replace(writer.current_bytes, writer.current_length, value),
+        current_length: writer.current_length +% 1,
+        length: writer.length +% 1
+    };
+}
+
+fn writer_bytes(writer: AsciiWriterV1, values: [byte; up_to 64]) -> (result: AsciiWriterV1) {
+    iterate i over values carrying current: AsciiWriterV1 = writer {
+        next current = writer_byte(current, values[i]);
+    }
+    return current;
+}
+
+fn writer_hex4(writer: AsciiWriterV1, value: u64) -> (result: AsciiWriterV1) {
+    let prefix: AsciiWriterV1 = writer_bytes(writer, [92, 117]);
+    let d0: AsciiWriterV1 = writer_byte(prefix, hex_digit((value / 4096) % 16));
+    let d1: AsciiWriterV1 = writer_byte(d0, hex_digit((value / 256) % 16));
+    let d2: AsciiWriterV1 = writer_byte(d1, hex_digit((value / 16) % 16));
+    return writer_byte(d2, hex_digit(value % 16));
+}
+
+fn writer_scalar(writer: AsciiWriterV1, scalar: u64) -> (result: AsciiWriterV1) {
+    if scalar <= 65535 { return writer_hex4(writer, scalar); }
+    let adjusted: u64 = scalar -% 65536;
+    let high: u64 = 55296 + adjusted / 1024;
+    let low: u64 = 56320 + adjusted % 1024;
+    return writer_hex4(writer_hex4(writer, high), low);
+}
+
+fn initial_escape_state() -> (result: EscapeStateV1) {
+    return EscapeStateV1 {
+        writer: writer_empty(),
+        cursor: json_cursor.init(),
+        in_string: false,
+        escaped: false,
+        skip_bytes: 0,
+        valid: true
+    };
+}
+
+fn copy_ascii(state: EscapeStateV1, value: byte) -> (result: EscapeStateV1) {
+    if !state.valid { return state; }
+    if state.in_string {
+        if state.escaped {
+            return EscapeStateV1 { ..state, writer: writer_byte(state.writer, value), escaped: false };
+        }
+        if value == 92 {
+            return EscapeStateV1 { ..state, writer: writer_byte(state.writer, value), escaped: true };
+        }
+        if value == 34 {
+            return EscapeStateV1 { ..state, writer: writer_byte(state.writer, value), in_string: false };
+        }
+        if value < 32 { return EscapeStateV1 { ..state, valid: false }; }
+        return EscapeStateV1 { ..state, writer: writer_byte(state.writer, value) };
+    }
+    if value == 34 {
+        return EscapeStateV1 { ..state, writer: writer_byte(state.writer, value), in_string: true };
+    }
+    return EscapeStateV1 { ..state, writer: writer_byte(state.writer, value) };
+}
+
+fn transform_byte(state: EscapeStateV1, chunk: JsonInputChunkV1, index: u64) -> (result: EscapeStateV1) {
+    let value: byte = chunk.bytes[index];
+    let cursor: json_cursor.Cursor = json_cursor.feed_byte(state.cursor, value);
+    if !state.valid || !json_cursor.is_valid(cursor) {
+        return EscapeStateV1 { ..state, cursor: cursor, valid: false };
+    }
+    if state.skip_bytes > 0 {
+        return EscapeStateV1 { ..state, cursor: cursor, skip_bytes: state.skip_bytes -% 1 };
+    }
+    if (value as u64) < 128 {
+        return EscapeStateV1 { ..copy_ascii(EscapeStateV1 { ..state, cursor: cursor }, value), cursor: cursor };
+    }
+    if !state.in_string || state.escaped {
+        return EscapeStateV1 { ..state, cursor: cursor, valid: false };
+    }
+    let scalar: text_utf8.ScalarStep = text_utf8.step_scalar_generic(chunk.bytes, chunk.length, index);
+    if !scalar.valid || scalar.next <= index || scalar.next > chunk.length {
+        return EscapeStateV1 { ..state, cursor: cursor, valid: false };
+    }
+    return EscapeStateV1 {
+        ..state,
+        cursor: cursor,
+        writer: writer_scalar(state.writer, scalar.scalar as u64),
+        skip_bytes: scalar.next -% index -% 1
+    };
+}
+
+fn transform_chunk(state: EscapeStateV1, chunk: JsonInputChunkV1) -> (result: EscapeStateV1) {
+    iterate i over chunk.bytes carrying current: EscapeStateV1 = state {
+        next current = transform_byte(current, chunk, i);
+    }
+    return current;
+}
+
+fn transform_document(document: JsonInputDocumentV1) -> (result: EscapeStateV1) {
+    iterate i over document.chunks carrying current: EscapeStateV1 = initial_escape_state() {
+        next current = transform_chunk(current, document.chunks[i]);
+    }
+    let finished: json_cursor.Cursor = json_cursor.finish(current.cursor);
+    return EscapeStateV1 {
+        ..current,
+        cursor: finished,
+        valid: current.valid && current.skip_bytes == 0 && !current.in_string
+            && !current.escaped && json_cursor.is_valid(finished)
+    };
+}
+
+fn transform_if_valid(request: AsciiRequestV1, request_valid: bool) -> (result: EscapeStateV1) {
+    if request_valid { return transform_document(request.document); }
+    return EscapeStateV1 { ..initial_escape_state(), valid: false };
+}
+
+fn empty_output_chunk() -> (result: AsciiChunkV1) {
+    return AsciiChunkV1 { bytes: [0; 1024], length: 0 };
+}
+
+fn output_completed_chunks(completed: AsciiChunkListV1, chunks: [AsciiChunkV1; 64], index: u64) -> (result: [AsciiChunkV1; 64]) {
+    return match completed {
+        ChunkNil => chunks,
+        ChunkCons { head: head, tail: tail } => output_completed_chunks(tail, replace(chunks, index, head), index -% 1)
+    };
+}
+
+fn ordered_completed_chunks(writer: AsciiWriterV1, initial: [AsciiChunkV1; 64]) -> (result: [AsciiChunkV1; 64]) {
+    if writer.completed_count == 0 { return initial; }
+    return output_completed_chunks(writer.completed, initial, writer.completed_count -% 1);
+}
+
+fn output_chunks(writer: AsciiWriterV1) -> (result: AsciiChunkBuilderV1) {
+    let empty: AsciiChunkV1 = empty_output_chunk();
+    let initial: [AsciiChunkV1; 64] = [empty; 64];
+    let completed: [AsciiChunkV1; 64] = ordered_completed_chunks(writer, initial);
+    if writer.current_length == 0 {
+        return AsciiChunkBuilderV1 { chunks: completed, count: writer.completed_count };
+    }
+    let current: AsciiChunkV1 = AsciiChunkV1 { bytes: writer.current_bytes, length: writer.current_length };
+    return AsciiChunkBuilderV1 {
+        chunks: replace(completed, writer.completed_count, current),
+        count: writer.completed_count +% 1
+    };
+}
+
+fn ascii_result(supported: bool, input_sha256: [byte; up_to 64], writer: AsciiWriterV1) -> (result: AsciiResultV1) {
+    let built: AsciiChunkBuilderV1 = output_chunks(writer);
+    let ready: bool = supported && writer.ok;
+    return AsciiResultV1 {
+        schema_version: result_schema_v1(),
+        supported: ready,
+        input_sha256: input_sha256,
+        document_length: select(ready, writer.length, 0),
+        chunk_count: select(ready, built.count, 0),
+        chunks: select(ready, built.chunks[0..built.count], built.chunks[0..0])
+    };
+}
+
+fn public_result_json_ascii_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 65, 83, 67, 73, 73, 32, 74, 83, 79, 78, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: AsciiRequestV1 = structured_read(context.argv[0], request_schema_v1());
+    let shape: DocumentShapeV1 = document_shape(request.document);
+    let request_valid: bool = valid_request(request, shape);
+    let transformed: EscapeStateV1 = transform_if_valid(request, request_valid);
+    let result: AsciiResultV1 = ascii_result(
+        request_valid && transformed.valid,
+        request.input_sha256,
+        transformed.writer
+    );
+    let published: u64 = structured_write(context.argv[1], result_schema_v1(), result);
+    if published == 0 {
+        return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 65, 83, 67, 73, 73, 32, 101, 115, 99, 97, 112, 101, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}

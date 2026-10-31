@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.public-result-json-ascii-escape",
+  "source": "../native/mncs/test/public_result_json_ascii_v1.mncs",
+  "module": "mncs.test.public_result_json_ascii_v1",
+  "entry_function": "public_result_json_ascii_app_v1",
+  "profile": "0.18",
+  "interface_identity": "10ec6e09046c2bd0f4d5d51f18c5cc551f0e267a0cc9c02c68d7a29d97c272f9",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": [
+    "test_artifact"
+  ]
+}

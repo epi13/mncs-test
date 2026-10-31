@@ -56,6 +56,8 @@ PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/3"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
+PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA = "mncs.test.public-json-ascii-escape-request/1"
+PUBLIC_RESULT_JSON_ASCII_RESULT_SCHEMA = "mncs.test.public-json-ascii-escape/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-start-request/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-request/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA = "mncs.test.public-json-native-tokenize-window/2"
@@ -456,6 +458,63 @@ def _native_public_result_key_order(
         maximum_chunk_bytes=1024,
     )
     return ordered
+
+
+def _native_public_result_ascii_escape(
+    document: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bytes | None:
+    """Escape raw Unicode in a bounded, already formatted JSON document."""
+    prepared = _native_public_result_document_request(document)
+    if prepared is None:
+        return None
+    document_request, source_length = prepared
+    request = {
+        "schema_version": PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA,
+        "document": document_request["document"],
+        "input_sha256": document_request["input_sha256"],
+    }
+    try:
+        result = run_native_app(
+            "test-public-result-json-ascii-escape.json",
+            request,
+            request_schema=PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA,
+            result_schema=PUBLIC_RESULT_JSON_ASCII_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeBudgetExhaustedError, NativeInputBoundError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test public-result ASCII escaping failed: {error}") from error
+
+    if result.get("schema_version") != PUBLIC_RESULT_JSON_ASCII_RESULT_SCHEMA:
+        raise AdapterError("MNCS public-result ASCII app returned an unsupported result schema")
+    if type(result.get("supported")) is not bool:
+        raise AdapterError("MNCS public-result ASCII app returned malformed support metadata")
+    if not result["supported"]:
+        return None
+    byte_length = result.get("document_length")
+    if (
+        result.get("input_sha256") != request["input_sha256"]
+        or type(byte_length) is not int
+        or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+    ):
+        raise AdapterError("MNCS public-result ASCII app returned malformed document metadata")
+    escaped = _decode_public_result_chunks(
+        result,
+        byte_length=byte_length,
+        maximum_chunks=64,
+        maximum_chunk_bytes=1024,
+    )
+    if len(document) != source_length or not escaped.isascii():
+        raise AdapterError("MNCS public-result ASCII app returned invalid escaped bytes")
+    return escaped
 
 
 def _initial_native_sha256_state() -> dict[str, Any]:
@@ -8680,19 +8739,6 @@ def print_result(
     print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
 
 
-def _json_text_is_ascii(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.isascii()
-    if isinstance(value, dict):
-        return all(
-            _json_text_is_ascii(key) and _json_text_is_ascii(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return all(_json_text_is_ascii(item) for item in value)
-    return True
-
-
 def print_cli_json(
     value: Any,
     *,
@@ -8701,10 +8747,7 @@ def print_cli_json(
     environment: dict[str, str],
     ensure_ascii: bool = False,
 ) -> None:
-    """Print bounded CLI documents natively while retaining ASCII mode exactly."""
-    if ensure_ascii and not _json_text_is_ascii(value):
-        sys.stdout.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
-        return
+    """Print native JSON, applying bounded MNCS escaping for ASCII-only mode."""
     try:
         payload, _digest = _public_result_json_payload(
             value,
@@ -8717,6 +8760,28 @@ def print_cli_json(
             json.dumps(value, indent=2, sort_keys=True, ensure_ascii=ensure_ascii)
             + "\n"
         ).encode("utf-8")
+    else:
+        if ensure_ascii and not payload.isascii():
+            try:
+                ascii_payload = (
+                    _native_public_result_ascii_escape(
+                        payload,
+                        mncs=mncs,
+                        cwd=cwd,
+                        environment=environment,
+                    )
+                    if mncs is not None
+                    else None
+                )
+            except AdapterError:
+                ascii_payload = None
+            if ascii_payload is None:
+                payload = (
+                    json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True)
+                    + "\n"
+                ).encode("utf-8")
+            else:
+                payload = ascii_payload
     sys.stdout.write(payload.decode("utf-8"))
 
 
