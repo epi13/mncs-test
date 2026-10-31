@@ -214,8 +214,11 @@ path passes the same serialized result document when one is available. The
 family-check path uses the same cursor scan to validate the TestResult schema
 and verdict, extract selected test identities and inventory/run identities,
 and retain the opaque `selection` source span. It no longer builds a Python
-value tree for the surrounding TestResult; Python decodes only that opaque
-selection span so CheckResult keeps its forward-compatible selection value.
+value tree for the surrounding TestResult. The family CheckResult public-result
+serializer inserts that span as raw JSON and MNCS validates and formats it, so
+native-supported checks do not decode the opaque selection into a Python value
+tree. Python materializes it only for compatibility when native extraction or
+bounded response serialization cannot accept the retained document.
 The existing host projection remains the compatibility path when the document
 or a required field is outside the native parser's limits. The shared native
 JSON document shape admits at most 65,536 input bytes in 64 UTF-8-safe chunks
@@ -252,7 +255,9 @@ inventory-freshness policy, and keeps its previous Python tree path for native
 fallback cases. Differential projection tests cover escaped selected
 identities, nested unknown selection values, inventory/run identities, and
 selection-span preservation; the family-check integration test verifies that
-the complete retained TestResult is not passed to Python `json.loads`.
+the complete retained TestResult and opaque selection span are not passed to
+Python `json.loads` on the native-supported path, while the CheckResult bytes
+and digest still match the independent public-result golden.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

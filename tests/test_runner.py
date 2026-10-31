@@ -824,7 +824,10 @@ class RunnerTests(unittest.TestCase):
             "summary": {"passed": len(selected_identities), "failed": 0, "skipped": 0},
             "tests": [{"id": identity, "verdict": "PASS"} for identity in selected_identities],
             "run_id": "run-family-check-fixture",
-            "selection": {"selected_test_identities": selected_identities},
+            "selection": {
+                "selected_test_identities": selected_identities,
+                "future": {"label": "opaque value 🛰️", "flags": [True, None]},
+            },
             "test_inventory": {
                 "inventory_identity": check["selector"].get("inventory_identity"),
             },
@@ -839,7 +842,7 @@ class RunnerTests(unittest.TestCase):
             def fake_inner_run(command, *, cwd, capture_output, text, check, timeout):
                 result_path = Path(command[command.index("--result") + 1])
                 check_path = Path(command[command.index("--check-result") + 1])
-                result_path.write_text(json.dumps(result), encoding="utf-8")
+                result_path.write_bytes(mncs_test.json_bytes(result))
                 check_path.write_text(
                     json.dumps({"schema_version": mncs_test.CHECK_SCHEMA, "verdict": "PASS"}),
                     encoding="utf-8",
@@ -876,14 +879,14 @@ class RunnerTests(unittest.TestCase):
                     family_metadata_results.append(response["family_metadata"])
                 return response
 
-            public_payload_inputs = []
-            original_public_payload = mncs_test._public_result_json_payload
+            raw_selection_inputs = []
+            original_public_payload = mncs_test._public_result_json_payload_with_raw_selection
             decoded_json_documents = []
             original_json_loads = mncs_test.json.loads
 
-            def observe_public_payload(value, **kwargs):
-                public_payload_inputs.append(value)
-                return original_public_payload(value, **kwargs)
+            def observe_public_payload(value, selection_json, **kwargs):
+                raw_selection_inputs.append(selection_json)
+                return original_public_payload(value, selection_json, **kwargs)
 
             def observe_json_loads(value, *args, **kwargs):
                 if isinstance(value, bytes):
@@ -904,7 +907,7 @@ class RunnerTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     mncs_test,
-                    "_public_result_json_payload",
+                    "_public_result_json_payload_with_raw_selection",
                     side_effect=observe_public_payload,
                 ),
                 mock.patch.object(
@@ -922,16 +925,25 @@ class RunnerTests(unittest.TestCase):
             family_metadata_results[0]["supported"],
             family_metadata_results[0],
         )
-        expected_test_result_document = json.dumps(result).encode("utf-8")
+        expected_test_result_document = mncs_test.json_bytes(result)
         self.assertNotIn(
             expected_test_result_document,
             decoded_json_documents,
             "family checks should not build a Python value tree for the retained TestResult",
         )
-        self.assertIn(
+        self.assertNotIn(
             json.dumps(result["selection"]).encode("utf-8"),
             decoded_json_documents,
-            "the opaque selection field remains compatible through its native source span",
+            "the opaque selection field should stay a raw span on the native path",
+        )
+        self.assertEqual(len(raw_selection_inputs), 1)
+        family_metadata = family_metadata_results[0]
+        selection_start = family_metadata["selection_start"]
+        selection_end = selection_start + family_metadata["selection_length"]
+        self.assertEqual(
+            raw_selection_inputs[0],
+            expected_test_result_document[selection_start:selection_end],
+            "the serializer should receive the exact native source span",
         )
         expected_native_document, _ = mncs_test._native_public_result_document_request(
             expected_test_result_document
@@ -948,15 +960,12 @@ class RunnerTests(unittest.TestCase):
             native_applications,
         )
         self.assertEqual(
-            len(public_payload_inputs),
+            len(raw_selection_inputs),
             1,
-            "the response path should pass serialized result fragments to MNCS",
-        )
-        self.assertEqual(
-            public_payload_inputs[0]["schema_version"],
-            mncs_test.CHECK_SCHEMA,
+            "CheckResult serialization should carry the native selection span",
         )
         self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(response))
+        self.assertEqual(response["check_result"]["selection"], result["selection"])
         public_json = mncs_test.json_bytes(response["check_result"])
         self.assertEqual(
             response["execution"]["check_result_sha256"],

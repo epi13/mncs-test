@@ -154,8 +154,50 @@ def test_native_check_result_projection_matches_family_contract(
     )
     assert family is not None
     assert family["selected_test_identities"] == ["mncs:test-case:execution"]
-    assert family["selection"] == result["selection"]
-    assert decoded_inputs == [selection_bytes]
+    assert family["selection_json"] == selection_bytes
+    assert decoded_inputs == []
+
+
+def test_raw_selection_public_result_uses_compatible_host_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selection_json = (
+        '{"future":{"label":"opaque value 🛰️","flags":[true,null]},'
+        '"selected_test_identities":["mncs:test-case:one"]}'
+    ).encode("utf-8")
+    check_result = {
+        "schema_version": "mncs.check-result/1",
+        "verdict": "PASS",
+        "selection": None,
+    }
+    expected = {
+        **check_result,
+        "selection": {
+            "future": {"label": "opaque value 🛰️", "flags": [True, None]},
+            "selected_test_identities": ["mncs:test-case:one"],
+        },
+    }
+    native_sources: list[bytes] = []
+
+    def reject_native(source: bytes, **kwargs: object) -> None:
+        native_sources.append(source)
+        return None
+
+    monkeypatch.setattr(
+        mncs_test, "_native_public_result_document_payload", reject_native
+    )
+    payload, digest = mncs_test._public_result_json_payload_with_raw_selection(
+        check_result,
+        selection_json,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+    )
+
+    assert len(native_sources) == 1
+    assert selection_json in native_sources[0]
+    assert payload == mncs_test.json_bytes(expected)
+    assert digest == mncs_test.sha256_bytes(payload)
 
 
 def test_native_projection_uses_external_check_id_when_source_id_is_missing(

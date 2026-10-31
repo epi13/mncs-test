@@ -7356,7 +7356,7 @@ def _family_check_metadata_from_native(
     ):
         return None
 
-    selection: Any = None
+    selection_json: bytes | None = None
     if selection_present:
         start = family.get("selection_start")
         length = family.get("selection_length")
@@ -7368,13 +7368,8 @@ def _family_check_metadata_from_native(
             or start + length > len(document)
         ):
             return None
-        try:
-            # Selection is opaque and forward-compatible. Decode only that
-            # source span; the surrounding TestResult remains a native token scan.
-            selection = json.loads(document[start : start + length])
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None
-        if not isinstance(selection, dict):
+        selection_json = document[start : start + length]
+        if not selection_json.startswith(b"{") or not selection_json.endswith(b"}"):
             return None
 
     inventory_present = family.get("inventory_identity_present")
@@ -7410,7 +7405,7 @@ def _family_check_metadata_from_native(
         "verdict": verdict,
         "selected_test_identities": selected,
         "selection_present": selection_present,
-        "selection": selection,
+        "selection_json": selection_json,
         "inventory_identity": (
             inventory_identity if inventory_present and not inventory_null else None
         ),
@@ -7890,15 +7885,17 @@ def run_family_check(args: argparse.Namespace) -> int:
                 },
                 "experiment": {"run_identity": family_metadata["run_identity"]},
             }
-            if family_metadata["selection_present"]:
-                result["selection"] = family_metadata["selection"]
         if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.test-result/1 document")
         if not isinstance(produced_check, dict) or produced_check.get("schema_version") != CHECK_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.check-result/1 document")
         if produced_check.get("verdict") != result.get("verdict"):
             raise AdapterError("family check TestResult and CheckResult verdicts disagree")
-        selected = result.get("selection", {}).get("selected_test_identities", [])
+        selected = (
+            family_metadata["selected_test_identities"]
+            if family_metadata is not None
+            else result.get("selection", {}).get("selected_test_identities", [])
+        )
         if sorted(selected) != selector["test_identities"]:
             raise AdapterError("family check did not execute exactly the declared test identities")
         inventory = result.get("test_inventory")
@@ -7918,12 +7915,23 @@ def run_family_check(args: argparse.Namespace) -> int:
             native_json_response=native_json_response,
             native_json_response_prepared=True,
         )
-        check_result_payload, check_result_digest = _public_result_json_payload(
-            check_result_document,
-            mncs=args.mncs,
-            cwd=cwd,
-            environment=check_result_environment,
-        )
+        if family_metadata is not None and family_metadata["selection_present"]:
+            check_result_payload, check_result_digest = (
+                _public_result_json_payload_with_raw_selection(
+                    check_result_document,
+                    family_metadata["selection_json"],
+                    mncs=args.mncs,
+                    cwd=cwd,
+                    environment=check_result_environment,
+                )
+            )
+        else:
+            check_result_payload, check_result_digest = _public_result_json_payload(
+                check_result_document,
+                mncs=args.mncs,
+                cwd=cwd,
+                environment=check_result_environment,
+            )
         check_definition_identity = sha256_bytes(compact_json(check).encode())
         run_identity = result.get("experiment", {}).get("run_identity")
         family_binding = {
@@ -7954,6 +7962,18 @@ def run_family_check(args: argparse.Namespace) -> int:
         if native_response is not None:
             response_payload, _ = native_response
         else:
+            fallback_result = result
+            fallback_check_result = check_result_document
+            if family_metadata is not None:
+                # Only materialize the retained TestResult tree when the
+                # bounded native response serializer cannot accept its raw
+                # fragments and the compatibility envelope needs Python values.
+                fallback_result = json.loads(result_document_bytes)
+                fallback_check_result = dict(check_result_document)
+                if family_metadata["selection_present"]:
+                    selection_value = json.loads(family_metadata["selection_json"])
+                    fallback_result["selection"] = selection_value
+                    fallback_check_result["selection"] = selection_value
             response = {
                 "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
                 "check_identity": request["check_identity"],
@@ -7961,8 +7981,8 @@ def run_family_check(args: argparse.Namespace) -> int:
                 "contract_revision": request["contract_revision"],
                 "runner": "mncs-test",
                 "verdict": result.get("verdict", "UNKNOWN"),
-                "test_result": result,
-                "check_result": check_result_document,
+                "test_result": fallback_result,
+                "check_result": fallback_check_result,
                 "execution": {
                     "run_identity": run_identity,
                     "test_case_identities": selected,
@@ -8035,6 +8055,59 @@ def _public_result_json_payload(
         if native is not None:
             return native
     payload = json_bytes(value)
+    return payload, sha256_bytes(payload)
+
+
+def _public_result_json_payload_with_raw_selection(
+    value: dict[str, Any],
+    selection_json: bytes,
+    *,
+    mncs: str | None = None,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """Serialize CheckResult while carrying its opaque selection as raw JSON."""
+    if not isinstance(value, dict):
+        raise AdapterError("CheckResult with a raw selection span must be an object")
+    if not selection_json.startswith(b"{") or not selection_json.endswith(b"}"):
+        raise AdapterError("native family selection span is not a JSON object")
+
+    fields = dict(value)
+    fields.pop("selection", None)
+    try:
+        members = [
+            compact_json(key).encode("utf-8")
+            + b":"
+            + compact_json(fields[key]).encode("utf-8")
+            for key in sorted(fields)
+        ]
+    except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+        members = []
+    if members or not fields:
+        selection_member = b'"selection":' + selection_json
+        insertion = sum(key < "selection" for key in fields)
+        members.insert(insertion, selection_member)
+        source = b"{" + b",".join(members) + b"}"
+        if mncs is not None and cwd is not None and environment is not None:
+            native = _native_public_result_document_payload(
+                source,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            if native is not None:
+                return native
+
+    # Compatibility serialization is the only path that needs to materialize
+    # the opaque value. Native-supported documents never build this tree.
+    try:
+        selection = json.loads(selection_json)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise AdapterError("native family selection span is invalid JSON") from error
+    if not isinstance(selection, dict):
+        raise AdapterError("native family selection span is not an object")
+    fields["selection"] = selection
+    payload = json_bytes(fields)
     return payload, sha256_bytes(payload)
 
 
