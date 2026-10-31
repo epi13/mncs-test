@@ -8214,7 +8214,8 @@ def validate_manifest_command(args: argparse.Namespace) -> int:
 
 
 def replay_command(args: argparse.Namespace) -> int:
-    path = resolve_path(args.result, Path.cwd())
+    cwd = Path.cwd()
+    path = resolve_path(args.result, cwd)
     try:
         result = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -8227,7 +8228,21 @@ def replay_command(args: argparse.Namespace) -> int:
         print(result.get("reproduction", {}).get("command", ""))
         print(result.get("reproduction", {}).get("replay_command", ""))
     else:
-        print(json.dumps({"schema_version": "mncs.test-replay/1", "result": result, "execute": False}, indent=2, sort_keys=True, ensure_ascii=False))
+        selected_mncs = resolve_mncs(args.mncs, cwd) if args.mncs else None
+        if selected_mncs is not None:
+            executable = Path(selected_mncs)
+            if not executable.is_file() or not os.access(executable, os.X_OK):
+                selected_mncs = None
+        print_cli_json(
+            {
+                "schema_version": "mncs.test-replay/1",
+                "result": result,
+                "execute": False,
+            },
+            mncs=selected_mncs,
+            cwd=cwd,
+            environment=native_application_environment(cwd),
+        )
     return EXIT_SUCCESS
 
 
@@ -8285,7 +8300,7 @@ def parser() -> argparse.ArgumentParser:
     discover.add_argument("--root", default=".")
     discover.add_argument("--recursive", action="store_true", help="include nested mncs-test.toml files")
     discover.add_argument("--inventory", action="store_true", help="query the compiler for each runtime inventory")
-    discover.add_argument("--mncs", default="mncs")
+    discover.add_argument("--mncs", default=os.environ.get("MNCS", "mncs"))
     discover.add_argument("--library", action="append", default=[])
     discover.add_argument("--format", choices=("json", "text"), default="json")
     discover.set_defaults(handler=discover_command)
@@ -8299,6 +8314,11 @@ def parser() -> argparse.ArgumentParser:
     replay = commands.add_parser("replay", help="show a safe reproduction record; never executes it")
     replay.add_argument("--result", required=True)
     replay.add_argument("--format", choices=("json", "text"), default="json")
+    replay.add_argument(
+        "--mncs",
+        default=os.environ.get("MNCS"),
+        help="selected MNCS executable for native JSON formatting",
+    )
     replay.set_defaults(handler=replay_command)
     return root
 

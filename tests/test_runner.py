@@ -216,6 +216,101 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("mncs-test run --manifest x", completed.stdout)
 
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_replay_json_uses_native_formatter_without_executing_record(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-replay-json-") as directory:
+            root = Path(directory)
+            marker = root / "reproduction-was-executed"
+            result_path = root / "result.json"
+            stored = {
+                "schema_version": "mncs.test-result/1",
+                "reproduction": {
+                    "command": f"{sys.executable} -c 'from pathlib import Path; Path({str(marker)!r}).touch()'",
+                    "run_id": "offline-replay",
+                },
+                "details": {"κλειδί": "Lúna 東京"},
+            }
+            result_path.write_text(json.dumps(stored), encoding="utf-8")
+            arguments = mncs_test.parser().parse_args(
+                [
+                    "replay",
+                    "--result",
+                    str(result_path),
+                    "--mncs",
+                    str(MNCS),
+                ]
+            )
+            output = io.StringIO()
+            native_results = []
+            real_run_native_app = mncs_test.run_native_app
+
+            def run_native_app(*args, **kwargs):
+                result = real_run_native_app(*args, **kwargs)
+                native_results.append((args[0], result))
+                return result
+
+            with mock.patch.object(
+                mncs_test,
+                "run_native_app",
+                side_effect=run_native_app,
+            ) as native_app, redirect_stdout(output):
+                exit_code = mncs_test.replay_command(arguments)
+
+            replay = {
+                "schema_version": "mncs.test-replay/1",
+                "result": stored,
+                "execute": False,
+            }
+            self.assertEqual(exit_code, mncs_test.EXIT_SUCCESS)
+            self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(replay))
+            self.assertEqual(
+                [call.args[0] for call in native_app.call_args_list],
+                [
+                    "test-public-result-json-key-order.json",
+                    "test-public-result-json-token.json",
+                ],
+            )
+            self.assertEqual(
+                [result.get("supported") for _, result in native_results],
+                [True, True],
+            )
+            self.assertFalse(marker.exists())
+
+    def test_replay_json_keeps_offline_formatter_when_compiler_is_unavailable(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-replay-offline-") as directory:
+            root = Path(directory)
+            result_path = root / "result.json"
+            stored = {
+                "schema_version": "mncs.test-result/1",
+                "reproduction": {"command": "mncs-test run --manifest x"},
+                "details": {"κλειδί": "Lúna 東京"},
+            }
+            result_path.write_text(json.dumps(stored), encoding="utf-8")
+            arguments = mncs_test.parser().parse_args(
+                [
+                    "replay",
+                    "--result",
+                    str(result_path),
+                    "--mncs",
+                    str(root / "missing-mncs"),
+                ]
+            )
+            output = io.StringIO()
+            with mock.patch.object(
+                mncs_test,
+                "run_native_app",
+                side_effect=AssertionError("offline replay must not invoke the toolchain"),
+            ), redirect_stdout(output):
+                exit_code = mncs_test.replay_command(arguments)
+
+            replay = {
+                "schema_version": "mncs.test-replay/1",
+                "result": stored,
+                "execute": False,
+            }
+            self.assertEqual(exit_code, mncs_test.EXIT_SUCCESS)
+            self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(replay))
+
     def test_process_timeout_is_classified_at_adapter_boundary(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-timeout-") as directory:
             store = mncs_test.ArtifactStore(Path(directory) / "artifacts")
