@@ -906,3 +906,18 @@ change also required refreshing the dependent CheckResult app binding; its
 medium-result consumer regression and all 46 public-result JSON tests pass
 with the integrated Stdlib JSON cursor provider at 3d9e077. Existing value,
 depth, key-length, input-byte, and execution limits remain in force.
+
+P-039 raises the native key-order and cursor formatter object-member bounds to
+512 without increasing the 8,000,000-step execution ceiling. The key-order
+parser tracks strict ascending and descending source order: it switches to the
+merge-sort representation at 32 members, reverses an ascending prefix when
+that transition occurs, and avoids merge passes when the remaining input is
+monotonic. Short unescaped keys use a 16-iteration decode/copy path. Independent
+JSON-byte and SHA-256 goldens pass through the consumer at 257 and 512 scalar
+members in both ascending and descending input order; tests confirm Python
+compacts once with `sort_keys=False`. A shuffled 256-member object exercises
+the merge-sort path directly. At 513 members native key ordering declines and
+the compatibility serializer preserves exact bytes and digest. The complete
+public-result JSON suite passes all 50 tests with the integrated Stdlib JSON
+cursor provider; the fixed value, depth, key-length, input-byte, and execution
+limits remain in force.

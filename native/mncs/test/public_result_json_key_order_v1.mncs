@@ -48,11 +48,13 @@ record FrameV1 {
     items: JsonValueV1,
     source_start: u64,
     pending_key: KeyV1,
+    last_source_key: KeyV1,
     has_pending_key: bool,
     contains_object: bool,
     compact: bool,
     child_count: u64,
     merge_sort_needed: bool,
+    source_order: byte,
     writer_steps: u64,
     expect: byte
 }
@@ -348,6 +350,26 @@ fn copy_decoded_key_byte(state: KeyCopyV1, decoded: DecodeStateV1, index: u64) -
     };
 }
 
+fn decode_short_key(
+    document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64
+) -> (result: DecodeStateV1) {
+    let initial: DecodeStateV1 = DecodeStateV1 {
+        bytes: [0; 512], length: 0, escaped: false, skip: 0, valid: true
+    };
+    iterate i up_to 16 carrying decoded: DecodeStateV1 = initial {
+        next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
+    }
+    return decoded;
+}
+
+fn copy_short_decoded_key(decoded: DecodeStateV1) -> (result: KeyCopyV1) {
+    let initial: KeyCopyV1 = KeyCopyV1 { bytes: [0; 256], length: 0 };
+    iterate i up_to 16 carrying copied: KeyCopyV1 = initial {
+        next copied = copy_decoded_key_byte(copied, decoded, i);
+    }
+    return copied;
+}
+
 fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64, common: u64) -> (result: i64) {
     if index >= common || order != 0 { return order; }
     if left.ordered[index] < right.ordered[index] { return -1; }
@@ -356,6 +378,18 @@ fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64, common: u
 }
 
 fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: KeyV1) {
+    if raw_length <= 16 {
+        let decoded_short: DecodeStateV1 = decode_short_key(document, raw_start, raw_length);
+        let key_bytes_short: KeyCopyV1 = copy_short_decoded_key(decoded_short);
+        return KeyV1 {
+            raw_start: raw_start,
+            raw_length: raw_length,
+            ordered: key_bytes_short.bytes[0..key_bytes_short.length],
+            ordered_length: decoded_short.length,
+            valid: decoded_short.valid && !decoded_short.escaped
+                && decoded_short.skip == 0 && key_bytes_short.length == decoded_short.length
+        };
+    }
     let initial: DecodeStateV1 = DecodeStateV1 {
         bytes: [0; 512], length: 0, escaped: false, skip: 0, valid: true
     };
@@ -432,8 +466,14 @@ fn append_object_field(fields: JsonValueV1, key: KeyV1, value: JsonValueV1) -> (
 }
 
 fn append_object_field_by_mode(
-    fields: JsonValueV1, key: KeyV1, value: JsonValueV1, use_merge_sort: bool
+    fields: JsonValueV1, key: KeyV1, value: JsonValueV1,
+    use_merge_sort: bool, prior_count: u64, reverse_prefix: bool
 ) -> (result: JsonValueV1) {
+    if use_merge_sort && prior_count == 32 && reverse_prefix {
+        let reversed: ObjectReverseStateV1 = reverse_object_fields(fields, prior_count);
+        if !reversed.valid || reversed.index != prior_count { return JsonValueV1.Empty; }
+        return append_object_field(reversed.reversed, key, value);
+    }
     if use_merge_sort { return append_object_field(fields, key, value); }
     return insert_field(fields, key, value);
 }
@@ -490,6 +530,9 @@ fn advance_object_fields_by_width(fields: JsonValueV1, width: u64) -> (result: J
     if width == 32 { return advance_object_fields_32(fields); }
     if width == 64 { return advance_object_fields_64(fields); }
     if width == 128 { return advance_object_fields_128(fields); }
+    if width == 256 {
+        return advance_object_fields_128(advance_object_fields_128(fields));
+    }
     return JsonValueV1.Empty;
 }
 
@@ -522,9 +565,9 @@ fn reverse_object_fields(fields: JsonValueV1, count: u64) -> (result: ObjectReve
         reversed: JsonValueV1.ObjectNil,
         count: count,
         index: 0,
-        valid: count <= 256
+        valid: count <= 512
     };
-    iterate i up_to 256 carrying reversed: ObjectReverseStateV1 = initial {
+    iterate i up_to 512 carrying reversed: ObjectReverseStateV1 = initial {
         next reversed = reverse_object_field_step(reversed);
     }
     return reversed;
@@ -685,10 +728,10 @@ fn merge_object_fields_pass(fields: JsonValueV1, count: u64, width: u64) -> (res
         run_remaining: 0,
         output: JsonValueV1.ObjectNil,
         output_count: 0,
-        valid: count <= 256
+        valid: count <= 512
     };
     let first_run: ObjectMergeStateV1 = begin_object_merge_run(initial);
-    iterate i up_to 256 carrying merged: ObjectMergeStateV1 = first_run {
+    iterate i up_to 512 carrying merged: ObjectMergeStateV1 = first_run {
         next merged = object_merge_item_step(merged);
     }
     if !merged.valid || merged.output_count != count {
@@ -719,9 +762,9 @@ fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectS
         fields: fields,
         count: count,
         width: 1,
-        valid: count <= 256
+        valid: count <= 512
     };
-    iterate pass up_to 8 carrying sorted: ObjectMergeSortStateV1 = initial {
+    iterate pass up_to 9 carrying sorted: ObjectMergeSortStateV1 = initial {
         next sorted = object_merge_sort_step(sorted);
     }
     return ObjectSortResultV1 {
@@ -731,6 +774,18 @@ fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectS
 }
 
 fn sort_object_fields_at_close(frame: FrameV1) -> (result: ObjectSortResultV1) {
+    if frame.merge_sort_needed && frame.source_order == 1 {
+        let reversed: ObjectReverseStateV1 = reverse_object_fields(
+            frame.items, frame.child_count
+        );
+        return ObjectSortResultV1 {
+            fields: reversed.reversed,
+            valid: reversed.valid && reversed.index == frame.child_count
+        };
+    }
+    if frame.merge_sort_needed && frame.source_order == 2 {
+        return ObjectSortResultV1 { fields: frame.items, valid: true };
+    }
     if frame.merge_sort_needed {
         return sort_object_fields_merge(frame.items, frame.child_count);
     }
@@ -812,11 +867,13 @@ fn empty_frame(kind: byte) -> (result: FrameV1) {
         items: select(kind == 1, JsonValueV1.ObjectNil, JsonValueV1.ArrayNil),
         source_start: 0,
         pending_key: empty_key(),
+        last_source_key: empty_key(),
         has_pending_key: false,
         contains_object: false,
         compact: true,
         child_count: 0,
         merge_sort_needed: false,
+        source_order: 0,
         writer_steps: 0,
         expect: select(kind == 1, 1, 5)
     };
@@ -872,10 +929,11 @@ fn append_value(
             valid: !is_empty_value(prepended)
         };
     }
-    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 256 {
-        let use_merge_sort: bool = frame.merge_sort_needed || frame.child_count >= 128;
+    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 512 {
+        let use_merge_sort: bool = frame.merge_sort_needed || frame.child_count >= 32;
         let inserted: JsonValueV1 = append_object_field_by_mode(
-            frame.items, frame.pending_key, value, use_merge_sort
+            frame.items, frame.pending_key, value, use_merge_sort, frame.child_count,
+            frame.source_order == 1
         );
         let updated_frame: FrameV1 = FrameV1 {
             ..frame,
@@ -968,6 +1026,33 @@ fn parse_expects_value(state: ParseStateV1) -> (result: bool) {
         || (frame.kind == 2 && frame.expect == 5);
 }
 
+fn next_object_source_order(frame: FrameV1, key: KeyV1) -> (result: byte) {
+    if frame.child_count == 0 { return 0; }
+    let relation: KeyOrderV1 = compare_key(frame.last_source_key, key);
+    if frame.source_order == 0 {
+        return match relation {
+            Before => 1,
+            Equal => 3,
+            After => 2
+        };
+    }
+    if frame.source_order == 1 {
+        return match relation {
+            Before => 1,
+            Equal => 3,
+            After => 3
+        };
+    }
+    if frame.source_order == 2 {
+        return match relation {
+            Before => 3,
+            Equal => 3,
+            After => 2
+        };
+    }
+    return 3;
+}
+
 fn parse_string_step(
     state: ParseStateV1,
     document: JsonTokenDocumentV1,
@@ -992,12 +1077,15 @@ fn parse_string_step(
         if frame.kind != 1 || frame.expect != 1 || frame.has_pending_key || !key.valid {
             return ParseStateV1 { ..closed, valid: false };
         }
+        let source_order: byte = next_object_source_order(frame, key);
         return ParseStateV1 {
             ..closed,
             frames: replace(closed.frames, frame_index, FrameV1 {
                 ..frame,
                 pending_key: key,
+                last_source_key: key,
                 has_pending_key: true,
+                source_order: source_order,
                 expect: 2
             })
         };
