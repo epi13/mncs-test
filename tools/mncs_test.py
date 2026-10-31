@@ -62,7 +62,7 @@ PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-d
 PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/3"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
-REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/3"
+REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
@@ -1117,11 +1117,7 @@ def _native_replay_schema_result(
         or type(result.get("result_schema_valid")) is not bool
         or type(result.get("text_projection_supported")) is not bool
         or type(result.get("reproduction_command_present")) is not bool
-        or type(result.get("reproduction_command_start")) is not int
-        or type(result.get("reproduction_command_length")) is not int
         or type(result.get("reproduction_replay_command_present")) is not bool
-        or type(result.get("reproduction_replay_command_start")) is not int
-        or type(result.get("reproduction_replay_command_length")) is not int
         or type(result.get("document_length")) is not int
         or result.get("document_length") != source_length
         or result.get("input_sha256") != start_request["input_sha256"]
@@ -1146,19 +1142,6 @@ def _native_replay_schema_result(
             raise AdapterError("MNCS replay schema app returned malformed decoded text")
     if not result["supported"]:
         return None
-    for field in (
-        ("reproduction_command_present", "reproduction_command_start", "reproduction_command_length"),
-        ("reproduction_replay_command_present", "reproduction_replay_command_start", "reproduction_replay_command_length"),
-    ):
-        present_name, start_name, length_name = field
-        present = result[present_name]
-        start = result[start_name]
-        length = result[length_name]
-        if present:
-            if start <= 0 or length < 0 or start + length >= source_length:
-                raise AdapterError("MNCS replay schema app returned an out-of-bounds text span")
-        elif start != 0 or length != 0:
-            raise AdapterError("MNCS replay schema app returned a span without a value")
     return result
 
 

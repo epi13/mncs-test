@@ -238,6 +238,7 @@ class RunnerTests(unittest.TestCase):
             output = io.StringIO()
             string_scalar_parses = []
             native_apps = []
+            native_results = []
             real_json_loads = mncs_test.json.loads
             real_run_native_app = mncs_test.run_native_app
 
@@ -251,7 +252,9 @@ class RunnerTests(unittest.TestCase):
 
             def run_native_app(*args, **kwargs):
                 native_apps.append(args[0])
-                return real_run_native_app(*args, **kwargs)
+                result = real_run_native_app(*args, **kwargs)
+                native_results.append(result)
+                return result
 
             with mock.patch.object(
                 mncs_test,
@@ -271,6 +274,17 @@ class RunnerTests(unittest.TestCase):
                 "mncs-test replay --format text\n",
             )
             self.assertEqual(string_scalar_parses, [])
+            replay_schema = native_results[1]
+            self.assertEqual(
+                replay_schema["reproduction_command_text"],
+                stored["reproduction"]["command"],
+            )
+            self.assertEqual(
+                replay_schema["reproduction_replay_command_text"],
+                stored["reproduction"]["replay_command"],
+            )
+            self.assertNotIn("reproduction_command_start", replay_schema)
+            self.assertNotIn("reproduction_replay_command_start", replay_schema)
             self.assertEqual(
                 native_apps,
                 [

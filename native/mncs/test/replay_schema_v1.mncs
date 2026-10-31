@@ -20,11 +20,7 @@ record ReplaySchemaResultV1 {
     result_schema_valid: bool,
     text_projection_supported: bool,
     reproduction_command_present: bool,
-    reproduction_command_start: u64,
-    reproduction_command_length: u64,
     reproduction_replay_command_present: bool,
-    reproduction_replay_command_start: u64,
-    reproduction_replay_command_length: u64,
     reproduction_command_text: [byte; up_to 256],
     reproduction_command_text_length: u64,
     reproduction_replay_command_text: [byte; up_to 256],
@@ -50,7 +46,7 @@ fn request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 47, 51];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 114, 101, 112, 108, 97, 121, 45, 115, 99, 104, 101, 109, 97, 47, 52];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -351,11 +347,7 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
             result_schema_valid: false,
             text_projection_supported: false,
             reproduction_command_present: false,
-            reproduction_command_start: 0,
-            reproduction_command_length: 0,
             reproduction_replay_command_present: false,
-            reproduction_replay_command_start: 0,
-            reproduction_replay_command_length: 0,
             reproduction_command_text: [],
             reproduction_command_text_length: 0,
             reproduction_replay_command_text: [],
@@ -377,11 +369,7 @@ fn replay_schema_app_v1(context: ApplicationContext) -> (result: ApplicationExit
         result_schema_valid: result_valid,
         text_projection_supported: supported && result_valid && text_fields.supported,
         reproduction_command_present: text_fields.command.present,
-        reproduction_command_start: text_fields.command.start,
-        reproduction_command_length: text_fields.command.length,
         reproduction_replay_command_present: text_fields.replay_command.present,
-        reproduction_replay_command_start: text_fields.replay_command.start,
-        reproduction_replay_command_length: text_fields.replay_command.length,
         reproduction_command_text: text_fields.command_value.bytes,
         reproduction_command_text_length: text_fields.command_value.length,
         reproduction_replay_command_text: text_fields.replay_command_value.bytes,
