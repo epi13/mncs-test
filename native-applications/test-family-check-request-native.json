@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.family-check-request-native",
+  "source": "../native/mncs/test/family_check_request_native_v1.mncs",
+  "module": "mncs.test.family_check_request_native_v1",
+  "entry_function": "family_check_request_native_app_v1",
+  "profile": "0.18",
+  "interface_identity": "2acda213fe6562d71d1c910744f64ba67c4723fd94e6684d867a196e79c01da2",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

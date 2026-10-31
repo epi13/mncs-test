@@ -7726,6 +7726,9 @@ def _finish_check_result_projection(
 
 FAMILY_CHECK_REQUEST_SCHEMA = "mncs.family-check-request/1"
 FAMILY_CHECK_RESPONSE_SCHEMA = "mncs.family-check-response/1"
+FAMILY_CHECK_REQUEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-request-native-request/1"
+FAMILY_CHECK_REQUEST_NATIVE_RESULT_SCHEMA = "mncs.test.family-check-request-native/1"
+FAMILY_CHECK_REQUEST_NATIVE_MAX_BYTES = 8192
 
 
 def _native_family_check_response_payload(
@@ -7993,13 +7996,122 @@ def load_family_check_request(path: Path) -> dict[str, Any]:
     return request
 
 
+def _native_family_check_request_projection(
+    path: Path,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, str] | None:
+    """Project the family-check request's consumed scalar fields from JSON tokens."""
+    try:
+        document = path.read_bytes()
+    except OSError:
+        return None
+    if not document or len(document) > FAMILY_CHECK_REQUEST_NATIVE_MAX_BYTES:
+        return None
+    packed = _native_public_result_document_request(document)
+    if packed is None:
+        return None
+    packed_request, packed_length = packed
+    if packed_length != len(document):
+        raise AdapterError("MNCS family-check request packing changed its length")
+    native_request = {
+        "schema_version": FAMILY_CHECK_REQUEST_NATIVE_REQUEST_SCHEMA,
+        "document": packed_request["document"],
+        "input_sha256": packed_request["input_sha256"],
+    }
+    try:
+        response = run_native_app(
+            "test-family-check-request-native.json",
+            native_request,
+            request_schema=FAMILY_CHECK_REQUEST_NATIVE_REQUEST_SCHEMA,
+            result_schema=FAMILY_CHECK_REQUEST_NATIVE_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeInputBoundError, NativeBudgetExhaustedError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test family-check request projection failed: {error}") from error
+
+    if (
+        response.get("schema_version") != FAMILY_CHECK_REQUEST_NATIVE_RESULT_SCHEMA
+        or type(response.get("supported")) is not bool
+    ):
+        raise AdapterError("native Test family-check request app returned malformed support metadata")
+    if not response["supported"]:
+        return None
+
+    fields = (
+        "check_schema_version",
+        "check_identity",
+        "contract_identity",
+        "contract_revision",
+        "verification_plan_id",
+        "family_graph_identity",
+        "edge_fingerprint",
+        "source_change_sha256",
+    )
+    values = {field: response.get(field) for field in fields}
+    if (
+        values["check_schema_version"] != FAMILY_CHECK_REQUEST_SCHEMA
+        or any(
+            not isinstance(values[field], str)
+            or not values[field]
+            or len(values[field].encode("utf-8")) > 512
+            for field in fields[1:]
+        )
+        or any(
+            not SHA256_HEX.fullmatch(values[field])
+            for field in (
+                "verification_plan_id",
+                "family_graph_identity",
+                "edge_fingerprint",
+                "source_change_sha256",
+            )
+        )
+    ):
+        raise AdapterError("native Test family-check request app returned malformed projection metadata")
+    return {
+        "schema_version": FAMILY_CHECK_REQUEST_SCHEMA,
+        **{field: str(values[field]) for field in fields[1:]},
+    }
+
+
+def _load_family_check_request(
+    path: Path,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    """Use the native scalar projection when supported, preserving Python fallback."""
+    projected = _native_family_check_request_projection(
+        path,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if projected is not None:
+        return projected
+    return load_family_check_request(path)
+
+
 def run_family_check(args: argparse.Namespace) -> int:
     cwd = Path.cwd().resolve()
     request: dict[str, Any] = {}
     try:
-        request = load_family_check_request(resolve_path(args.request, cwd, must_exist=True))
-        checks_path = resolve_path(args.checks, cwd, must_exist=True)
         check_result_environment = native_application_environment(cwd)
+        request = _load_family_check_request(
+            resolve_path(args.request, cwd, must_exist=True),
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=check_result_environment,
+        )
+        checks_path = resolve_path(args.checks, cwd, must_exist=True)
         native_check = _native_family_check_manifest_projection(
             checks_path,
             check_identity=request["check_identity"],

@@ -1,0 +1,276 @@
+mncs 0.18;
+
+// Project the fixed scalar identity fields consumed by the family-check runner
+// directly from bounded JSON tokens. Forward-compatible or escaped forms are
+// left to the existing Python compatibility loader.
+module mncs.test.family_check_request_native_v1;
+
+use mncs.std.application.v1;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+
+record FamilyCheckRequestNativeRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: json_order.JsonTokenDocumentV1,
+    input_sha256: [byte; up_to 64]
+}
+
+record FamilyCheckRequestNativeResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    check_schema_version: [byte; up_to 512],
+    check_identity: [byte; up_to 512],
+    contract_identity: [byte; up_to 512],
+    contract_revision: [byte; up_to 512],
+    verification_plan_id: [byte; up_to 512],
+    family_graph_identity: [byte; up_to 512],
+    edge_fingerprint: [byte; up_to 512],
+    source_change_sha256: [byte; up_to 512]
+}
+
+record FieldLookupV1 { found: bool, value: json_order.JsonValueV1 }
+record TextCopyV1 { bytes: [byte; 512], length: u64, valid: bool }
+record TextValueV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
+record ObjectScanV1 { remaining: json_order.JsonValueV1, count: u64, valid: bool }
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,102,97,109,105,108,121,45,99,104,101,99,107,45,114,101,113,117,101,115,116,45,110,97,116,105,118,101,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,102,97,109,105,108,121,45,99,104,101,99,107,45,114,101,113,117,101,115,116,45,110,97,116,105,118,101,47,49];
+}
+
+fn check_schema() -> (result: [byte; up_to 512]) {
+    return [109,110,99,115,46,102,97,109,105,108,121,45,99,104,101,99,107,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn same_bytes64(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: name,
+        ordered_length: name.len,
+        valid: true
+    };
+}
+
+fn key_schema() -> (result: json_order.KeyV1) { return static_key([115,99,104,101,109,97,95,118,101,114,115,105,111,110]); }
+fn key_check() -> (result: json_order.KeyV1) { return static_key([99,104,101,99,107,95,105,100,101,110,116,105,116,121]); }
+fn key_contract() -> (result: json_order.KeyV1) { return static_key([99,111,110,116,114,97,99,116,95,105,100,101,110,116,105,116,121]); }
+fn key_revision() -> (result: json_order.KeyV1) { return static_key([99,111,110,116,114,97,99,116,95,114,101,118,105,115,105,111,110]); }
+fn key_plan() -> (result: json_order.KeyV1) { return static_key([118,101,114,105,102,105,99,97,116,105,111,110,95,112,108,97,110,95,105,100]); }
+fn key_graph() -> (result: json_order.KeyV1) { return static_key([102,97,109,105,108,121,95,103,114,97,112,104,95,105,100,101,110,116,105,116,121]); }
+fn key_edge() -> (result: json_order.KeyV1) { return static_key([101,100,103,101,95,102,105,110,103,101,114,112,114,105,110,116]); }
+fn key_source_change() -> (result: json_order.KeyV1) { return static_key([115,111,117,114,99,101,95,99,104,97,110,103,101,95,115,104,97,50,53,54]); }
+
+fn empty_lookup() -> (result: FieldLookupV1) {
+    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: FieldLookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } =>
+            match json_order.compare_key(wanted, current) {
+                json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
+                json_order.KeyOrderV1.Before => empty_lookup(),
+                json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+            },
+        json_order.JsonValueV1.ObjectNil => empty_lookup(),
+        json_order.JsonValueV1.Empty => empty_lookup(),
+        json_order.JsonValueV1.Null => empty_lookup(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.Array { items: items } => empty_lookup(),
+        json_order.JsonValueV1.Object { fields: nested } => empty_lookup(),
+        json_order.JsonValueV1.ArrayNil => empty_lookup(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_lookup()
+    };
+}
+
+fn object_scan_step(state: ObjectScanV1) -> (result: ObjectScanV1) {
+    return match state.remaining {
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } =>
+            ObjectScanV1 { remaining: tail, count: state.count +% 1, valid: state.valid && state.count < 8 },
+        json_order.JsonValueV1.ObjectNil => state,
+        json_order.JsonValueV1.Empty => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Null => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Array { items: items } => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Object { fields: nested } => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.ArrayNil => ObjectScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => ObjectScanV1 { ..state, valid: false }
+    };
+}
+
+fn has_exact_fields(fields: json_order.JsonValueV1) -> (result: bool) {
+    let initial: ObjectScanV1 = ObjectScanV1 { remaining: fields, count: 0, valid: true };
+    iterate i up_to 9 carrying current: ObjectScanV1 = initial {
+        next current = object_scan_step(current);
+    }
+    return current.valid && current.count == 8 && json_order.is_object_nil(current.remaining);
+}
+
+fn copy_text_step(state: TextCopyV1, document: json_order.JsonTokenDocumentV1, start: u64, raw_length: u64, index: u64) -> (result: TextCopyV1) {
+    if index >= raw_length || !state.valid { return state; }
+    let value: byte = json_order.located_byte(document, start +% index);
+    if value == 92 { return TextCopyV1 { ..state, valid: false }; }
+    return TextCopyV1 {
+        ..state,
+        bytes: replace(state.bytes, state.length, value),
+        length: state.length +% 1
+    };
+}
+
+fn plain_text_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
+    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: length <= 512 };
+    iterate i up_to 512 carrying current: TextCopyV1 = initial {
+        next current = copy_text_step(current, document, start, length, i);
+    }
+    let copied: TextCopyV1 = current;
+    return TextValueV1 {
+        bytes: copied.bytes[0..copied.length],
+        length: copied.length,
+        valid: copied.valid && copied.length == length
+    };
+}
+
+fn text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
+    return match value {
+        json_order.JsonValueV1.String { start: start, length: length } => plain_text_value(document, start, length),
+        json_order.JsonValueV1.Empty => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Null => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Array { items: items } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ArrayNil => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ObjectNil => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => TextValueV1 { bytes: [], length: 0, valid: false }
+    };
+}
+
+fn field_text(fields: json_order.JsonValueV1, wanted: json_order.KeyV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
+    let found: FieldLookupV1 = lookup_field(fields, wanted);
+    if !found.found { return TextValueV1 { bytes: [], length: 0, valid: false }; }
+    return text_value(found.value, document);
+}
+
+fn same_text(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn text_is_nonempty(value: TextValueV1) -> (result: bool) {
+    return value.valid && value.length > 0;
+}
+
+fn hex_digit_valid(value: byte) -> (result: bool) {
+    return (value >= 48 && value <= 57) || (value >= 97 && value <= 102);
+}
+
+fn digest_step(valid: bool, value: TextValueV1, index: u64) -> (result: bool) {
+    if !valid || index >= value.length { return valid; }
+    return hex_digit_valid(value.bytes[index]);
+}
+
+fn digest_is_valid(value: TextValueV1) -> (result: bool) {
+    if !value.valid || value.length != 64 { return false; }
+    iterate i up_to 64 carrying valid: bool = true {
+        next valid = digest_step(valid, value, i);
+    }
+    return valid;
+}
+
+fn empty_result() -> (result: FamilyCheckRequestNativeResultV1) {
+    return FamilyCheckRequestNativeResultV1 {
+        schema_version: result_schema(),
+        supported: false,
+        check_schema_version: [],
+        check_identity: [],
+        contract_identity: [],
+        contract_revision: [],
+        verification_plan_id: [],
+        family_graph_identity: [],
+        edge_fingerprint: [],
+        source_change_sha256: []
+    };
+}
+
+fn project_fields(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: FamilyCheckRequestNativeResultV1) {
+    if !has_exact_fields(fields) { return empty_result(); }
+    let schema: TextValueV1 = field_text(fields, key_schema(), document);
+    let check: TextValueV1 = field_text(fields, key_check(), document);
+    let contract: TextValueV1 = field_text(fields, key_contract(), document);
+    let revision: TextValueV1 = field_text(fields, key_revision(), document);
+    let plan: TextValueV1 = field_text(fields, key_plan(), document);
+    let graph: TextValueV1 = field_text(fields, key_graph(), document);
+    let edge: TextValueV1 = field_text(fields, key_edge(), document);
+    let source_change: TextValueV1 = field_text(fields, key_source_change(), document);
+    let valid: bool = schema.valid && same_text(schema.bytes, check_schema())
+        && text_is_nonempty(check) && text_is_nonempty(contract) && text_is_nonempty(revision)
+        && digest_is_valid(plan) && digest_is_valid(graph)
+        && digest_is_valid(edge) && digest_is_valid(source_change);
+    if !valid { return empty_result(); }
+    return FamilyCheckRequestNativeResultV1 {
+        schema_version: result_schema(),
+        supported: true,
+        check_schema_version: schema.bytes,
+        check_identity: check.bytes,
+        contract_identity: contract.bytes,
+        contract_revision: revision.bytes,
+        verification_plan_id: plan.bytes,
+        family_graph_identity: graph.bytes,
+        edge_fingerprint: edge.bytes,
+        source_change_sha256: source_change.bytes
+    };
+}
+
+fn project_root(root: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: FamilyCheckRequestNativeResultV1) {
+    return match root {
+        json_order.JsonValueV1.Object { fields: fields } => project_fields(fields, document),
+        json_order.JsonValueV1.Empty => empty_result(),
+        json_order.JsonValueV1.Null => empty_result(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_result(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_result(),
+        json_order.JsonValueV1.Array { items: items } => empty_result(),
+        json_order.JsonValueV1.ArrayNil => empty_result(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_result(),
+        json_order.JsonValueV1.ObjectNil => empty_result(),
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => empty_result()
+    };
+}
+
+fn family_check_request_native_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97,114,103,118,32,114,101,113,117,105,114,101,115,32,50,32,102,97,109,105,108,121,32,99,104,101,99,107,32,114,101,113,117,101,115,116,32,112,97,116,104,115], 2);
+    }
+    let request: FamilyCheckRequestNativeRequestV1 = structured_read(context.argv[0], request_schema());
+    let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.document);
+    let request_valid: bool = same_bytes64(request.schema_version, request_schema())
+        && shape.valid && request.document.byte_length <= 8192
+        && request.input_sha256.len == 64
+        && same_bytes64(request.input_sha256, json_order.document_digest(request.document));
+    let parsed: json_order.ParseStateV1 = json_order.parse_checked(request.document, request_valid);
+    let projected: FamilyCheckRequestNativeResultV1 = select(parsed.valid && parsed.has_root, project_root(parsed.root, request.document), empty_result());
+    let published: u64 = structured_write(context.argv[1], result_schema(), projected);
+    if published == 0 {
+        return failure([102,97,109,105,108,121,32,99,104,101,99,107,32,114,101,113,117,101,115,116,32,112,114,111,106,101,99,116,105,111,110,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+    }
+    return success([]);
+}

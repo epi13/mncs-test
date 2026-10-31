@@ -304,6 +304,19 @@ Stdlib binding remains two commits behind `origin/main`; its existing
 read-only Test scope cannot reconcile that provider checkout, so provider
 selection remains an open Environment pressure.
 
+P-021 moves the family-check request's supported flat JSON projection into
+`mncs.test.family_check_request_native_v1`. MNCS validates the request schema,
+required scalar fields, and lowercase digest fields directly from bounded JSON
+tokens, then returns only the eight strings consumed by the runner. Requests
+up to 8,192 bytes with plain string values no longer pass through Python's
+`json.loads` value tree. Escaped values, duplicate keys, unknown extension
+fields, oversized requests, and other unsupported forms retain the established
+`load_family_check_request` compatibility path and its validation behavior.
+The native request app reuses Test's existing JSON token parser; no duplicate
+Stdlib parser was added. Differential and compatibility tests cover the
+supported projection and fallback boundaries, and the compiler-backed live
+family-check runner passes end to end with the integrated Stdlib provider.
+
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
 fields into the request and formats the final result envelope; out-of-contract
