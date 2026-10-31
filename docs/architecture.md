@@ -409,6 +409,23 @@ case still takes its compatibility fallback at the enforced 8,000,000-step
 limit; no limit was raised. The 256-item manifest sort and canonical digest
 remain native and pass their independent loader comparison.
 
+P-031 specializes the native CheckResult text decoder into compile-time
+iteration windows of 16, 64, 256, 512, or 1,024 bytes. Previously every short
+identity paid for a 1,024-step decode loop, even when only a few bytes were
+present. The 256-item digest case now completes below the existing 8,000,000
+step ceiling, including identities with quotes, backslashes, line breaks,
+Unicode, and control characters. Its digest matches an independent canonical
+JSON and SHA-256 expectation, and the family metadata adapter consumes the
+native comparison and source span without materializing the TestResult tree.
+Both digest comparison and explicit identity-list comparison now complete at
+the 256-item bound. The list path returns native identity metadata, while the
+family runner's digest path carries comparison fields and the opaque selection
+source span. No additional Stdlib parser or higher execution ceiling was
+needed. A synthetic 256-identity family envelope still exceeds the separate
+public response formatter's 512-value limit because TestResult, CheckResult,
+and execution each retain the declared identities; that outer envelope keeps
+its established compatibility formatter until its token bound is extended.
+
 `mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
 `mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded
 UTF-8 fields as strings in the existing typed request, avoiding one JSON

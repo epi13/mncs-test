@@ -625,7 +625,59 @@ fn decode_text_step(
     return text_decoded_byte(state, value);
 }
 
-fn decode_text_block(
+fn decode_text_block_16(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64
+) -> (result: TextDecodeStateV1) {
+    iterate i up_to 16 carrying decoded: TextDecodeStateV1 = state {
+        next decoded = decode_text_step(decoded, document, start, length, block_start +% i);
+    }
+    return decoded;
+}
+
+fn decode_text_block_64(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64
+) -> (result: TextDecodeStateV1) {
+    iterate i up_to 64 carrying decoded: TextDecodeStateV1 = state {
+        next decoded = decode_text_step(decoded, document, start, length, block_start +% i);
+    }
+    return decoded;
+}
+
+fn decode_text_block_256(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64
+) -> (result: TextDecodeStateV1) {
+    iterate i up_to 256 carrying decoded: TextDecodeStateV1 = state {
+        next decoded = decode_text_step(decoded, document, start, length, block_start +% i);
+    }
+    return decoded;
+}
+
+fn decode_text_block_512(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64
+) -> (result: TextDecodeStateV1) {
+    iterate i up_to 512 carrying decoded: TextDecodeStateV1 = state {
+        next decoded = decode_text_step(decoded, document, start, length, block_start +% i);
+    }
+    return decoded;
+}
+
+fn decode_text_block_1024(
     state: TextDecodeStateV1,
     document: json_order.JsonTokenDocumentV1,
     start: u64,
@@ -657,11 +709,23 @@ fn decode_text_span(
     let initial: TextDecodeStateV1 = TextDecodeStateV1 {
         bytes: [0; 1024], length: 0, escaped: false, skip: 0, valid: true
     };
+    if length <= 16 {
+        return decoded_text_value(decode_text_block_16(initial, document, start, length, 0));
+    }
+    if length <= 64 {
+        return decoded_text_value(decode_text_block_64(initial, document, start, length, 0));
+    }
+    if length <= 256 {
+        return decoded_text_value(decode_text_block_256(initial, document, start, length, 0));
+    }
+    if length <= 512 {
+        return decoded_text_value(decode_text_block_512(initial, document, start, length, 0));
+    }
     if length <= 1024 {
-        return decoded_text_value(decode_text_block(initial, document, start, length, 0));
+        return decoded_text_value(decode_text_block_1024(initial, document, start, length, 0));
     }
     iterate block up_to 6 carrying decoded: TextDecodeStateV1 = initial {
-        next decoded = decode_text_block(decoded, document, start, length, block *% 1024);
+        next decoded = decode_text_block_1024(decoded, document, start, length, block *% 1024);
     }
     return decoded_text_value(decoded);
 }

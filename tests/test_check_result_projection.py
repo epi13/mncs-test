@@ -79,7 +79,7 @@ def test_check_result_family_selection_uses_shared_merge_sort(
     assert family["selection_matches_expected"] is True
 
 
-def test_check_result_family_selection_keeps_256_item_budget_fallback(
+def test_check_result_family_selection_list_comparison_supports_256_items_natively(
     tmp_path: Path,
 ) -> None:
     expected = [f"test-{index:03d}" for index in range(256)]
@@ -107,7 +107,13 @@ def test_check_result_family_selection_keeps_256_item_budget_fallback(
         claim="Verify native family selection comparison at the 256-identity bound",
     )
 
-    assert response is None
+    assert response is not None
+    assert response["supported"] is True
+    family = response["family_metadata"]
+    assert family["supported"] is True
+    assert family["selection_comparison_supported"] is True
+    assert family["selection_matches_expected"] is True
+    assert len(family["selected_test_identities"]) == 256
 
 
 def test_check_result_family_selection_uses_compact_digest_at_128_item_bound(
@@ -186,10 +192,16 @@ def test_check_result_family_digest_preserves_unsorted_selection_rejection(
     assert family["selection_matches_expected"] is False
 
 
-def test_check_result_family_selection_keeps_256_item_digest_budget_fallback(
+def test_check_result_family_selection_digest_supports_256_items_natively(
     tmp_path: Path,
 ) -> None:
-    expected = [f"test-{index:03d}" for index in range(256)]
+    expected = [f"test-{index:03d}" for index in range(252)] + [
+        'identity-quote-"-backslash-\\',
+        "identity-line\nbreak",
+        "identity-unicode-🛰️",
+        "identity-controls-\x01\x08\x09\x0b\x0c\r",
+    ]
+    expected.sort()
     result = {
         "schema_version": mncs_test.RESULT_SCHEMA,
         "provider": "mncs-test",
@@ -202,8 +214,9 @@ def test_check_result_family_selection_keeps_256_item_digest_budget_fallback(
         "test_inventory": {"inventory_identity": "b" * 64},
     }
 
+    document = mncs_test.json_bytes(result)
     response = mncs_test._native_check_result_json_response(
-        mncs_test.json_bytes(result),
+        document,
         expected_test_identities_digest=_identity_set_digest(expected),
         expected_inventory_identity="b" * 64,
         result_digest="d" * 64,
@@ -211,10 +224,22 @@ def test_check_result_family_selection_keeps_256_item_digest_budget_fallback(
         cwd=tmp_path,
         environment=_environment(),
         check_id="family:digest-identity-bound",
-        claim="Verify the 256-identity digest path retains its bounded compatibility fallback",
+        claim="Verify native family selection digest at the complete 256-identity bound",
     )
 
-    assert response is None
+    assert response is not None
+    assert response["supported"] is True
+    family = response["family_metadata"]
+    assert family["supported"] is True
+    assert family["selection_comparison_supported"] is True
+    assert family["selection_matches_expected"] is True
+    assert family["selected_test_identities"] == []
+    projected = mncs_test._family_check_metadata_from_native(response, document)
+    assert projected is not None
+    assert projected["selection_comparison_supported"] is True
+    assert projected["selection_matches_expected"] is True
+    assert projected["selected_test_identities"] == []
+    assert projected["selection_json"] is not None
 
 
 def test_native_check_result_projection_matches_family_contract(
