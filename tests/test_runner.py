@@ -582,6 +582,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0, output.getvalue())
         response = json.loads(output.getvalue())
         self.assertIn("test-check-result-projection.json", native_applications)
+        self.assertIn("test-result-identity.json", native_applications)
         self.assertGreaterEqual(
             sum(name in public_json_apps for name in native_applications),
             2,

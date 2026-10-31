@@ -7008,6 +7008,7 @@ def run_family_check(args: argparse.Namespace) -> int:
     try:
         request = load_family_check_request(resolve_path(args.request, cwd, must_exist=True))
         checks_path = resolve_path(args.checks, cwd, must_exist=True)
+        check_result_environment = native_application_environment(cwd)
         check = load_family_check(
             checks_path,
             check_identity=request["check_identity"],
@@ -7059,7 +7060,17 @@ def run_family_check(args: argparse.Namespace) -> int:
                 )
             result = json.loads(result_path.read_text(encoding="utf-8"))
             produced_check = json.loads(check_path.read_text(encoding="utf-8"))
-            result_digest = sha256_file(result_path)
+            with ArtifactStore(
+                root / "result-digest-store",
+                mncs=args.mncs,
+                cwd=cwd if args.mncs is not None else None,
+                environment=(
+                    check_result_environment if args.mncs is not None else None
+                ),
+            ) as digest_store:
+                result_digest, _digest_method = digest_store.digest_file_with_method(
+                    result_path
+                )
         if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.test-result/1 document")
         if not isinstance(produced_check, dict) or produced_check.get("schema_version") != CHECK_SCHEMA:
@@ -7074,7 +7085,6 @@ def run_family_check(args: argparse.Namespace) -> int:
         expected_inventory = selector.get("inventory_identity")
         if expected_inventory is not None and inventory_identity != expected_inventory:
             raise AdapterError("family check compiler inventory identity is stale")
-        check_result_environment = native_application_environment(cwd)
         check_result_document = check_result(
             result,
             result_digest,
