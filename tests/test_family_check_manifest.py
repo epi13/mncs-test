@@ -101,11 +101,11 @@ def test_native_manifest_sorts_unsorted_selector_identities(tmp_path: Path) -> N
     ).hexdigest()
 
 
-def test_native_manifest_sorts_unsorted_identity_list_at_native_bound(tmp_path: Path) -> None:
+def test_native_manifest_sorts_unsorted_identity_list_at_64_item_bound(tmp_path: Path) -> None:
     source = ROOT / "family-verification-checks-v1.json"
     document = json.loads(source.read_text(encoding="utf-8"))
     selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
-    selected["selector"]["test_identities"] = [f"test-{index:02d}" for index in range(31, -1, -1)]
+    selected["selector"]["test_identities"] = [f"test-{index:02d}" for index in range(63, -1, -1)]
     path = tmp_path / "family-verification-checks-v1.json"
     path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
@@ -124,11 +124,11 @@ def test_native_manifest_sorts_unsorted_identity_list_at_native_bound(tmp_path: 
     ).hexdigest()
 
 
-def test_unsorted_identity_list_above_native_sort_bound_uses_loader(tmp_path: Path) -> None:
+def test_65_item_unsorted_identity_list_uses_loader_fallback(tmp_path: Path) -> None:
     source = ROOT / "family-verification-checks-v1.json"
     document = json.loads(source.read_text(encoding="utf-8"))
     selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
-    selected["selector"]["test_identities"] = [f"test-{index:02d}" for index in range(32, -1, -1)]
+    selected["selector"]["test_identities"] = [f"test-{index:02d}" for index in range(64, -1, -1)]
     path = tmp_path / "family-verification-checks-v1.json"
     path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
