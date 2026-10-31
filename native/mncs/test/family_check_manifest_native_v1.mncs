@@ -481,20 +481,36 @@ fn writer_digest(writer: json_order.JsonOrderWriterV1) -> (result: [byte; up_to 
     return writer_digest_seeded(writer, sha256.init());
 }
 
+fn identity_digest_step(
+    writer: json_order.JsonDigestWriterV1,
+    identities: [[byte; up_to 512]; up_to 256],
+    count: u64,
+    index: u64
+) -> (result: json_order.JsonDigestWriterV1) {
+    if index >= count { return writer; }
+    if index == 0 { return json_order.digest_writer_canonical_string(writer, identities[index]); }
+    let separated: json_order.JsonDigestWriterV1 = json_order.digest_writer_byte(writer, 44);
+    return json_order.digest_writer_canonical_string(separated, identities[index]);
+}
+
 fn identity_array_digest(
     identities: [[byte; up_to 512]; up_to 256],
     count: u64
 ) -> (result: [byte; up_to 64]) {
     if count > 256 { return []; }
-    let writer: json_order.JsonOrderWriterV1 = write_sorted_identities(
-        json_order.writer_empty(), identities, count
-    );
-    if !writer.ok { return []; }
     let domain: [byte; 26] = [
         109,110,99,115,46,116,101,115,116,46,105,100,101,110,116,105,116,121,45,115,101,116,46,118,49,0
     ];
     let tagged: sha256.DigestState = sha256.update_standard(sha256.init(), domain, domain.len);
-    return writer_digest_seeded(writer, tagged);
+    let opening: [byte; 1] = [91];
+    let initial: json_order.JsonDigestWriterV1 = json_order.digest_writer_bytes(
+        json_order.digest_writer_empty(tagged), opening
+    );
+    iterate i up_to 256 carrying writer: json_order.JsonDigestWriterV1 = initial {
+        next writer = identity_digest_step(writer, identities, count, i);
+    }
+    let closing: [byte; 1] = [93];
+    return json_order.digest_writer_finish(json_order.digest_writer_bytes(writer, closing));
 }
 
 fn empty_projection() -> (result: ManifestProjectionV1) {

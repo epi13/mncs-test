@@ -5,11 +5,13 @@
   "module": "mncs.test.family_check_request_native_v1",
   "entry_function": "family_check_request_native_app_v1",
   "profile": "0.18",
-  "interface_identity": "9df6e4ef48a2020aa1522cf56ae50b3d4faa7925398ad3507160da1beb567a6c",
+  "interface_identity": "86c8234f3ea3f9dd740069593f412a318dffd2a81e8510854b887c1846435805",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }

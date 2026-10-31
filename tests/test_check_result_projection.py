@@ -113,10 +113,11 @@ def test_check_result_family_selection_keeps_256_item_budget_fallback(
 def test_check_result_family_selection_uses_compact_digest_at_128_item_bound(
     tmp_path: Path,
 ) -> None:
-    expected = [f"test-{index:03d}" for index in range(125)] + [
+    expected = [f"test-{index:03d}" for index in range(124)] + [
         'identity-quote-"-backslash-\\',
         "identity-line\nbreak",
         "identity-unicode-🛰️",
+        "identity-controls-\x01\x08\x09\x0b\x0c\r",
     ]
     expected.sort()
     result = {
@@ -148,6 +149,41 @@ def test_check_result_family_selection_uses_compact_digest_at_128_item_bound(
     assert family["supported"] is True
     assert family["selection_comparison_supported"] is True
     assert family["selection_matches_expected"] is True
+
+
+def test_check_result_family_digest_preserves_unsorted_selection_rejection(
+    tmp_path: Path,
+) -> None:
+    expected = ["mncs:test-case:a", "mncs:test-case:z"]
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "classification": "pass",
+        "failure_class": "none",
+        "summary": {},
+        "tests": [],
+        "selection": {"selected_test_identities": list(reversed(expected))},
+        "test_inventory": {"inventory_identity": "b" * 64},
+    }
+
+    response = mncs_test._native_check_result_json_response(
+        mncs_test.json_bytes(result),
+        expected_test_identities_digest=_identity_set_digest(expected),
+        expected_inventory_identity="b" * 64,
+        result_digest="d" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:digest-unsorted-identity-rejection",
+        claim="Verify native digest mode preserves strict identity ordering",
+    )
+
+    assert response is not None
+    family = response["family_metadata"]
+    assert family["supported"] is False
+    assert family["selection_comparison_supported"] is False
+    assert family["selection_matches_expected"] is False
 
 
 def test_check_result_family_selection_keeps_256_item_digest_budget_fallback(

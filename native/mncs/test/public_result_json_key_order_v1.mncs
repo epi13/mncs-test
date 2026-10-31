@@ -103,6 +103,13 @@ record JsonOrderWriterV1 {
     ok: bool
 }
 
+record JsonDigestWriterV1 {
+    digest: sha256.DigestState,
+    bytes: [byte; 64],
+    length: u64,
+    ok: bool
+}
+
 record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
 
 record JsonOrderChunkBuilderV1 {
@@ -820,6 +827,90 @@ fn write_canonical_string(writer: JsonOrderWriterV1, value: [byte; up_to 512]) -
         next current = canonical_string_step(current, value[i]);
     }
     return writer_byte(current, 34);
+}
+
+fn digest_writer_empty(initial: sha256.DigestState) -> (result: JsonDigestWriterV1) {
+    return JsonDigestWriterV1 { digest: initial, bytes: [0; 64], length: 0, ok: true };
+}
+
+fn digest_writer_flush(writer: JsonDigestWriterV1) -> (result: JsonDigestWriterV1) {
+    if !writer.ok || writer.length == 0 { return writer; }
+    let digest: sha256.DigestState = sha256.update_standard(
+        writer.digest, writer.bytes[0..writer.length], writer.length
+    );
+    return JsonDigestWriterV1 { digest: digest, bytes: [0; 64], length: 0, ok: true };
+}
+
+fn digest_writer_store_byte(writer: JsonDigestWriterV1, value: byte) -> (result: JsonDigestWriterV1) {
+    return JsonDigestWriterV1 {
+        ..writer,
+        bytes: replace(writer.bytes, writer.length, value),
+        length: writer.length +% 1
+    };
+}
+
+fn digest_writer_byte(writer: JsonDigestWriterV1, value: byte) -> (result: JsonDigestWriterV1) {
+    if !writer.ok { return writer; }
+    if writer.length >= 64 {
+        return digest_writer_store_byte(digest_writer_flush(writer), value);
+    }
+    return digest_writer_store_byte(writer, value);
+}
+
+fn digest_writer_bytes(
+    writer: JsonDigestWriterV1,
+    values: [byte; up_to 64]
+) -> (result: JsonDigestWriterV1) {
+    iterate i over values carrying current: JsonDigestWriterV1 = writer {
+        next current = digest_writer_byte(current, values[i]);
+    }
+    return current;
+}
+
+fn digest_writer_string_step(
+    writer: JsonDigestWriterV1,
+    value: byte
+) -> (result: JsonDigestWriterV1) {
+    // Stream the common unescaped byte directly. Materializing the six-byte
+    // escape record for every ordinary UTF-8 byte inflated the VM work even
+    // though only control characters need that representation.
+    if value == 34 || value == 92 {
+        return digest_writer_byte(digest_writer_byte(writer, 92), value);
+    }
+    if value == 8 { return digest_writer_byte(digest_writer_byte(writer, 92), 98); }
+    if value == 9 { return digest_writer_byte(digest_writer_byte(writer, 92), 116); }
+    if value == 10 { return digest_writer_byte(digest_writer_byte(writer, 92), 110); }
+    if value == 12 { return digest_writer_byte(digest_writer_byte(writer, 92), 102); }
+    if value == 13 { return digest_writer_byte(digest_writer_byte(writer, 92), 114); }
+    if value < 32 {
+        let number: u64 = value as u64;
+        let escaped: JsonDigestWriterV1 = digest_writer_byte(writer, 92);
+        let marker: JsonDigestWriterV1 = digest_writer_byte(escaped, 117);
+        let first_zero: JsonDigestWriterV1 = digest_writer_byte(marker, 48);
+        let second_zero: JsonDigestWriterV1 = digest_writer_byte(first_zero, 48);
+        let high: JsonDigestWriterV1 = digest_writer_byte(
+            second_zero, canonical_lower_hex_digit(number / 16)
+        );
+        return digest_writer_byte(high, canonical_lower_hex_digit(number % 16));
+    }
+    return digest_writer_byte(writer, value);
+}
+
+fn digest_writer_canonical_string(
+    writer: JsonDigestWriterV1,
+    value: [byte; up_to 512]
+) -> (result: JsonDigestWriterV1) {
+    let opened: JsonDigestWriterV1 = digest_writer_byte(writer, 34);
+    iterate i over value carrying current: JsonDigestWriterV1 = opened {
+        next current = digest_writer_string_step(current, value[i]);
+    }
+    return digest_writer_byte(current, 34);
+}
+
+fn digest_writer_finish(writer: JsonDigestWriterV1) -> (result: [byte; up_to 64]) {
+    if !writer.ok { return []; }
+    let flushed: JsonDigestWriterV1 = digest_writer_flush(writer);
+    return encode_digest(sha256.finalize_standard(flushed.digest));
 }
 
 fn is_array_nil(value: JsonValueV1) -> (result: bool) {

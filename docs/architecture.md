@@ -396,6 +396,19 @@ CheckResult bound. A 256-item digest comparison still exceeds the existing
 manifest and CheckResult suites pass, as do the affected public-result binding
 regressions and the compiler-backed live family-check consumer.
 
+P-029 reduces the state and per-identity work on that digest path without
+changing its 8,000,000-step ceiling. The shared Test JSON writer hashes
+canonical strings directly in 64-byte windows and streams ordinary UTF-8 bytes
+without creating an escape record. CheckResult stores identities in a bounded
+list only when the list projection is needed; digest mode leaves that
+accumulator empty and validates strict ordering against decoded byte windows,
+without widening each identity to a 512-byte row. Differential tests cover
+control-character escaping, Unicode, quotes, backslashes, unsorted identity
+rejection, and the existing 128-item digest result. The 256-item CheckResult
+case still takes its compatibility fallback at the enforced 8,000,000-step
+limit; no limit was raised. The 256-item manifest sort and canonical digest
+remain native and pass their independent loader comparison.
+
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
 fields into the request and formats the final result envelope; out-of-contract

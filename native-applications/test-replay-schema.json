@@ -5,11 +5,13 @@
   "module": "mncs.test.replay_schema_v1",
   "entry_function": "replay_schema_app_v1",
   "profile": "0.18",
-  "interface_identity": "5065e182d483dd4d2c4464d050ca14d06cbdcfafba07da47a23b6fb27ecebd0c",
+  "interface_identity": "061d4dd870e68ebe15e225082a666932d60389f9ac6ffda69715785b40837438",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }

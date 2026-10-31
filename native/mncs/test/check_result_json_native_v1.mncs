@@ -144,6 +144,11 @@ enum TokenTestRowsListV1 {
     Cons { head: check_result.CheckTestV1, tail: TokenTestRowsListV1 }
 }
 
+enum TokenIdentityRowsListV1 {
+    Nil,
+    Cons { head: [byte; up_to 512], tail: TokenIdentityRowsListV1 }
+}
+
 record TokenTestRowsV1 {
     valid: bool,
     rows: TokenTestRowsListV1,
@@ -153,6 +158,11 @@ record TokenTestRowsV1 {
 record TokenRowsBuildStateV1 {
     rows: [check_result.CheckTestV1; 256],
     source: TokenTestRowsListV1
+}
+
+record TokenIdentityRowsBuildStateV1 {
+    rows: [[byte; up_to 512]; 256],
+    source: TokenIdentityRowsListV1
 }
 
 record ExtractedTestResultV1 {
@@ -189,12 +199,12 @@ record CheckResultTokenStateV1 {
     selection_span: TokenValueSpanV1,
     selected_test_identities_seen: bool,
     selected_test_identities_valid: bool,
-    selected_test_identities: [[byte; up_to 512]; 256],
+    selected_test_identities: TokenIdentityRowsListV1,
     selected_test_identity_count: u64,
     selection_digest_mode: bool,
     selection_digest_ordered: bool,
-    selected_identity_previous: [byte; up_to 512],
-    selection_identity_digest_state: sha256.DigestState,
+    selected_identity_previous: TextValueV1,
+    selection_identity_digest_state: json_order.JsonDigestWriterV1,
     selected_test_identities_digest: [byte; up_to 64],
     test_inventory_seen: bool,
     test_inventory_valid: bool,
@@ -735,21 +745,52 @@ fn empty_projection_request(metadata: CheckResultJsonNativeRequestV1) -> (result
     };
 }
 
-fn initial_selection_identity_digest(selection_digest_mode: bool) -> (result: sha256.DigestState) {
-    if !selection_digest_mode { return sha256.init(); }
+fn initial_selection_identity_digest(selection_digest_mode: bool) -> (result: json_order.JsonDigestWriterV1) {
+    if !selection_digest_mode { return json_order.digest_writer_empty(sha256.init()); }
     let domain: [byte; 26] = [
         109,110,99,115,46,116,101,115,116,46,105,100,101,110,116,105,116,121,45,115,101,116,46,118,49,0
     ];
     let opening: [byte; 1] = [91];
     let tagged: sha256.DigestState = sha256.update_standard(sha256.init(), domain, domain.len);
-    return sha256.update_standard(tagged, opening, opening.len);
+    return json_order.digest_writer_bytes(json_order.digest_writer_empty(tagged), opening);
+}
+
+fn identity_digest_separator(
+    digest: json_order.JsonDigestWriterV1,
+    identity_count: u64
+) -> (result: json_order.JsonDigestWriterV1) {
+    if identity_count == 0 { return digest; }
+    return json_order.digest_writer_byte(digest, 44);
+}
+
+fn identity_text_compare_step(
+    order: i64,
+    left: TextValueV1,
+    right: TextValueV1,
+    index: u64,
+    common: u64
+) -> (result: i64) {
+    if order != 0 || index >= common { return order; }
+    if left.bytes[index] < right.bytes[index] { return -1; }
+    if left.bytes[index] > right.bytes[index] { return 1; }
+    return order;
+}
+
+fn identity_text_compare(left: TextValueV1, right: TextValueV1) -> (result: i64) {
+    let common: u64 = select(left.length < right.length, left.length, right.length);
+    iterate i over left.bytes[0..common] carrying order: i64 = 0 {
+        next order = identity_text_compare_step(order, left, right, i, common);
+    }
+    if order != 0 { return order; }
+    if left.length < right.length { return -1; }
+    if left.length > right.length { return 1; }
+    return 0;
 }
 
 fn empty_token_state(selection_digest_mode: bool) -> (result: CheckResultTokenStateV1) {
     let zero_summary: check_result.CheckSummaryV1 = check_result.CheckSummaryV1 {
         passed: 0, failed: 0, skipped: 0
     };
-    let empty_identity: [byte; up_to 512] = [];
     return CheckResultTokenStateV1 {
         cursor: json_cursor.init(),
         scanner_string_has_escape: false,
@@ -777,11 +818,11 @@ fn empty_token_state(selection_digest_mode: bool) -> (result: CheckResultTokenSt
         selection_span: empty_span(),
         selected_test_identities_seen: false,
         selected_test_identities_valid: true,
-        selected_test_identities: [empty_identity; 256],
+        selected_test_identities: TokenIdentityRowsListV1.Nil,
         selected_test_identity_count: 0,
         selection_digest_mode: selection_digest_mode,
         selection_digest_ordered: true,
-        selected_identity_previous: empty_identity,
+        selected_identity_previous: empty_text(),
         selection_identity_digest_state: initial_selection_identity_digest(selection_digest_mode),
         selected_test_identities_digest: [],
         test_inventory_seen: false,
@@ -1315,51 +1356,35 @@ fn token_store_scalar(
                 selection_digest_ordered: false
             };
         }
-        let row: [byte; up_to 512] = widen_text_512(identity.bytes, identity.length);
         if state.selection_digest_mode {
+            // Compare raw decoded windows. Digest mode still requires strict
+            // order, but must not widen each short identity to 512 bytes.
             let ordered: bool = scalar.selected_test_identity_count == 0
-                || identity_sort.compare(scalar.selected_identity_previous, row) < 0;
-            let separator: [byte; 1] = [44];
-            let digest_before_identity: sha256.DigestState = select(
-                scalar.selected_test_identity_count == 0,
+                || identity_text_compare(scalar.selected_identity_previous, identity) < 0;
+            let digest_before_identity: json_order.JsonDigestWriterV1 = identity_digest_separator(
                 scalar.selection_identity_digest_state,
-                sha256.update_standard(
-                    scalar.selection_identity_digest_state, separator, separator.len
-                )
+                scalar.selected_test_identity_count
             );
-            let identity_writer: json_order.JsonOrderWriterV1 = json_order.write_canonical_string(
-                json_order.writer_empty(), identity.bytes
-            );
-            if !identity_writer.ok {
-                return CheckResultTokenStateV1 {
-                    ..scalar,
-                    selected_test_identities_valid: false,
-                    selection_digest_ordered: false
-                };
-            }
-            let digest_after_identity: sha256.DigestState = json_order.digest_writer_seeded(
-                identity_writer, digest_before_identity
+            let digest_after_identity: json_order.JsonDigestWriterV1 = json_order.digest_writer_canonical_string(
+                digest_before_identity, identity.bytes
             );
             return CheckResultTokenStateV1 {
                 ..scalar,
                 selected_test_identity_count: scalar.selected_test_identity_count +% 1,
                 selection_digest_ordered: scalar.selection_digest_ordered && ordered,
-                selected_identity_previous: row,
+                selected_identity_previous: identity,
                 selection_identity_digest_state: digest_after_identity
             };
         }
-        let safe_index: u64 = select(
-            scalar.selected_test_identity_count < 256,
-            scalar.selected_test_identity_count,
-            255
-        );
-        let identities: [[byte; up_to 512]; 256] = replace(
-            scalar.selected_test_identities, safe_index, row
-        );
+        let row: [byte; up_to 512] = widen_text_512(identity.bytes, identity.length);
+        let identities: TokenIdentityRowsListV1 = TokenIdentityRowsListV1.Cons {
+            head: row, tail: scalar.selected_test_identities
+        };
         return CheckResultTokenStateV1 {
             ..scalar,
             selected_test_identities: identities,
-            selected_test_identity_count: scalar.selected_test_identity_count +% 1
+            selected_test_identity_count: scalar.selected_test_identity_count +% 1,
+            selected_identity_previous: identity
         };
     }
     if context == 11 && tag == 1 {
@@ -1410,15 +1435,12 @@ fn token_close_container(
         };
     }
     if context == 10 {
-        let closing: [byte; 1] = [93];
-        let digest_finished: sha256.DigestState = sha256.update_standard(
-            state.selection_identity_digest_state, closing, closing.len
+        let digest_finished: json_order.JsonDigestWriterV1 = json_order.digest_writer_byte(
+            state.selection_identity_digest_state, 93
         );
         return CheckResultTokenStateV1 {
             ..closed,
-            selected_test_identities_digest: json_order.encode_digest(
-                sha256.finalize_standard(digest_finished)
-            )
+            selected_test_identities_digest: json_order.digest_writer_finish(digest_finished)
         };
     }
     return closed;
@@ -1904,14 +1926,44 @@ fn sort_selected_identities(
     return sorted.values;
 }
 
+fn selected_identity_rows_materialize_step(
+    state: TokenIdentityRowsBuildStateV1,
+    count: u64,
+    index: u64
+) -> (result: TokenIdentityRowsBuildStateV1) {
+    return match state.source {
+        TokenIdentityRowsListV1.Nil => state,
+        TokenIdentityRowsListV1.Cons { head: head, tail: tail } =>
+            TokenIdentityRowsBuildStateV1 {
+                rows: replace(state.rows, count -% 1 -% index, head),
+                source: tail
+            }
+    };
+}
+
+fn selected_identities_fixed(
+    selected: TokenIdentityRowsListV1,
+    count: u64
+) -> (result: [[byte; up_to 512]; 256]) {
+    let empty: [byte; up_to 512] = [];
+    let initial: TokenIdentityRowsBuildStateV1 = TokenIdentityRowsBuildStateV1 {
+        rows: [empty; 256], source: selected
+    };
+    iterate i up_to 256 carrying values: TokenIdentityRowsBuildStateV1 = initial {
+        next values = selected_identity_rows_materialize_step(values, count, i);
+    }
+    return values.rows;
+}
+
 fn selected_identities_match_expected(
-    selected: [[byte; up_to 512]; 256],
+    selected: TokenIdentityRowsListV1,
     selected_count: u64,
     expected: [[byte; up_to 512]; up_to 256]
 ) -> (result: bool) {
     if selected_count != expected.len { return false; }
+    let fixed: [[byte; up_to 512]; 256] = selected_identities_fixed(selected, selected_count);
     let selected_values: identity_sort.IdentitySortResultV1 = identity_sort.IdentitySortResultV1 {
-        values: selected, count: selected_count, supported: true
+        values: fixed, count: selected_count, supported: true
     };
     if identity_sort.strictly_increasing(selected_values) {
         iterate i over expected carrying matches: bool = true {
@@ -1920,7 +1972,7 @@ fn selected_identities_match_expected(
         return matches;
     }
     let sorted: [[byte; up_to 512]; 256] = sort_selected_identities(
-        selected, selected_count
+        fixed, selected_count
     );
     iterate i over expected carrying matches: bool = true {
         next matches = matches && identity_sort.compare(sorted[i], expected[i]) == 0;
@@ -1966,8 +2018,11 @@ fn selection_matches_expectation(
 }
 
 fn selected_identity_output(state: CheckResultTokenStateV1) -> (result: [[byte; up_to 512]; up_to 256]) {
-    if state.selection_digest_mode { return state.selected_test_identities[0..0]; }
-    return state.selected_test_identities[0..state.selected_test_identity_count];
+    if state.selection_digest_mode { return []; }
+    let fixed: [[byte; up_to 512]; 256] = selected_identities_fixed(
+        state.selected_test_identities, state.selected_test_identity_count
+    );
+    return fixed[0..state.selected_test_identity_count];
 }
 
 fn inventory_identity_matches_expected(
