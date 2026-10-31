@@ -101,6 +101,40 @@ def test_family_request_dispatch_skips_the_python_tree_loader_for_supported_inpu
     assert projected == expected
 
 
+def test_escaped_request_scalars_use_native_projection(tmp_path: Path) -> None:
+    raw = (
+        b'{"schema_version":"mncs.family-check-request/1","check_identity":"mncs-test:verification-plan\\u002dcontract",'
+        b'"contract_identity":"mncs.verification-plan\\/1","contract_revision":"1\\u002e0",'
+        b'"verification_plan_id":"\\u0061'
+        + b"a" * 63
+        + b'","family_graph_identity":"\\u0062'
+        + b"b" * 63
+        + b'","edge_fingerprint":"\\u0063'
+        + b"c" * 63
+        + b'","source_change_sha256":"\\u0064'
+        + b"d" * 63
+        + b'"}'
+    )
+    expected = {**_request(), "contract_revision": "1.0"}
+    path = tmp_path / "request.json"
+    path.write_bytes(raw)
+
+    assert mncs_test.load_family_check_request(path) == expected
+    assert _project(path) == expected
+    with mock.patch.object(
+        mncs_test,
+        "load_family_check_request",
+        side_effect=AssertionError("escaped supported values should stay on the native path"),
+    ):
+        routed = mncs_test._load_family_check_request(
+            path,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+    assert routed == expected
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -110,18 +144,6 @@ def test_family_request_dispatch_skips_the_python_tree_loader_for_supported_inpu
                 **_request(),
                 "future_metadata": {"owner": "another consumer", "flags": [True, None]},
             },
-        ),
-        (
-            b'{"schema_version":"mncs.family-check-request/1","check_identity":"mncs-test:verification-plan-contract","contract_identity":"mncs.verification-plan/1","contract_revision":"1\\u002e0","verification_plan_id":"'
-            + b"a" * 64
-            + b'","family_graph_identity":"'
-            + b"b" * 64
-            + b'","edge_fingerprint":"'
-            + b"c" * 64
-            + b'","source_change_sha256":"'
-            + b"d" * 64
-            + b'"}',
-            {**_request(), "contract_revision": "1.0"},
         ),
         (
             b'{"schema_version":"mncs.family-check-request/1","check_identity":"old","check_identity":"mncs-test:verification-plan-contract","contract_identity":"mncs.verification-plan/1","contract_revision":"1","verification_plan_id":"'
@@ -137,7 +159,7 @@ def test_family_request_dispatch_skips_the_python_tree_loader_for_supported_inpu
         ),
     ],
 )
-def test_forward_compatible_or_escaped_forms_keep_the_host_fallback(
+def test_forward_compatible_or_duplicate_fields_keep_the_host_fallback(
     tmp_path: Path,
     raw: bytes | None,
     expected: dict[str, object],

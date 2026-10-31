@@ -307,9 +307,11 @@ P-021 moves the family-check request's supported flat JSON projection into
 required scalar fields, and lowercase digest fields directly from bounded JSON
 tokens, then returns only the eight strings consumed by the runner. Requests
 up to 8,192 bytes with plain string values no longer pass through Python's
-`json.loads` value tree. Escaped values, duplicate keys, unknown extension
-fields, oversized requests, and other unsupported forms retain the established
-`load_family_check_request` compatibility path and its validation behavior.
+`json.loads` value tree. P-023 adds native decoding for escaped strings whose
+raw representation is at most 256 bytes; unescaped values retain the 512-byte
+bound. Duplicate keys, unknown extension fields, oversized requests, and
+other unsupported forms retain the established `load_family_check_request`
+compatibility path and its validation behavior.
 The native request app reuses Test's existing JSON token parser; no duplicate
 Stdlib parser was added. Differential and compatibility tests cover the
 supported projection and fallback boundaries, and the compiler-backed live
@@ -327,6 +329,17 @@ selector identities, quote/backslash/control escaping, a Unicode surrogate
 pair, two-item and 32-item unsorted lists, and native fallback behavior. The
 manifest suite passes with the integrated Stdlib JSON cursor provider and
 release MNCS toolchain.
+
+P-023 extends `mncs.test.family_check_request_native_v1` to decode valid escaped
+JSON string values through `json_order.decode_key`, preserving the runner's
+consumed scalar values and lowercase digest checks. The native decoder handles
+escaped values with raw content through 256 bytes; the existing plain-text
+path retains its 512-byte bound. Differential tests include escaped identity,
+revision, slash, digest-prefix, and Unicode scalar forms, and prove supported
+escaped requests bypass `load_family_check_request`. Duplicate keys, extension
+fields, malformed values, and over-bound requests retain the existing Python
+validation path. The complete compiler-backed family-check command passes
+with the updated request app and integrated Stdlib JSON cursor provider.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
