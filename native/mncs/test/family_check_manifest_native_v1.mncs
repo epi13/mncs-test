@@ -150,33 +150,11 @@ fn copy_text_step(
 }
 
 fn text_string_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
-    if length <= 256 {
-        let decoded: json_order.KeyV1 = json_order.decode_key(document, start, length);
-        let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: decoded.valid };
-        iterate i up_to 256 carrying copied: TextCopyV1 = initial {
-            next copied = copy_decoded_key_byte(copied, decoded, i);
-        }
-        let value: TextCopyV1 = copied;
-        return TextValueV1 {
-            bytes: value.bytes[0..value.length],
-            length: value.length,
-            valid: decoded.valid && value.length == decoded.ordered_length
-        };
-    }
-    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: length <= 512 };
-    iterate i up_to 512 carrying current: TextCopyV1 = initial {
-        next current = copy_text_step(current, document, start, length, i);
-    }
-    let copied: TextCopyV1 = current;
-    return TextValueV1 { bytes: copied.bytes[0..copied.length], length: copied.length, valid: copied.valid && copied.length == length };
-}
-
-fn copy_decoded_key_byte(state: TextCopyV1, key: json_order.KeyV1, index: u64) -> (result: TextCopyV1) {
-    if index >= key.ordered_length || !state.valid { return state; }
-    return TextCopyV1 {
-        ..state,
-        bytes: replace(state.bytes, state.length, key.ordered[index]),
-        length: state.length +% 1
+    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(document, start, length);
+    return TextValueV1 {
+        bytes: decoded.bytes[0..decoded.length],
+        length: decoded.length,
+        valid: decoded.valid
     };
 }
 

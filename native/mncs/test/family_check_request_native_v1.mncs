@@ -1,9 +1,9 @@
 mncs 0.18;
 
 // Project the fixed scalar identity fields consumed by the family-check runner
-// directly from bounded JSON tokens. Short escaped strings use the existing
-// native JSON decoder; forward-compatible and over-bound forms retain the
-// Python compatibility loader.
+// directly from bounded JSON tokens. The shared Test decoder handles raw
+// strings through 512 bytes; forward-compatible and over-bound forms retain
+// the Python compatibility loader.
 module mncs.test.family_check_request_native_v1;
 
 use mncs.std.application.v1;
@@ -29,7 +29,6 @@ record FamilyCheckRequestNativeResultV1 {
 }
 
 record FieldLookupV1 { found: bool, value: json_order.JsonValueV1 }
-record TextCopyV1 { bytes: [byte; 512], length: u64, valid: bool }
 record TextValueV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
 record ObjectScanV1 { remaining: json_order.JsonValueV1, count: u64, valid: bool }
 
@@ -120,60 +119,18 @@ fn has_exact_fields(fields: json_order.JsonValueV1) -> (result: bool) {
     return current.valid && current.count == 8 && json_order.is_object_nil(current.remaining);
 }
 
-fn copy_text_step(state: TextCopyV1, document: json_order.JsonTokenDocumentV1, start: u64, raw_length: u64, index: u64) -> (result: TextCopyV1) {
-    if index >= raw_length || !state.valid { return state; }
-    let value: byte = json_order.located_byte(document, start +% index);
-    if value == 92 { return TextCopyV1 { ..state, valid: false }; }
-    return TextCopyV1 {
-        ..state,
-        bytes: replace(state.bytes, state.length, value),
-        length: state.length +% 1
-    };
-}
-
-fn plain_text_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
-    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: length <= 512 };
-    iterate i up_to 512 carrying current: TextCopyV1 = initial {
-        next current = copy_text_step(current, document, start, length, i);
-    }
-    let copied: TextCopyV1 = current;
-    return TextValueV1 {
-        bytes: copied.bytes[0..copied.length],
-        length: copied.length,
-        valid: copied.valid && copied.length == length
-    };
-}
-
-fn copy_decoded_key_byte(state: TextCopyV1, key: json_order.KeyV1, index: u64) -> (result: TextCopyV1) {
-    if index >= key.ordered_length || !state.valid { return state; }
-    return TextCopyV1 {
-        ..state,
-        bytes: replace(state.bytes, state.length, key.ordered[index]),
-        length: state.length +% 1
-    };
-}
-
 fn decoded_text_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
-    let decoded: json_order.KeyV1 = json_order.decode_key(document, start, length);
-    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: decoded.valid };
-    iterate i up_to 256 carrying copied: TextCopyV1 = initial {
-        next copied = copy_decoded_key_byte(copied, decoded, i);
-    }
+    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(document, start, length);
     return TextValueV1 {
-        bytes: copied.bytes[0..copied.length],
-        length: copied.length,
-        valid: decoded.valid && copied.length == decoded.ordered_length
+        bytes: decoded.bytes[0..decoded.length],
+        length: decoded.length,
+        valid: decoded.valid
     };
-}
-
-fn string_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
-    if length <= 256 { return decoded_text_value(document, start, length); }
-    return plain_text_value(document, start, length);
 }
 
 fn text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
     return match value {
-        json_order.JsonValueV1.String { start: start, length: length } => string_value(document, start, length),
+        json_order.JsonValueV1.String { start: start, length: length } => decoded_text_value(document, start, length),
         json_order.JsonValueV1.Empty => TextValueV1 { bytes: [], length: 0, valid: false },
         json_order.JsonValueV1.Null => TextValueV1 { bytes: [], length: 0, valid: false },
         json_order.JsonValueV1.Raw { start: start, length: length } => TextValueV1 { bytes: [], length: 0, valid: false },

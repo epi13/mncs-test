@@ -68,12 +68,14 @@ record ParseStateV1 {
 }
 
 record DecodeStateV1 {
-    bytes: [byte; 256],
+    bytes: [byte; 512],
     length: u64,
     escaped: bool,
     skip: u64,
     valid: bool
 }
+record KeyCopyV1 { bytes: [byte; 256], length: u64 }
+record JsonDecodedStringV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
 
 record LocatedByteV1 { base: u64, value: byte }
 
@@ -189,7 +191,7 @@ fn decode_hex4(document: JsonTokenDocumentV1, start: u64, index: u64) -> (result
 }
 
 fn decoded_byte(state: DecodeStateV1, value: byte) -> (result: DecodeStateV1) {
-    if !state.valid || state.length >= 256 {
+    if !state.valid || state.length >= 512 {
         return DecodeStateV1 { ..state, valid: false };
     }
     return DecodeStateV1 {
@@ -277,6 +279,14 @@ fn decode_key_step(
     return decoded_byte(state, value);
 }
 
+fn copy_decoded_key_byte(state: KeyCopyV1, decoded: DecodeStateV1, index: u64) -> (result: KeyCopyV1) {
+    if index >= decoded.length || index >= 256 { return state; }
+    return KeyCopyV1 {
+        bytes: replace(state.bytes, state.length, decoded.bytes[index]),
+        length: state.length +% 1
+    };
+}
+
 fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64, common: u64) -> (result: i64) {
     if index >= common || order != 0 { return order; }
     if left.ordered[index] < right.ordered[index] { return -1; }
@@ -286,17 +296,36 @@ fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64, common: u
 
 fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: KeyV1) {
     let initial: DecodeStateV1 = DecodeStateV1 {
-        bytes: [0; 256], length: 0, escaped: false, skip: 0, valid: true
+        bytes: [0; 512], length: 0, escaped: false, skip: 0, valid: true
     };
     iterate i up_to 256 carrying decoded: DecodeStateV1 = initial {
         next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
     }
+    let key_initial: KeyCopyV1 = KeyCopyV1 { bytes: [0; 256], length: 0 };
+    iterate i up_to 256 carrying key_bytes: KeyCopyV1 = key_initial {
+        next key_bytes = copy_decoded_key_byte(key_bytes, decoded, i);
+    }
     return KeyV1 {
         raw_start: raw_start,
         raw_length: raw_length,
-        ordered: decoded.bytes[0..decoded.length],
+        ordered: key_bytes.bytes[0..key_bytes.length],
         ordered_length: decoded.length,
-        valid: raw_length <= 256 && decoded.valid && !decoded.escaped && decoded.skip == 0
+        valid: raw_length <= 256 && decoded.valid && !decoded.escaped
+            && decoded.skip == 0 && key_bytes.length == decoded.length
+    };
+}
+
+fn decode_string(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: JsonDecodedStringV1) {
+    let initial: DecodeStateV1 = DecodeStateV1 {
+        bytes: [0; 512], length: 0, escaped: false, skip: 0, valid: true
+    };
+    iterate i up_to 512 carrying decoded: DecodeStateV1 = initial {
+        next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
+    }
+    return JsonDecodedStringV1 {
+        bytes: decoded.bytes[0..decoded.length],
+        length: decoded.length,
+        valid: raw_length <= 512 && decoded.valid && !decoded.escaped && decoded.skip == 0
     };
 }
 

@@ -188,3 +188,32 @@ def test_native_manifest_decodes_escaped_identity_and_hashes_canonical_definitio
     assert actual["check_definition_identity"] == hashlib.sha256(
         mncs_test.compact_json(compatibility).encode("utf-8")
     ).hexdigest()
+
+
+def test_native_manifest_decodes_escaped_identity_with_raw_text_above_256_bytes(
+    tmp_path: Path,
+) -> None:
+    document = json.loads((ROOT / "family-verification-checks-v1.json").read_text(encoding="utf-8"))
+    selected = next(item for item in document["checks"] if item["identity"] == CHECK_IDENTITY)
+    identity = "test-" + "a" * 50
+    selected["selector"]["test_identities"] = [identity]
+    escaped_identity = "".join(f"\\u{ord(value):04x}" for value in identity).encode("ascii")
+    assert len(escaped_identity) == 330
+    raw = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw = raw.replace(identity.encode("ascii"), escaped_identity, 1)
+    path = tmp_path / "family-verification-checks-v1.json"
+    path.write_bytes(raw)
+
+    compatibility = mncs_test.load_family_check(
+        path,
+        check_identity=CHECK_IDENTITY,
+        contract_identity=CONTRACT_IDENTITY,
+        repository_id="mncs-test",
+    )
+    actual = _project(path)
+
+    assert actual is not None
+    assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["check_definition_identity"] == hashlib.sha256(
+        mncs_test.compact_json(compatibility).encode("utf-8")
+    ).hexdigest()

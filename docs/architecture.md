@@ -307,9 +307,9 @@ P-021 moves the family-check request's supported flat JSON projection into
 required scalar fields, and lowercase digest fields directly from bounded JSON
 tokens, then returns only the eight strings consumed by the runner. Requests
 up to 8,192 bytes with plain string values no longer pass through Python's
-`json.loads` value tree. P-023 adds native decoding for escaped strings whose
-raw representation is at most 256 bytes; unescaped values retain the 512-byte
-bound. Duplicate keys, unknown extension fields, oversized requests, and
+`json.loads` value tree. P-023 initially added native decoding for escaped
+strings; P-024 raises the shared raw-string bound to 512 bytes. Duplicate keys,
+unknown extension fields, oversized requests, and
 other unsupported forms retain the established `load_family_check_request`
 compatibility path and its validation behavior.
 The native request app reuses Test's existing JSON token parser; no duplicate
@@ -331,15 +331,27 @@ manifest suite passes with the integrated Stdlib JSON cursor provider and
 release MNCS toolchain.
 
 P-023 extends `mncs.test.family_check_request_native_v1` to decode valid escaped
-JSON string values through `json_order.decode_key`, preserving the runner's
-consumed scalar values and lowercase digest checks. The native decoder handles
-escaped values with raw content through 256 bytes; the existing plain-text
-path retains its 512-byte bound. Differential tests include escaped identity,
-revision, slash, digest-prefix, and Unicode scalar forms, and prove supported
-escaped requests bypass `load_family_check_request`. Duplicate keys, extension
-fields, malformed values, and over-bound requests retain the existing Python
-validation path. The complete compiler-backed family-check command passes
-with the updated request app and integrated Stdlib JSON cursor provider.
+JSON string values through the Test token module, preserving the runner's
+consumed scalar values and lowercase digest checks. At that point, escaped
+values had a 256-byte raw bound and plain values retained 512 bytes.
+Differential tests include escaped identity, revision, slash, digest-prefix,
+and Unicode scalar forms, and prove supported escaped requests bypass
+`load_family_check_request`. Duplicate keys, extension fields, malformed
+values, and over-bound requests retain the existing Python validation path.
+The complete compiler-backed family-check command passes with the updated
+request app and integrated Stdlib JSON cursor provider.
+
+P-024 extracts the Test-owned JSON string decoding path into the shared
+`json_order.decode_string` capability. Both the family-check manifest and
+request projectors now use the same bounded escape, surrogate-pair, and UTF-8
+decoder, removing their duplicated projector-local value-copy and decode paths.
+The decoder admits raw string content up to 512 bytes; JSON object keys retain
+their existing 256-byte ordering limit. Independent comparisons cover a
+510-byte escaped request string, fallback above the bound, and a 330-byte
+escaped manifest identity with its loader-normalized digest. The related
+request, manifest, and public-result suites pass against the release MNCS
+toolchain and integrated Stdlib JSON cursor provider; the compiler-backed live
+family-check command also passes with the shared decoder in both projectors.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

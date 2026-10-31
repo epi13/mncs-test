@@ -135,6 +135,34 @@ def test_escaped_request_scalars_use_native_projection(tmp_path: Path) -> None:
     assert routed == expected
 
 
+def test_shared_string_decoder_accepts_512_raw_bytes_and_falls_back_above(tmp_path: Path) -> None:
+    expected_revision = "1" + "a" * 84
+    escaped_revision = "".join(f"\\u{ord(value):04x}" for value in expected_revision).encode("ascii")
+    assert len(escaped_revision) == 510
+    expected = {**_request(), "contract_revision": expected_revision}
+    path = tmp_path / "request.json"
+    raw = json.dumps(_request(), sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(raw.replace(b'"contract_revision":"1"', b'"contract_revision":"' + escaped_revision + b'"'))
+
+    assert mncs_test.load_family_check_request(path) == expected
+    assert _project(path) == expected
+
+    over_bound_revision = "1" + "a" * 85
+    over_bound_escape = "".join(f"\\u{ord(value):04x}" for value in over_bound_revision).encode("ascii")
+    assert len(over_bound_escape) == 516
+    over_bound = {**_request(), "contract_revision": over_bound_revision}
+    raw = json.dumps(_request(), sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(raw.replace(b'"contract_revision":"1"', b'"contract_revision":"' + over_bound_escape + b'"'))
+
+    assert _project(path) is None
+    assert mncs_test._load_family_check_request(
+        path,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    ) == over_bound
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
