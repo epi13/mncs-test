@@ -391,13 +391,9 @@ def _decode_public_result_token_tape_chunks(
     return bytes(document)
 
 
-def _public_result_ordering_preflight(value: Any) -> tuple[bool, bool]:
-    """Bound native key ordering and detect when Python key sorting is needed."""
-    maximum = PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES
-    byte_lower_bound = 0
-    value_count = 0
-    candidate = True
-    requires_sorted_keys = False
+def _public_result_ordering_requirements(value: Any) -> tuple[bool, bool]:
+    """Preserve Python key semantics and report whether native sorting is useful."""
+    has_object = False
     active: set[int] = set()
     pending: list[tuple[Any, bool]] = [(value, False)]
 
@@ -407,77 +403,29 @@ def _public_result_ordering_preflight(value: Any) -> tuple[bool, bool]:
             active.remove(id(current))
             continue
 
-        value_count += 1
-        if value_count > PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES:
-            return False, True
-
-        if type(current) is str:
-            if byte_lower_bound + len(current) + 2 > maximum:
-                candidate = False
-            else:
-                try:
-                    byte_lower_bound += len(current.encode("utf-8")) + 2
-                except UnicodeEncodeError:
-                    candidate = False
-        elif isinstance(current, dict):
-            requires_sorted_keys = True
-            if type(current) is not dict:
-                candidate = False
-            count = len(current)
-            byte_lower_bound += 2 + max(0, count - 1) + count
-            if byte_lower_bound > maximum:
-                candidate = False
+        if type(current) is dict:
+            has_object = True
+            if any(type(key) is not str for key in current):
+                return True, True
             identity = id(current)
             if identity in active:
-                candidate = False
-                continue
+                return True, has_object
             active.add(identity)
-            for key in current:
-                if type(key) is not str:
-                    candidate = False
-                    continue
-                if byte_lower_bound + len(key) + 2 > maximum:
-                    candidate = False
-                else:
-                    try:
-                        byte_lower_bound += len(key.encode("utf-8")) + 2
-                    except UnicodeEncodeError:
-                        candidate = False
-                if byte_lower_bound > maximum:
-                    candidate = False
             pending.append((current, True))
             pending.extend((child, False) for child in current.values())
-        elif isinstance(current, (list, tuple)):
-            if type(current) not in (list, tuple):
-                candidate = False
-            count = len(current)
-            byte_lower_bound += 2 + max(0, count - 1)
-            if byte_lower_bound > maximum:
-                candidate = False
+        elif type(current) in (list, tuple):
             identity = id(current)
             if identity in active:
-                candidate = False
-                continue
+                return True, has_object
             active.add(identity)
             pending.append((current, True))
             pending.extend((child, False) for child in current)
-        elif current is None or type(current) in (bool, float):
-            byte_lower_bound += 1
-        elif type(current) is int:
-            bits = abs(current).bit_length()
-            # 0.30102 is a conservative lower approximation to log10(2).
-            byte_lower_bound += max(1, ((bits - 1) * 30102) // 100000 + 1)
-            if current < 0:
-                byte_lower_bound += 1
-        elif isinstance(current, int):
-            candidate = False
-        else:
-            candidate = False
+        elif isinstance(current, (dict, list, tuple)):
+            # Preserve custom-container iteration and key-order behavior in
+            # the compatibility serializer.
+            return True, has_object or isinstance(current, dict)
 
-        if byte_lower_bound > maximum:
-            candidate = False
-
-    return candidate, requires_sorted_keys
+    return False, has_object
 
 
 def _native_public_result_key_order(
@@ -793,16 +741,13 @@ def _native_public_result_payload(
     environment: dict[str, str],
 ) -> tuple[bytes, str] | None:
     """Render bounded values through native tokenization, ordering, and emission."""
-    key_order_candidate, requires_sorted_keys = _public_result_ordering_preflight(value)
+    requires_python_key_order, has_object = _public_result_ordering_requirements(value)
     try:
-        source = compact_json(
-            value,
-            sort_keys=not key_order_candidate and requires_sorted_keys,
-        ).encode("utf-8")
+        source = compact_json(value, sort_keys=requires_python_key_order).encode("utf-8")
     except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
         return None
 
-    if key_order_candidate:
+    if not requires_python_key_order:
         native_tokens = _native_public_result_token_tape(
             source,
             mncs=mncs,
@@ -812,7 +757,7 @@ def _native_public_result_payload(
         if native_tokens is not None:
             return native_tokens, hashlib.sha256(native_tokens).hexdigest()
 
-        if requires_sorted_keys:
+        if has_object:
             ordered = _native_public_result_key_order(
                 source,
                 mncs=mncs,
@@ -821,11 +766,13 @@ def _native_public_result_payload(
             )
             if ordered is not None:
                 source = ordered
-            else:
+            elif len(source) <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
                 try:
                     source = compact_json(value).encode("utf-8")
                 except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
                     return None
+            else:
+                return None
 
     native_document = _native_public_result_document_payload(
         source,

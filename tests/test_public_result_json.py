@@ -449,6 +449,30 @@ def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path)
     _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
+def test_native_token_tape_decides_support_from_the_encoded_document(tmp_path: Path) -> None:
+    value = {"nested": {"z": [3, 2, 1], "a": {"Ω": 1, "A": 2}}}
+    expected = _python_result_bytes(value)
+    with (
+        mock.patch.object(mncs_test, "PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES", 1),
+        mock.patch.object(mncs_test, "PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES", 1),
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert native_app.call_args_list[0].args[0] == (
+        "test-public-result-json-native-token-tape.json"
+    )
+
+
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
     value = {f"key-{index:02d}": chr(65 + index) * 600 for index in reversed(range(10))}
     expected = _python_result_bytes(value)

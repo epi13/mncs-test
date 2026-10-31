@@ -148,11 +148,13 @@ compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_token_tape_v1` receives the compact JSON transport
 chunks and token spans produced by its MNCS cursor application. The Python
 boundary encodes each supported value once so it can cross the structured
-application boundary; it does not project the Python tree into typed tokens or
-sort object keys. MNCS scans the bounded source in four 1 KiB chunks per
-window, carries cursor and JSON validation state between calls, validates the
-token spans, constructs a bounded native value, sorts object keys by decoded
-UTF-8, and writes the public indented JSON with a trailing newline. Flat scalar
+application boundary; a narrow compatibility check preserves Python's key
+ordering for mappings with non-string keys. It does not project the Python
+tree into typed tokens or estimate native token bounds. MNCS scans the bounded
+source in four 1 KiB chunks per window, carries cursor and JSON validation
+state between calls, validates the token spans, constructs a bounded native
+value, sorts object keys by decoded UTF-8, and writes the public indented JSON
+with a trailing newline. Flat scalar
 arrays retain token ranges instead of allocating linked native value nodes.
 This path accepts at most 512 tokens, 65,536 source bytes, depth 12, 64 object
 members, 256-byte decoded keys, 3,072-byte token spans, 65,536 output bytes,
