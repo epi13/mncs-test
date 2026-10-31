@@ -860,6 +860,7 @@ class RunnerTests(unittest.TestCase):
                 timeout_seconds=120,
             )
             native_applications: list[str] = []
+            family_manifest_results: list[dict] = []
             native_json_requests: list[dict] = []
             native_key_order_requests: list[dict] = []
             check_artifact_results: list[dict] = []
@@ -880,6 +881,8 @@ class RunnerTests(unittest.TestCase):
             def observe_native_app(name, native_request, **kwargs):
                 response = original_run_native_app(name, native_request, **kwargs)
                 native_applications.append(name)
+                if name == "test-family-check-manifest-native.json":
+                    family_manifest_results.append(response)
                 if name == "test-public-result-json-key-order.json":
                     native_key_order_requests.append(native_request)
                 if name == "test-check-result-json-native.json":
@@ -938,12 +941,21 @@ class RunnerTests(unittest.TestCase):
                 mock.patch.object(
                     mncs_test.json, "loads", side_effect=observe_json_loads
                 ),
+                mock.patch.object(
+                    mncs_test,
+                    "load_family_check",
+                    side_effect=AssertionError("supported manifests must stay in the MNCS token path"),
+                ),
                 redirect_stdout(output),
             ):
                 exit_code = mncs_test.run_family_check(arguments)
 
         self.assertEqual(exit_code, 0, output.getvalue())
         response = json.loads(output.getvalue())
+        self.assertEqual(len(family_manifest_results), 1)
+        self.assertTrue(family_manifest_results[0]["supported"])
+        self.assertIn("test-family-check-manifest-native.json", native_applications)
+        self.assertNotIn(checks_path.read_bytes(), decoded_json_documents)
         self.assertIn("test-check-result-json-native.json", native_applications)
         self.assertEqual(len(family_metadata_results), 1)
         self.assertTrue(

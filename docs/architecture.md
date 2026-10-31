@@ -287,6 +287,23 @@ and runner exit status stay in scalar locals; the full TestResult tree is
 materialized only for native or response-serialization fallback. The two live
 family consumer regressions pass with the integrated Stdlib JSON cursor provider.
 
+P-020 moves supported family-check manifest selection into
+`mncs.test.family_check_manifest_native_v1`. MNCS parses the bounded source
+tokens, selects the unique requested definition, validates its supported
+selector fields, and hashes the compact key-ordered definition. Python receives
+only the manifest path, inventory identity, sorted test identities, and
+definition digest needed by the runner; it no longer builds the manifest's
+typed-value tree on this path. Definitions with escaped text, unsorted
+identities, extra fields, paths outside the native bound, or other unsupported
+shapes still use `load_family_check`, which keeps the existing validation and
+normalization behavior. Differential tests compare native projection and
+identity against that independent loader, and the family consumer test proves
+the supported path does not call it. These checks pass when the integrated
+Stdlib JSON cursor provider is selected. The Environment's default local
+Stdlib binding remains two commits behind `origin/main`; its existing
+read-only Test scope cannot reconcile that provider checkout, so provider
+selection remains an open Environment pressure.
+
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
 fields into the request and formats the final result envelope; out-of-contract

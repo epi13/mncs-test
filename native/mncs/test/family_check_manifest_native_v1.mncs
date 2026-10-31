@@ -1,0 +1,639 @@
+mncs 0.18;
+
+// Project one repository-owned family check into bounded scalar metadata.
+// The parser, exact selection, identity normalization, and definition digest stay
+// in MNCS. Unsupported representations retain the established Python validator.
+module mncs.test.family_check_manifest_native_v1;
+
+use mncs.std.application.v1;
+use mncs.std.sha256.v1 as sha256;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+
+record FamilyCheckManifestRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: json_order.JsonTokenDocumentV1,
+    input_sha256: [byte; up_to 64],
+    repository_id: [byte; up_to 512],
+    check_identity: [byte; up_to 512],
+    contract_identity: [byte; up_to 512]
+}
+
+record FamilyCheckManifestResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    manifest: [byte; up_to 512],
+    inventory_identity: [byte; up_to 64],
+    test_identities: [[byte; up_to 512]; up_to 256],
+    check_definition_identity: [byte; up_to 64]
+}
+
+record FieldLookupV1 { found: bool, value: json_order.JsonValueV1 }
+record TextCopyV1 { bytes: [byte; 512], length: u64, valid: bool }
+record TextValueV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
+record IdentityListV1 {
+    remaining: json_order.JsonValueV1,
+    values: [[byte; up_to 512]; 256],
+    count: u64,
+    previous: [byte; up_to 512],
+    previous_length: u64,
+    valid: bool
+}
+record CheckSearchV1 {
+    remaining: json_order.JsonValueV1,
+    selected: json_order.JsonValueV1,
+    count: u64,
+    valid: bool
+}
+record PathScanV1 { segment_start: u64, valid: bool }
+record ObjectKeyScanV1 { remaining: json_order.JsonValueV1, valid: bool }
+record SelectorProjectionV1 {
+    supported: bool,
+    manifest: [byte; up_to 512],
+    inventory_identity: [byte; up_to 64],
+    test_identities: [[byte; up_to 512]; up_to 256],
+    identity_count: u64
+}
+record ManifestProjectionV1 {
+    supported: bool,
+    manifest: [byte; up_to 512],
+    inventory_identity: [byte; up_to 64],
+    test_identities: [[byte; up_to 512]; up_to 256],
+    identity_count: u64,
+    check_definition_identity: [byte; up_to 64]
+}
+record DigestChunkStateV1 { digest: sha256.DigestState }
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,102,97,109,105,108,121,45,99,104,101,99,107,45,109,97,110,105,102,101,115,116,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,102,97,109,105,108,121,45,99,104,101,99,107,45,109,97,110,105,102,101,115,116,47,49];
+}
+
+fn same_bytes64(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn schema_value() -> (result: [byte; up_to 512]) {
+    return [99,111,109,109,111,110,115,46,109,110,99,115,46,102,97,109,105,108,121,45,118,101,114,105,102,105,99,97,116,105,111,110,45,99,104,101,99,107,115,47,118,49];
+}
+
+fn runner_value() -> (result: [byte; up_to 512]) {
+    return [109,110,99,115,45,116,101,115,116];
+}
+
+fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0, raw_length: 0,
+        ordered: name, ordered_length: name.len, valid: true
+    };
+}
+
+fn key_schema() -> (result: json_order.KeyV1) { return static_key([115,99,104,101,109,97,95,118,101,114,115,105,111,110]); }
+fn key_repository() -> (result: json_order.KeyV1) { return static_key([114,101,112,111,115,105,116,111,114,121,95,105,100]); }
+fn key_checks() -> (result: json_order.KeyV1) { return static_key([99,104,101,99,107,115]); }
+fn key_identity() -> (result: json_order.KeyV1) { return static_key([105,100,101,110,116,105,116,121]); }
+fn key_contract() -> (result: json_order.KeyV1) { return static_key([99,111,110,116,114,97,99,116,95,105,100,101,110,116,105,116,121]); }
+fn key_runner() -> (result: json_order.KeyV1) { return static_key([114,117,110,110,101,114]); }
+fn key_surface() -> (result: json_order.KeyV1) { return static_key([115,117,114,102,97,99,101]); }
+fn key_selector() -> (result: json_order.KeyV1) { return static_key([115,101,108,101,99,116,111,114]); }
+fn key_manifest() -> (result: json_order.KeyV1) { return static_key([109,97,110,105,102,101,115,116]); }
+fn key_inventory() -> (result: json_order.KeyV1) { return static_key([105,110,118,101,110,116,111,114,121,95,105,100,101,110,116,105,116,121]); }
+fn key_test_identities() -> (result: json_order.KeyV1) { return static_key([116,101,115,116,95,105,100,101,110,116,105,116,105,101,115]); }
+
+fn empty_lookup() -> (result: FieldLookupV1) {
+    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: FieldLookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } =>
+            match json_order.compare_key(wanted, current) {
+                json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
+                json_order.KeyOrderV1.Before => empty_lookup(),
+                json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+            },
+        json_order.JsonValueV1.ObjectNil => empty_lookup(),
+        json_order.JsonValueV1.Empty => empty_lookup(),
+        json_order.JsonValueV1.Null => empty_lookup(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.Array { items: items } => empty_lookup(),
+        json_order.JsonValueV1.Object { fields: nested } => empty_lookup(),
+        json_order.JsonValueV1.ArrayNil => empty_lookup(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_lookup()
+    };
+}
+
+fn copy_text_step(
+    state: TextCopyV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    raw_length: u64,
+    index: u64
+) -> (result: TextCopyV1) {
+    if index >= raw_length || !state.valid { return state; }
+    let value: byte = json_order.located_byte(document, start +% index);
+    if value == 92 { return TextCopyV1 { ..state, valid: false }; }
+    return TextCopyV1 {
+        ..state,
+        bytes: replace(state.bytes, state.length, value),
+        length: state.length +% 1
+    };
+}
+
+fn text_string_value(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
+    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: length <= 512 };
+    iterate i up_to 512 carrying current: TextCopyV1 = initial {
+        next current = copy_text_step(current, document, start, length, i);
+    }
+    let copied: TextCopyV1 = current;
+    return TextValueV1 { bytes: copied.bytes[0..copied.length], length: copied.length, valid: copied.valid && copied.length == length };
+}
+
+fn text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
+    return match value {
+        json_order.JsonValueV1.String { start: start, length: length } => text_string_value(document, start, length),
+        json_order.JsonValueV1.Empty => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Null => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Array { items: items } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ArrayNil => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ObjectNil => TextValueV1 { bytes: [], length: 0, valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => TextValueV1 { bytes: [], length: 0, valid: false }
+    };
+}
+
+fn field_text(fields: json_order.JsonValueV1, wanted: json_order.KeyV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
+    let found: FieldLookupV1 = lookup_field(fields, wanted);
+    if !found.found { return TextValueV1 { bytes: [], length: 0, valid: false }; }
+    return text_value(found.value, document);
+}
+
+fn same_text(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn same_text_bytes(left: TextValueV1, right: [byte; up_to 512]) -> (result: bool) {
+    return left.valid && same_text(left.bytes, right);
+}
+
+fn key_is_plain(key: json_order.KeyV1, document: json_order.JsonTokenDocumentV1) -> (result: bool) {
+    if !key.valid || key.raw_length > 256 { return false; }
+    let initial: TextCopyV1 = TextCopyV1 { bytes: [0; 512], length: 0, valid: true };
+    iterate i up_to 256 carrying current: TextCopyV1 = initial {
+        next current = copy_text_step(current, document, key.raw_start, key.raw_length, i);
+    }
+    let copied: TextCopyV1 = current;
+    return copied.valid && copied.length == key.raw_length;
+}
+
+fn key_order_equal(order: json_order.KeyOrderV1) -> (result: bool) {
+    return match order {
+        json_order.KeyOrderV1.Equal => true,
+        json_order.KeyOrderV1.Before => false,
+        json_order.KeyOrderV1.After => false
+    };
+}
+
+fn check_key_allowed(key: json_order.KeyV1, document: json_order.JsonTokenDocumentV1) -> (result: bool) {
+    if !key_is_plain(key, document) { return false; }
+    let order_identity: json_order.KeyOrderV1 = json_order.compare_key(key, key_identity());
+    let order_contract: json_order.KeyOrderV1 = json_order.compare_key(key, key_contract());
+    let order_runner: json_order.KeyOrderV1 = json_order.compare_key(key, key_runner());
+    let order_surface: json_order.KeyOrderV1 = json_order.compare_key(key, key_surface());
+    let order_selector: json_order.KeyOrderV1 = json_order.compare_key(key, key_selector());
+    return key_order_equal(order_identity)
+        || key_order_equal(order_contract)
+        || key_order_equal(order_runner)
+        || key_order_equal(order_surface)
+        || key_order_equal(order_selector);
+}
+
+fn selector_key_allowed(key: json_order.KeyV1, document: json_order.JsonTokenDocumentV1) -> (result: bool) {
+    if !key_is_plain(key, document) { return false; }
+    let order_manifest: json_order.KeyOrderV1 = json_order.compare_key(key, key_manifest());
+    let order_inventory: json_order.KeyOrderV1 = json_order.compare_key(key, key_inventory());
+    let order_identities: json_order.KeyOrderV1 = json_order.compare_key(key, key_test_identities());
+    return key_order_equal(order_manifest)
+        || key_order_equal(order_inventory)
+        || key_order_equal(order_identities);
+}
+
+fn object_key_scan_step(state: ObjectKeyScanV1, document: json_order.JsonTokenDocumentV1, selector_object: bool) -> (result: ObjectKeyScanV1) {
+    if !state.valid { return state; }
+    return match state.remaining {
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => object_key_scan_cons(key, tail, document, selector_object),
+        json_order.JsonValueV1.ObjectNil => state,
+        json_order.JsonValueV1.Empty => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Null => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Array { items: items } => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.ArrayNil => ObjectKeyScanV1 { ..state, valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => ObjectKeyScanV1 { ..state, valid: false }
+    };
+}
+
+fn object_key_scan_cons(key: json_order.KeyV1, tail: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1, selector_object: bool) -> (result: ObjectKeyScanV1) {
+    let allowed: bool = select(selector_object,
+        selector_key_allowed(key, document),
+        check_key_allowed(key, document));
+    return ObjectKeyScanV1 { remaining: tail, valid: allowed };
+}
+
+fn object_keys_allowed(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1, selector_object: bool) -> (result: bool) {
+    let initial: ObjectKeyScanV1 = ObjectKeyScanV1 { remaining: fields, valid: true };
+    iterate i up_to 16 carrying current: ObjectKeyScanV1 = initial {
+        next current = object_key_scan_step(current, document, selector_object);
+    }
+    return current.valid && json_order.is_object_nil(current.remaining);
+}
+
+fn compare_identity_step(order: i64, left: [byte; up_to 512], right: [byte; up_to 512], common: u64, index: u64) -> (result: i64) {
+    if index >= common || order != 0 { return order; }
+    if left[index] < right[index] { return -1; }
+    if left[index] > right[index] { return 1; }
+    return order;
+}
+
+fn identity_order(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: i64) {
+    let common: u64 = select(left.len < right.len, left.len, right.len);
+    iterate i up_to 512 carrying order: i64 = 0 {
+        next order = compare_identity_step(order, left, right, common, i);
+    }
+    if order != 0 { return order; }
+    if left.len < right.len { return -1; }
+    if left.len > right.len { return 1; }
+    return 0;
+}
+
+fn empty_identity_list(items: json_order.JsonValueV1) -> (result: IdentityListV1) {
+    let empty: [byte; up_to 512] = [];
+    return IdentityListV1 {
+        remaining: items, values: [empty; 256], count: 0,
+        previous: [], previous_length: 0, valid: true
+    };
+}
+
+fn identity_string_step(state: IdentityListV1, head: json_order.JsonValueV1, tail: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: IdentityListV1) {
+    let identity: TextValueV1 = text_value(head, document);
+    if !identity.valid || identity.length == 0 || state.count >= 256 {
+        return IdentityListV1 { ..state, remaining: tail, valid: false };
+    }
+    let ordered: bool = state.count == 0 || identity_order(state.previous, identity.bytes) < 0;
+    if !ordered { return IdentityListV1 { ..state, remaining: tail, valid: false }; }
+    return IdentityListV1 {
+        ..state,
+        remaining: tail,
+        values: replace(state.values, state.count, identity.bytes),
+        count: state.count +% 1,
+        previous: identity.bytes,
+        previous_length: identity.length
+    };
+}
+
+fn identity_list_step(state: IdentityListV1, document: json_order.JsonTokenDocumentV1) -> (result: IdentityListV1) {
+    if !state.valid { return state; }
+    return match state.remaining {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => identity_string_step(state, head, tail, document),
+        json_order.JsonValueV1.ArrayNil => state,
+        json_order.JsonValueV1.Empty => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.Null => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.Array { items: items } => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.ObjectNil => IdentityListV1 { ..state, valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => IdentityListV1 { ..state, valid: false }
+    };
+}
+
+fn read_identity_list(items: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: IdentityListV1) {
+    let initial: IdentityListV1 = empty_identity_list(items);
+    iterate i up_to 256 carrying current: IdentityListV1 = initial {
+        next current = identity_list_step(current, document);
+    }
+    return IdentityListV1 {
+        ..current,
+        valid: current.valid && json_order.is_array_nil(current.remaining) && current.count > 0
+    };
+}
+
+fn segment_is_parent(path: TextValueV1, start: u64, end: u64) -> (result: bool) {
+    if end < start || end -% start != 2 { return false; }
+    return path.bytes[start] == 46 && path.bytes[start +% 1] == 46;
+}
+
+fn path_step(state: PathScanV1, path: TextValueV1, index: u64) -> (result: PathScanV1) {
+    let current: byte = path.bytes[index];
+    if current == 92 { return PathScanV1 { ..state, valid: false }; }
+    if current != 47 { return state; }
+    let parent: bool = segment_is_parent(path, state.segment_start, index);
+    return PathScanV1 { segment_start: index +% 1, valid: state.valid && !parent };
+}
+
+fn path_is_valid(path: TextValueV1) -> (result: bool) {
+    if !path.valid || path.length == 0 || path.length > 512 || path.bytes[0] == 47 { return false; }
+    let initial: PathScanV1 = PathScanV1 { segment_start: 0, valid: true };
+    iterate i over path.bytes carrying state: PathScanV1 = initial {
+        next state = path_step(state, path, i);
+    }
+    let scanned: PathScanV1 = state;
+    let final_parent: bool = segment_is_parent(path, scanned.segment_start, path.length);
+    return scanned.valid && !final_parent;
+}
+
+fn inventory_is_valid(value: TextValueV1) -> (result: bool) {
+    if !value.valid || value.length != 64 { return false; }
+    iterate i over value.bytes carrying valid: bool = true {
+        let ch: u64 = value.bytes[i] as u64;
+        next valid = valid && ((ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102));
+    }
+    return valid;
+}
+
+fn empty_selector() -> (result: SelectorProjectionV1) {
+    let empty: [byte; up_to 512] = [];
+    let identities: [[byte; up_to 512]; 256] = [empty; 256];
+    return SelectorProjectionV1 {
+        supported: false, manifest: [], inventory_identity: [],
+        test_identities: identities[0..0], identity_count: 0
+    };
+}
+
+fn project_selector_fields(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: SelectorProjectionV1) {
+    if !object_keys_allowed(fields, document, true) { return empty_selector(); }
+    let manifest: TextValueV1 = field_text(fields, key_manifest(), document);
+    let inventory: TextValueV1 = field_text(fields, key_inventory(), document);
+    let identities_field: FieldLookupV1 = lookup_field(fields, key_test_identities());
+    let identities_are_array: bool = match identities_field.value {
+        json_order.JsonValueV1.Array { items: items } => true,
+        json_order.JsonValueV1.Empty => false,
+        json_order.JsonValueV1.Null => false,
+        json_order.JsonValueV1.Raw { start: start, length: length } => false,
+        json_order.JsonValueV1.String { start: start, length: length } => false,
+        json_order.JsonValueV1.ArrayNil => false,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => false,
+        json_order.JsonValueV1.Object { fields: nested } => false,
+        json_order.JsonValueV1.ObjectNil => false,
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => false
+    };
+    let identity_items: json_order.JsonValueV1 = checks_items(identities_field.value);
+    let identities: IdentityListV1 = read_identity_list(identity_items, document);
+    if !manifest.valid || !path_is_valid(manifest) || !inventory_is_valid(inventory)
+        || !identities_field.found || !identities_are_array || !identities.valid {
+        return empty_selector();
+    }
+    return SelectorProjectionV1 {
+        supported: true,
+        manifest: manifest.bytes,
+        inventory_identity: inventory.bytes,
+        test_identities: identities.values[0..identities.count],
+        identity_count: identities.count
+    };
+}
+
+fn project_selector(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: SelectorProjectionV1) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => project_selector_fields(fields, document),
+        json_order.JsonValueV1.Empty => empty_selector(),
+        json_order.JsonValueV1.Null => empty_selector(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_selector(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_selector(),
+        json_order.JsonValueV1.Array { items: items } => empty_selector(),
+        json_order.JsonValueV1.ArrayNil => empty_selector(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_selector(),
+        json_order.JsonValueV1.ObjectNil => empty_selector(),
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => empty_selector()
+    };
+}
+
+fn empty_search(items: json_order.JsonValueV1) -> (result: CheckSearchV1) {
+    return CheckSearchV1 { remaining: items, selected: json_order.JsonValueV1.Empty, count: 0, valid: true };
+}
+
+fn search_check_step(state: CheckSearchV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: CheckSearchV1) {
+    if !state.valid { return state; }
+    return match state.remaining {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => search_candidate(state, head, tail, request, document),
+        json_order.JsonValueV1.ArrayNil => state,
+        json_order.JsonValueV1.Empty => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.Null => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.Array { items: items } => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.ObjectNil => CheckSearchV1 { ..state, valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => CheckSearchV1 { ..state, valid: false }
+    };
+}
+
+fn search_candidate(state: CheckSearchV1, head: json_order.JsonValueV1, tail: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: CheckSearchV1) {
+    return match head {
+        json_order.JsonValueV1.Object { fields: fields } => search_object_candidate(state, head, tail, fields, request, document),
+        json_order.JsonValueV1.Empty => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.Null => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.Raw { start: start, length: length } => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.String { start: start, length: length } => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.Array { items: items } => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.ArrayNil => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.ArrayCons { head: nested, tail: rest } => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.ObjectNil => CheckSearchV1 { ..state, remaining: tail },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: rest } => CheckSearchV1 { ..state, remaining: tail }
+    };
+}
+
+fn search_object_candidate(state: CheckSearchV1, selected: json_order.JsonValueV1, tail: json_order.JsonValueV1, fields: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: CheckSearchV1) {
+    let identity: TextValueV1 = field_text(fields, key_identity(), document);
+    if same_text_bytes(identity, request.check_identity) {
+        return CheckSearchV1 { ..state, remaining: tail, selected: selected, count: state.count +% 1 };
+    }
+    return CheckSearchV1 { ..state, remaining: tail };
+}
+
+fn search_checks(items: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: CheckSearchV1) {
+    let initial: CheckSearchV1 = empty_search(items);
+    iterate i up_to 64 carrying current: CheckSearchV1 = initial {
+        next current = search_check_step(current, request, document);
+    }
+    let searched: CheckSearchV1 = current;
+    return CheckSearchV1 { ..searched, valid: searched.valid && json_order.is_array_nil(searched.remaining) && searched.count == 1 };
+}
+
+fn sha_part(digest: sha256.DigestState, chunk: json_order.JsonOrderChunkV1, index: u64) -> (result: sha256.DigestState) {
+    let start: u64 = index *% 64;
+    if start >= chunk.length { return digest; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    return sha256.update_standard(digest, chunk.bytes[start..start +% size], size);
+}
+
+fn sha_chunk(digest: sha256.DigestState, chunk: json_order.JsonOrderChunkV1) -> (result: sha256.DigestState) {
+    iterate i up_to 16 carrying current: sha256.DigestState = digest {
+        next current = sha_part(current, chunk, i);
+    }
+    return current;
+}
+
+fn writer_digest(writer: json_order.JsonOrderWriterV1) -> (result: [byte; up_to 64]) {
+    let output: json_order.JsonOrderChunkBuilderV1 = json_order.output_chunks(writer);
+    iterate i over output.chunks[0..output.count] carrying digest: sha256.DigestState = sha256.init() {
+        next digest = sha_chunk(digest, output.chunks[i]);
+    }
+    let hashed: sha256.DigestState = digest;
+    return json_order.encode_digest(sha256.finalize_standard(hashed));
+}
+
+fn empty_projection() -> (result: ManifestProjectionV1) {
+    let empty: [byte; up_to 512] = [];
+    let identities: [[byte; up_to 512]; 256] = [empty; 256];
+    return ManifestProjectionV1 {
+        supported: false, manifest: [], inventory_identity: [],
+        test_identities: identities[0..0], identity_count: 0,
+        check_definition_identity: []
+    };
+}
+
+fn project_check(fields: json_order.JsonValueV1, selected: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
+    if !object_keys_allowed(fields, document, false) { return empty_projection(); }
+    let identity: TextValueV1 = field_text(fields, key_identity(), document);
+    let contract: TextValueV1 = field_text(fields, key_contract(), document);
+    let runner: TextValueV1 = field_text(fields, key_runner(), document);
+    let selector_field: FieldLookupV1 = lookup_field(fields, key_selector());
+    let selector: SelectorProjectionV1 = project_selector(selector_field.value, document);
+    let surface_field: FieldLookupV1 = lookup_field(fields, key_surface());
+    let surface: TextValueV1 = text_value(surface_field.value, document);
+    let surface_valid: bool = select(surface_field.found, surface.valid, true);
+    let valid: bool = identity.valid && same_text(identity.bytes, request.check_identity)
+        && contract.valid && same_text(contract.bytes, request.contract_identity)
+        && runner.valid && same_text(runner.bytes, runner_value())
+        && selector_field.found && selector.supported && surface_valid;
+    if !valid { return empty_projection(); }
+    let writer: json_order.JsonOrderWriterV1 = json_order.write_json(selected, json_order.writer_empty(), document);
+    if !writer.ok || writer.length == 0 { return empty_projection(); }
+    return ManifestProjectionV1 {
+        supported: true,
+        manifest: selector.manifest,
+        inventory_identity: selector.inventory_identity,
+        test_identities: selector.test_identities,
+        identity_count: selector.identity_count,
+        check_definition_identity: writer_digest(writer)
+    };
+}
+
+fn project_selected(value: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => project_check(fields, value, request, document),
+        json_order.JsonValueV1.Empty => empty_projection(),
+        json_order.JsonValueV1.Null => empty_projection(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.Array { items: items } => empty_projection(),
+        json_order.JsonValueV1.ArrayNil => empty_projection(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_projection(),
+        json_order.JsonValueV1.ObjectNil => empty_projection(),
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => empty_projection()
+    };
+}
+
+fn checks_items(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
+    return match value {
+        json_order.JsonValueV1.Array { items: items } => items,
+        json_order.JsonValueV1.Empty => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.Null => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.ArrayNil => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.Object { fields: fields } => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.ObjectNil => json_order.JsonValueV1.Empty,
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => json_order.JsonValueV1.Empty
+    };
+}
+
+fn project_root_fields(fields: json_order.JsonValueV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
+    let schema: TextValueV1 = field_text(fields, key_schema(), document);
+    let repository: TextValueV1 = field_text(fields, key_repository(), document);
+    let checks_field: FieldLookupV1 = lookup_field(fields, key_checks());
+    let items: json_order.JsonValueV1 = checks_items(checks_field.value);
+    let checks_is_array: bool = match checks_field.value {
+        json_order.JsonValueV1.Array { items: array_items } => true,
+        json_order.JsonValueV1.Empty => false,
+        json_order.JsonValueV1.Null => false,
+        json_order.JsonValueV1.Raw { start: start, length: length } => false,
+        json_order.JsonValueV1.String { start: start, length: length } => false,
+        json_order.JsonValueV1.ArrayNil => false,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => false,
+        json_order.JsonValueV1.Object { fields: nested } => false,
+        json_order.JsonValueV1.ObjectNil => false,
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => false
+    };
+    if !schema.valid || !same_text(schema.bytes, schema_value())
+        || !repository.valid || !same_text(repository.bytes, request.repository_id)
+        || !checks_field.found || !checks_is_array {
+        return empty_projection();
+    }
+    let found: CheckSearchV1 = search_checks(items, request, document);
+    if !found.valid { return empty_projection(); }
+    return project_selected(found.selected, request, document);
+}
+
+fn project_root(parsed: json_order.ParseStateV1, request: FamilyCheckManifestRequestV1, document: json_order.JsonTokenDocumentV1) -> (result: ManifestProjectionV1) {
+    if !parsed.valid || !parsed.has_root { return empty_projection(); }
+    return match parsed.root {
+        json_order.JsonValueV1.Object { fields: fields } => project_root_fields(fields, request, document),
+        json_order.JsonValueV1.Empty => empty_projection(),
+        json_order.JsonValueV1.Null => empty_projection(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.Array { items: items } => empty_projection(),
+        json_order.JsonValueV1.ArrayNil => empty_projection(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_projection(),
+        json_order.JsonValueV1.ObjectNil => empty_projection(),
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => empty_projection()
+    };
+}
+
+fn family_check_manifest_native_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97,114,103,118,32,114,101,113,117,105,114,101,115,32,50,32,109,97,110,105,102,101,115,116,32,112,97,116,104,115], 2);
+    }
+    let request: FamilyCheckManifestRequestV1 = structured_read(context.argv[0], request_schema());
+    let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.document);
+    let request_valid: bool = same_bytes64(request.schema_version, request_schema())
+        && shape.valid && request.document.byte_length <= 65536
+        && request.input_sha256.len == 64
+        && same_bytes64(request.input_sha256, json_order.document_digest(request.document));
+    let parsed: json_order.ParseStateV1 = json_order.parse_checked(request.document, request_valid);
+    let projected: ManifestProjectionV1 = project_root(parsed, request, request.document);
+    let response: FamilyCheckManifestResultV1 = FamilyCheckManifestResultV1 {
+        schema_version: result_schema(),
+        supported: projected.supported,
+        manifest: projected.manifest,
+        inventory_identity: projected.inventory_identity,
+        test_identities: projected.test_identities,
+        check_definition_identity: projected.check_definition_identity
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), response);
+    if published == 0 {
+        return failure([102,97,109,105,108,121,32,99,104,101,99,107,32,109,97,110,105,102,101,115,116,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+    }
+    return success([]);
+}

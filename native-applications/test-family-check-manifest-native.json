@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.family-check-manifest-native",
+  "source": "../native/mncs/test/family_check_manifest_native_v1.mncs",
+  "module": "mncs.test.family_check_manifest_native_v1",
+  "entry_function": "family_check_manifest_native_app_v1",
+  "profile": "0.18",
+  "interface_identity": "68b95de0c16083ea1d6a06aa2831118e68018cfc3f29945830f14939d2bb89c8",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

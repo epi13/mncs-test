@@ -65,6 +65,9 @@ PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
+FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-manifest-request/1"
+FAMILY_CHECK_MANIFEST_NATIVE_RESULT_SCHEMA = "mncs.test.family-check-manifest/1"
+FAMILY_CHECK_MANIFEST_NATIVE_MAX_BYTES = 65_536
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS = 64
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
@@ -7869,6 +7872,97 @@ def load_family_check(
     return check
 
 
+def _native_family_check_manifest_projection(
+    path: Path,
+    *,
+    check_identity: str,
+    contract_identity: str,
+    repository_id: str,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, Any] | None:
+    """Select one bounded family-check definition without a Python value tree."""
+    try:
+        document = path.read_bytes()
+    except OSError:
+        return None
+    if len(document) > FAMILY_CHECK_MANIFEST_NATIVE_MAX_BYTES:
+        return None
+    for value in (check_identity, contract_identity, repository_id):
+        try:
+            if len(value.encode("utf-8")) > 512:
+                return None
+        except UnicodeEncodeError:
+            return None
+    packed = _native_public_result_document_request(document)
+    if packed is None:
+        return None
+    packed_request, packed_length = packed
+    if packed_length != len(document):
+        raise AdapterError("MNCS family-check manifest packing changed its length")
+    native_request = {
+        "schema_version": FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA,
+        "document": packed_request["document"],
+        "input_sha256": packed_request["input_sha256"],
+        "repository_id": repository_id,
+        "check_identity": check_identity,
+        "contract_identity": contract_identity,
+    }
+    try:
+        response = run_native_app(
+            "test-family-check-manifest-native.json",
+            native_request,
+            request_schema=FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA,
+            result_schema=FAMILY_CHECK_MANIFEST_NATIVE_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeInputBoundError, NativeBudgetExhaustedError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test family-check manifest projection failed: {error}") from error
+
+    if (
+        response.get("schema_version") != FAMILY_CHECK_MANIFEST_NATIVE_RESULT_SCHEMA
+        or type(response.get("supported")) is not bool
+    ):
+        raise AdapterError("native Test family-check manifest app returned malformed support metadata")
+    if not response["supported"]:
+        return None
+    manifest = response.get("manifest")
+    inventory_identity = response.get("inventory_identity")
+    test_identities = response.get("test_identities")
+    definition_identity = response.get("check_definition_identity")
+    if (
+        not isinstance(manifest, str)
+        or not manifest
+        or len(manifest.encode("utf-8")) > 512
+        or not isinstance(inventory_identity, str)
+        or not SHA256_HEX.fullmatch(inventory_identity)
+        or not isinstance(test_identities, list)
+        or not 1 <= len(test_identities) <= 256
+        or any(
+            not isinstance(identity, str)
+            or not identity
+            or len(identity.encode("utf-8")) > FAMILY_CHECK_MAX_TEST_IDENTITY_LENGTH
+            for identity in test_identities
+        )
+        or test_identities != sorted(set(test_identities))
+        or not isinstance(definition_identity, str)
+        or not SHA256_HEX.fullmatch(definition_identity)
+    ):
+        raise AdapterError("native Test family-check manifest app returned malformed projection metadata")
+    return {
+        "manifest": manifest,
+        "inventory_identity": inventory_identity,
+        "test_identities": test_identities,
+        "check_definition_identity": definition_identity,
+    }
+
+
 def load_family_check_request(path: Path) -> dict[str, Any]:
     try:
         request = json.loads(path.read_text(encoding="utf-8"))
@@ -7906,13 +8000,31 @@ def run_family_check(args: argparse.Namespace) -> int:
         request = load_family_check_request(resolve_path(args.request, cwd, must_exist=True))
         checks_path = resolve_path(args.checks, cwd, must_exist=True)
         check_result_environment = native_application_environment(cwd)
-        check = load_family_check(
+        native_check = _native_family_check_manifest_projection(
             checks_path,
             check_identity=request["check_identity"],
             contract_identity=request["contract_identity"],
             repository_id=args.repository_id,
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=check_result_environment,
         )
-        selector = check["selector"]
+        if native_check is None:
+            check = load_family_check(
+                checks_path,
+                check_identity=request["check_identity"],
+                contract_identity=request["contract_identity"],
+                repository_id=args.repository_id,
+            )
+            selector = check["selector"]
+            check_definition_identity: str | None = None
+        else:
+            selector = {
+                "manifest": native_check["manifest"],
+                "inventory_identity": native_check["inventory_identity"],
+                "test_identities": native_check["test_identities"],
+            }
+            check_definition_identity = native_check["check_definition_identity"]
         manifest_path = resolve_path(selector["manifest"], checks_path.parent, must_exist=True)
         with tempfile.TemporaryDirectory(prefix="mncs-family-check-") as directory:
             root = Path(directory)
@@ -8107,7 +8219,8 @@ def run_family_check(args: argparse.Namespace) -> int:
                 environment=check_result_environment,
                 native_document=native_check_result_document,
             )
-        check_definition_identity = sha256_bytes(compact_json(check).encode())
+        if check_definition_identity is None:
+            check_definition_identity = sha256_bytes(compact_json(check).encode())
         family_binding = {
             key: request[key]
             for key in (
