@@ -7281,6 +7281,145 @@ def minimal_result(*, classification: str, message: str, cwd: Path) -> dict[str,
     }
 
 
+def _native_check_result_json_response(
+    document: bytes,
+    *,
+    result_digest: str,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    check_id: str | None,
+    claim: str | None,
+) -> dict[str, Any] | None:
+    if len(document) > CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES:
+        return None
+    prepared_document = _native_public_result_document_request(document)
+    if prepared_document is None:
+        return None
+    native_request = {
+        "schema_version": CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
+        "document": prepared_document[0]["document"],
+        "input_sha256": prepared_document[0]["input_sha256"],
+        "check_id": check_id or "",
+        "claim": claim or "",
+        "result_digest": result_digest,
+    }
+    try:
+        native_response = run_native_app(
+            "test-check-result-json-native.json",
+            native_request,
+            request_schema=CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
+            result_schema=CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeInputBoundError, NativeBudgetExhaustedError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native Test CheckResult JSON projection failed: {error}") from error
+    if (
+        native_response.get("schema_version") != CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA
+        or type(native_response.get("supported")) is not bool
+    ):
+        raise AdapterError("MNCS CheckResult JSON projection returned malformed support metadata")
+    return native_response
+
+
+def _family_check_metadata_from_native(
+    native_response: dict[str, Any] | None,
+    document: bytes,
+) -> dict[str, Any] | None:
+    """Read family policy fields from native tokens and preserve selection by span."""
+    if native_response is None or native_response.get("supported") is not True:
+        return None
+    family = native_response.get("family_metadata")
+    if not isinstance(family, dict) or family.get("supported") is not True:
+        return None
+    schema_valid = family.get("test_result_schema_valid")
+    verdict = family.get("verdict")
+    selected = family.get("selected_test_identities")
+    selection_present = family.get("selection_present")
+    if (
+        type(schema_valid) is not bool
+        or not isinstance(verdict, str)
+        or len(verdict.encode("utf-8")) > 16
+        or not isinstance(selected, list)
+        or len(selected) > 256
+        or any(
+            not isinstance(identity, str)
+            or len(identity.encode("utf-8")) > 512
+            for identity in selected
+        )
+        or type(selection_present) is not bool
+    ):
+        return None
+
+    selection: Any = None
+    if selection_present:
+        start = family.get("selection_start")
+        length = family.get("selection_length")
+        if (
+            type(start) is not int
+            or type(length) is not int
+            or start < 0
+            or length <= 0
+            or start + length > len(document)
+        ):
+            return None
+        try:
+            # Selection is opaque and forward-compatible. Decode only that
+            # source span; the surrounding TestResult remains a native token scan.
+            selection = json.loads(document[start : start + length])
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(selection, dict):
+            return None
+
+    inventory_present = family.get("inventory_identity_present")
+    inventory_null = family.get("inventory_identity_null")
+    inventory_identity = family.get("inventory_identity")
+    run_identity_present = family.get("run_identity_present")
+    run_identity_null = family.get("run_identity_null")
+    run_identity = family.get("run_identity")
+    if (
+        type(inventory_present) is not bool
+        or type(inventory_null) is not bool
+        or type(run_identity_present) is not bool
+        or type(run_identity_null) is not bool
+        or (inventory_present and not inventory_null and not isinstance(inventory_identity, str))
+        or (run_identity_present and not run_identity_null and not isinstance(run_identity, str))
+    ):
+        return None
+    if (
+        inventory_present
+        and not inventory_null
+        and len(inventory_identity.encode("utf-8")) > 64
+    ):
+        return None
+    if (
+        run_identity_present
+        and not run_identity_null
+        and len(run_identity.encode("utf-8")) > 512
+    ):
+        return None
+
+    return {
+        "test_result_schema_valid": schema_valid,
+        "verdict": verdict,
+        "selected_test_identities": selected,
+        "selection_present": selection_present,
+        "selection": selection,
+        "inventory_identity": (
+            inventory_identity if inventory_present and not inventory_null else None
+        ),
+        "run_identity": (
+            run_identity if run_identity_present and not run_identity_null else None
+        ),
+    }
+
+
 def check_result(
     result: dict[str, Any],
     result_digest: str,
@@ -7291,6 +7430,8 @@ def check_result(
     check_id: str | None = None,
     claim: str | None = None,
     test_result_document: bytes | None = None,
+    native_json_response: dict[str, Any] | None = None,
+    native_json_response_prepared: bool = False,
 ) -> dict[str, Any]:
     """Project a detailed TestResult through the native CheckResult policy."""
     if not isinstance(result, dict):
@@ -7310,40 +7451,21 @@ def check_result(
     maximum_u64 = (1 << 64) - 1
 
     if test_result_document is not None:
-        prepared_document = (
-            _native_public_result_document_request(test_result_document)
-            if len(test_result_document) <= CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
-            else None
-        )
-        if prepared_document is not None:
-            native_request = {
-                "schema_version": CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
-                "document": prepared_document[0]["document"],
-                "input_sha256": prepared_document[0]["input_sha256"],
-                "check_id": check_id or "",
-                "claim": claim or "",
-                "result_digest": result_digest,
-            }
-            try:
-                native_response = run_native_app(
-                    "test-check-result-json-native.json",
-                    native_request,
-                    request_schema=CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,
-                    result_schema=CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA,
-                    mncs=mncs,
-                    cwd=cwd,
-                    environment=environment,
-                    step_budget=8_000_000,
-                )
-            except (NativeInputBoundError, NativeBudgetExhaustedError):
-                native_response = None
-            except NativeTransportError as error:
-                raise AdapterError(f"native Test CheckResult JSON projection failed: {error}") from error
-            if native_response is not None and native_response.get("supported") is True:
-                projected = native_response.get("projection")
-                if not isinstance(projected, dict):
-                    raise AdapterError("MNCS CheckResult JSON projection returned no typed projection")
-                return _finish_check_result_projection(projected, result)
+        if not native_json_response_prepared:
+            native_json_response = _native_check_result_json_response(
+                test_result_document,
+                result_digest=result_digest,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                check_id=check_id,
+                claim=claim,
+            )
+        if native_json_response is not None and native_json_response.get("supported") is True:
+            projected = native_json_response.get("projection")
+            if not isinstance(projected, dict):
+                raise AdapterError("MNCS CheckResult JSON projection returned no typed projection")
+            return _finish_check_result_projection(projected, result)
 
     def summary_count(summary: dict[str, Any], field: str) -> int:
         value = summary.get(field, 0)
@@ -7728,8 +7850,6 @@ def run_family_check(args: argparse.Namespace) -> int:
                 )
             result_document_bytes = result_path.read_bytes()
             check_document_bytes = check_path.read_bytes()
-            result = json.loads(result_document_bytes)
-            produced_check = json.loads(check_document_bytes)
             with ArtifactStore(
                 root / "result-digest-store",
                 mncs=args.mncs,
@@ -7741,6 +7861,37 @@ def run_family_check(args: argparse.Namespace) -> int:
                 result_digest, _digest_method = digest_store.digest_file_with_method(
                     result_path
                 )
+        native_json_response = _native_check_result_json_response(
+            result_document_bytes,
+            result_digest=result_digest,
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=check_result_environment,
+            check_id=request["check_identity"],
+            claim="The exact repository-owned behavioral family check was executed by mncs-test",
+        )
+        family_metadata = _family_check_metadata_from_native(
+            native_json_response,
+            result_document_bytes,
+        )
+        produced_check = json.loads(check_document_bytes)
+        if family_metadata is None:
+            result = json.loads(result_document_bytes)
+        else:
+            result = {
+                "schema_version": (
+                    RESULT_SCHEMA
+                    if family_metadata["test_result_schema_valid"]
+                    else None
+                ),
+                "verdict": family_metadata["verdict"],
+                "test_inventory": {
+                    "inventory_identity": family_metadata["inventory_identity"]
+                },
+                "experiment": {"run_identity": family_metadata["run_identity"]},
+            }
+            if family_metadata["selection_present"]:
+                result["selection"] = family_metadata["selection"]
         if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
             raise AdapterError("family check produced an invalid mncs.test-result/1 document")
         if not isinstance(produced_check, dict) or produced_check.get("schema_version") != CHECK_SCHEMA:
@@ -7764,6 +7915,8 @@ def run_family_check(args: argparse.Namespace) -> int:
             check_id=request["check_identity"],
             claim="The exact repository-owned behavioral family check was executed by mncs-test",
             test_result_document=result_document_bytes,
+            native_json_response=native_json_response,
+            native_json_response_prepared=True,
         )
         check_result_payload, check_result_digest = _public_result_json_payload(
             check_result_document,

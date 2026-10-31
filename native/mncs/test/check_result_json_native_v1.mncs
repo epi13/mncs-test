@@ -1,9 +1,9 @@
 mncs 0.18;
 
-// Validate the retained TestResult JSON, then project only CheckResult fields
-// from bounded native cursor tokens. Keep source spans instead of a JsonValue
-// tree, and leave opaque selection with the adapter. Unescaped message bytes
-// remain packed UTF-8 spans; escaped messages use the bounded native decoder.
+// Validate the retained TestResult JSON, then project CheckResult and family
+// policy fields from bounded native cursor tokens. Keep source spans instead
+// of a JsonValue tree, and leave opaque selection with the adapter. Unescaped
+// message bytes remain packed UTF-8 spans; escaped messages use the decoder.
 module mncs.test.check_result_json_native_v1;
 
 use mncs.std.application.v1;
@@ -24,7 +24,24 @@ record CheckResultJsonNativeRequestV1 {
 record CheckResultJsonNativeResultV1 {
     schema_version: [byte; up_to 64],
     supported: bool,
-    projection: check_result.CheckResultProjectionV1
+    projection: check_result.CheckResultProjectionV1,
+    family_metadata: FamilyResultMetadataV1
+}
+
+record FamilyResultMetadataV1 {
+    supported: bool,
+    test_result_schema_valid: bool,
+    verdict: [byte; up_to 16],
+    selected_test_identities: [[byte; up_to 512]; up_to 256],
+    selection_present: bool,
+    selection_start: u64,
+    selection_length: u64,
+    inventory_identity_present: bool,
+    inventory_identity_null: bool,
+    inventory_identity: [byte; up_to 64],
+    run_identity_present: bool,
+    run_identity_null: bool,
+    run_identity: [byte; up_to 512]
 }
 
 record TokenValueSpanV1 { found: bool, kind: byte, start: u64, length: u64 }
@@ -115,11 +132,28 @@ record CheckResultTokenStateV1 {
     verdict_seen: bool,
     classification_seen: bool,
     failure_class_seen: bool,
+    test_result_schema_seen: bool,
     id: TokenValueSpanV1,
     provider: TokenValueSpanV1,
     verdict: TokenValueSpanV1,
     classification: TokenValueSpanV1,
     failure_class: TokenValueSpanV1,
+    test_result_schema: TokenValueSpanV1,
+    selection_seen: bool,
+    selection_valid: bool,
+    selection_span: TokenValueSpanV1,
+    selected_test_identities_seen: bool,
+    selected_test_identities_valid: bool,
+    selected_test_identities: [[byte; up_to 512]; 256],
+    selected_test_identity_count: u64,
+    test_inventory_seen: bool,
+    test_inventory_valid: bool,
+    inventory_identity_seen: bool,
+    inventory_identity: TokenValueSpanV1,
+    experiment_seen: bool,
+    experiment_valid: bool,
+    run_identity_seen: bool,
+    family_run_identity: TokenValueSpanV1,
     scope_seen: bool,
     scope_valid: bool,
     manifest: TokenValueSpanV1,
@@ -655,6 +689,7 @@ fn empty_token_state() -> (result: CheckResultTokenStateV1) {
     let zero_summary: check_result.CheckSummaryV1 = check_result.CheckSummaryV1 {
         passed: 0, failed: 0, skipped: 0
     };
+    let empty_identity: [byte; up_to 512] = [];
     return CheckResultTokenStateV1 {
         cursor: json_cursor.init(),
         scanner_string_has_escape: false,
@@ -670,11 +705,28 @@ fn empty_token_state() -> (result: CheckResultTokenStateV1) {
         verdict_seen: false,
         classification_seen: false,
         failure_class_seen: false,
+        test_result_schema_seen: false,
         id: empty_span(),
         provider: empty_span(),
         verdict: empty_span(),
         classification: empty_span(),
         failure_class: empty_span(),
+        test_result_schema: empty_span(),
+        selection_seen: false,
+        selection_valid: true,
+        selection_span: empty_span(),
+        selected_test_identities_seen: false,
+        selected_test_identities_valid: true,
+        selected_test_identities: [empty_identity; 256],
+        selected_test_identity_count: 0,
+        test_inventory_seen: false,
+        test_inventory_valid: true,
+        inventory_identity_seen: false,
+        inventory_identity: empty_span(),
+        experiment_seen: false,
+        experiment_valid: true,
+        run_identity_seen: false,
+        family_run_identity: empty_span(),
         scope_seen: false,
         scope_valid: true,
         manifest: empty_span(),
@@ -718,6 +770,10 @@ fn token_key_tag(context: byte, key: json_order.KeyV1) -> (result: byte) {
         if token_key_equal(key, [114, 117, 110, 95, 105, 100]) { return 9; }
         if token_key_equal(key, [99, 108, 97, 115, 115, 105, 102, 105, 99, 97, 116, 105, 111, 110]) { return 10; }
         if token_key_equal(key, [102, 97, 105, 108, 117, 114, 101, 95, 99, 108, 97, 115, 115]) { return 11; }
+        if token_key_equal(key, [115, 99, 104, 101, 109, 97, 95, 118, 101, 114, 115, 105, 111, 110]) { return 12; }
+        if token_key_equal(key, [115, 101, 108, 101, 99, 116, 105, 111, 110]) { return 13; }
+        if token_key_equal(key, [116, 101, 115, 116, 95, 105, 110, 118, 101, 110, 116, 111, 114, 121]) { return 14; }
+        if token_key_equal(key, [101, 120, 112, 101, 114, 105, 109, 101, 110, 116]) { return 15; }
     }
     if context == 2 && token_key_equal(key, [109, 97, 110, 105, 102, 101, 115, 116]) { return 1; }
     if context == 3 {
@@ -732,6 +788,9 @@ fn token_key_tag(context: byte, key: json_order.KeyV1) -> (result: byte) {
     if context == 6 && token_key_equal(key, [109, 101, 115, 115, 97, 103, 101]) { return 1; }
     if context == 7 && token_key_equal(key, [114, 117, 110, 110, 101, 114]) { return 1; }
     if context == 8 && token_key_equal(key, [115, 111, 117, 114, 99, 101, 95, 115, 104, 97, 50, 53, 54]) { return 1; }
+    if context == 9 && token_key_equal(key, [115, 101, 108, 101, 99, 116, 101, 100, 95, 116, 101, 115, 116, 95, 105, 100, 101, 110, 116, 105, 116, 105, 101, 115]) { return 1; }
+    if context == 11 && token_key_equal(key, [105, 110, 118, 101, 110, 116, 111, 114, 121, 95, 105, 100, 101, 110, 116, 105, 116, 121]) { return 1; }
+    if context == 12 && token_key_equal(key, [114, 117, 110, 95, 105, 100, 101, 110, 116, 105, 116, 121]) { return 1; }
     return 0;
 }
 
@@ -824,8 +883,15 @@ fn mark_token_key(
     if context == 1 && tag == 6 { return CheckResultTokenStateV1 { ..recognized, tests_seen: true }; }
     if context == 1 && tag == 10 { return CheckResultTokenStateV1 { ..recognized, classification_seen: true }; }
     if context == 1 && tag == 11 { return CheckResultTokenStateV1 { ..recognized, failure_class_seen: true }; }
+    if context == 1 && tag == 12 { return CheckResultTokenStateV1 { ..recognized, test_result_schema_seen: true }; }
+    if context == 1 && tag == 13 { return CheckResultTokenStateV1 { ..recognized, selection_seen: true }; }
+    if context == 1 && tag == 14 { return CheckResultTokenStateV1 { ..recognized, test_inventory_seen: true }; }
+    if context == 1 && tag == 15 { return CheckResultTokenStateV1 { ..recognized, experiment_seen: true }; }
     if context == 5 && tag == 1 { return CheckResultTokenStateV1 { ..recognized, row_seen_id: true }; }
     if context == 5 && tag == 2 { return CheckResultTokenStateV1 { ..recognized, row_seen_verdict: true }; }
+    if context == 9 && tag == 1 { return CheckResultTokenStateV1 { ..recognized, selected_test_identities_seen: true }; }
+    if context == 11 && tag == 1 { return CheckResultTokenStateV1 { ..recognized, inventory_identity_seen: true }; }
+    if context == 12 && tag == 1 { return CheckResultTokenStateV1 { ..recognized, run_identity_seen: true }; }
     return recognized;
 }
 
@@ -918,7 +984,8 @@ fn token_value_context(
     parent_context: byte,
     tag: byte,
     kind: byte,
-    frame_index: u64
+    frame_index: u64,
+    token_start: u64
 ) -> (result: CheckResultTokenStateV1) {
     let ignored: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
         ..state,
@@ -970,6 +1037,34 @@ fn token_value_context(
         if tag == 9 { return CheckResultTokenStateV1 { ..ignored, run_id: invalid_span() }; }
         if tag == 10 { return CheckResultTokenStateV1 { ..ignored, classification: invalid_span() }; }
         if tag == 11 { return CheckResultTokenStateV1 { ..ignored, failure_class: invalid_span() }; }
+        if tag == 12 { return CheckResultTokenStateV1 { ..ignored, test_result_schema: invalid_span() }; }
+        if tag == 13 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                selection_valid: state.selection_valid && good,
+                selection_span: TokenValueSpanV1 {
+                    found: good, kind: kind, start: token_start, length: 0
+                },
+                contexts: replace(state.contexts, frame_index, select(good, 9, 0))
+            };
+        }
+        if tag == 14 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                test_inventory_valid: state.test_inventory_valid && good,
+                contexts: replace(state.contexts, frame_index, select(good, 11, 0))
+            };
+        }
+        if tag == 15 {
+            let good: bool = kind == 7;
+            return CheckResultTokenStateV1 {
+                ..ignored,
+                experiment_valid: state.experiment_valid && good,
+                contexts: replace(state.contexts, frame_index, select(good, 12, 0))
+            };
+        }
         return ignored;
     }
     if parent_context == 2 && tag == 1 {
@@ -1001,6 +1096,35 @@ fn token_value_context(
     }
     if parent_context == 8 && tag == 1 {
         return CheckResultTokenStateV1 { ..ignored, source_sha256: invalid_span() };
+    }
+    if parent_context == 9 && tag == 1 {
+        let good: bool = kind == 8;
+        return CheckResultTokenStateV1 {
+            ..ignored,
+            selection_valid: state.selection_valid && good,
+            selected_test_identities_valid: state.selected_test_identities_valid && good,
+            contexts: replace(state.contexts, frame_index, select(good, 10, 0))
+        };
+    }
+    if parent_context == 10 {
+        return CheckResultTokenStateV1 {
+            ..ignored,
+            selected_test_identities_valid: false
+        };
+    }
+    if parent_context == 11 && tag == 1 {
+        return CheckResultTokenStateV1 {
+            ..ignored,
+            test_inventory_valid: false,
+            inventory_identity: invalid_span()
+        };
+    }
+    if parent_context == 12 && tag == 1 {
+        return CheckResultTokenStateV1 {
+            ..ignored,
+            experiment_valid: false,
+            family_run_identity: invalid_span()
+        };
     }
     return ignored;
 }
@@ -1042,7 +1166,9 @@ fn token_open_container(
         key_history: reset_history,
         member_counts: reset_counts
     };
-    return token_value_context(prepared, parent_context, tag, token.token_kind, frame_index);
+    return token_value_context(
+        prepared, parent_context, tag, token.token_kind, frame_index, token.token_start
+    );
 }
 
 fn token_store_scalar(
@@ -1079,6 +1205,10 @@ fn token_store_scalar(
         if tag == 9 { return CheckResultTokenStateV1 { ..scalar, run_id: field.value }; }
         if tag == 10 { return CheckResultTokenStateV1 { ..scalar, classification: field.value }; }
         if tag == 11 { return CheckResultTokenStateV1 { ..scalar, failure_class: field.value }; }
+        if tag == 12 { return CheckResultTokenStateV1 { ..scalar, test_result_schema: field.value }; }
+        if tag == 13 { return CheckResultTokenStateV1 { ..scalar, selection_valid: false }; }
+        if tag == 14 { return CheckResultTokenStateV1 { ..scalar, test_inventory_valid: false }; }
+        if tag == 15 { return CheckResultTokenStateV1 { ..scalar, experiment_valid: false }; }
         return scalar;
     }
     if context == 2 && tag == 1 {
@@ -1109,13 +1239,54 @@ fn token_store_scalar(
             source_sha256: field.value
         };
     }
+    if context == 10 {
+        let identity: TextValueV1 = decode_text_value(document, field, false);
+        let within_bound: bool = identity.valid && identity.length <= 512
+            && scalar.selected_test_identity_count < 256;
+        let row: [byte; up_to 512] = widen_text_512(identity.bytes, identity.length);
+        let safe_index: u64 = select(
+            scalar.selected_test_identity_count < 256,
+            scalar.selected_test_identity_count,
+            255
+        );
+        let identities: [[byte; up_to 512]; 256] = select(
+            within_bound,
+            replace(scalar.selected_test_identities, safe_index, row),
+            scalar.selected_test_identities
+        );
+        return CheckResultTokenStateV1 {
+            ..scalar,
+            selected_test_identities: identities,
+            selected_test_identity_count: select(
+                within_bound, scalar.selected_test_identity_count +% 1, scalar.selected_test_identity_count
+            ),
+            selected_test_identities_valid: scalar.selected_test_identities_valid && within_bound
+        };
+    }
+    if context == 11 && tag == 1 {
+        let kind_supported: bool = field.value.kind == 2 || field.value.kind == 6;
+        return CheckResultTokenStateV1 {
+            ..scalar,
+            inventory_identity: select(kind_supported, field.value, invalid_span()),
+            test_inventory_valid: scalar.test_inventory_valid && kind_supported
+        };
+    }
+    if context == 12 && tag == 1 {
+        let kind_supported: bool = field.value.kind == 2 || field.value.kind == 6;
+        return CheckResultTokenStateV1 {
+            ..scalar,
+            family_run_identity: select(kind_supported, field.value, invalid_span()),
+            experiment_valid: scalar.experiment_valid && kind_supported
+        };
+    }
     return scalar;
 }
 
 fn token_close_container(
     state: CheckResultTokenStateV1,
     frame_index: u64,
-    document: json_order.JsonTokenDocumentV1
+    document: json_order.JsonTokenDocumentV1,
+    token_end: u64
 ) -> (result: CheckResultTokenStateV1) {
     if frame_index >= 12 || state.value_count >= 512 {
         return CheckResultTokenStateV1 { ..state, valid: false };
@@ -1127,6 +1298,18 @@ fn token_close_container(
         value_count: state.value_count +% 1
     };
     if context == 5 { return token_row_finish(closed, document); }
+    if context == 9 {
+        let span_valid: bool = state.selection_span.found
+            && token_end >= state.selection_span.start;
+        return CheckResultTokenStateV1 {
+            ..closed,
+            selection_span: TokenValueSpanV1 {
+                ..state.selection_span,
+                length: select(span_valid, token_end -% state.selection_span.start, 0)
+            },
+            selection_valid: state.selection_valid && span_valid
+        };
+    }
     return closed;
 }
 
@@ -1144,7 +1327,9 @@ fn process_cursor_token(
         return token_open_container(state, token);
     }
     if token.token_kind == 9 || token.token_kind == 10 {
-        return token_close_container(state, token.token_depth as u64, document);
+        return token_close_container(
+            state, token.token_depth as u64, document, token.token_end
+        );
     }
     return state;
 }
@@ -1364,7 +1549,7 @@ fn close_number_parent(
     }
     if token.token_depth == 0 { return CheckResultTokenStateV1 { ..state, valid: false }; }
     return token_close_container(
-        state, (token.token_depth as u64) -% 1, document
+        state, (token.token_depth as u64) -% 1, document, token.token_end
     );
 }
 
@@ -1578,14 +1763,87 @@ fn extract_token_result(
     return ExtractedTestResultV1 { supported: supported, request: request };
 }
 
+fn test_result_schema_matches(value: TextValueV1) -> (result: bool) {
+    let expected: [byte; up_to 64] = [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 114, 101, 115, 117, 108, 116, 47, 49];
+    if !value.valid || value.length != expected.len { return false; }
+    iterate i over expected carrying matches: bool = true {
+        next matches = matches && value.bytes[i] == expected[i];
+    }
+    return matches;
+}
+
+fn extract_family_metadata(
+    document: json_order.JsonTokenDocumentV1,
+    state: CheckResultTokenStateV1
+) -> (result: FamilyResultMetadataV1) {
+    let schema_value: TextValueV1 = decode_text_value(
+        document,
+        FieldLookupV1 { found: state.test_result_schema_seen, value: state.test_result_schema },
+        false
+    );
+    let verdict_value: TextValueV1 = decode_text_value(
+        document,
+        FieldLookupV1 { found: state.verdict_seen, value: state.verdict },
+        false
+    );
+    let inventory_value: TextValueV1 = decode_text_value(
+        document,
+        FieldLookupV1 { found: state.inventory_identity_seen, value: state.inventory_identity },
+        true
+    );
+    let run_identity_value: TextValueV1 = decode_text_value(
+        document,
+        FieldLookupV1 { found: state.run_identity_seen, value: state.family_run_identity },
+        true
+    );
+    let inventory_is_null: bool = state.inventory_identity_seen
+        && state.inventory_identity.kind == 6;
+    let run_identity_is_null: bool = state.run_identity_seen
+        && state.family_run_identity.kind == 6;
+    let inventory_value_valid: bool = !state.inventory_identity_seen
+        || inventory_is_null
+        || (inventory_value.valid && inventory_value.length <= 64);
+    let run_identity_value_valid: bool = !state.run_identity_seen
+        || run_identity_is_null
+        || (run_identity_value.valid && run_identity_value.length <= 512);
+    let selection_span_valid: bool = !state.selection_seen
+        || (state.selection_span.found && state.selection_span.kind == 7
+            && state.selection_span.length > 0);
+    let supported: bool = state.valid && json_cursor.is_valid(state.cursor)
+        && state.root_is_object && state.verdict_seen && verdict_value.valid
+        && verdict_value.length <= 16 && state.selection_valid
+        && state.selected_test_identities_valid && state.selected_test_identity_count <= 256
+        && selection_span_valid
+        && (!state.test_inventory_seen || state.test_inventory_valid)
+        && (!state.experiment_seen || state.experiment_valid)
+        && inventory_value_valid && run_identity_value_valid;
+    return FamilyResultMetadataV1 {
+        supported: supported,
+        test_result_schema_valid: test_result_schema_matches(schema_value),
+        verdict: widen_text_16(verdict_value.bytes, verdict_value.length),
+        selected_test_identities: state.selected_test_identities[0..state.selected_test_identity_count],
+        selection_present: state.selection_seen,
+        selection_start: state.selection_span.start,
+        selection_length: state.selection_span.length,
+        inventory_identity_present: state.inventory_identity_seen,
+        inventory_identity_null: inventory_is_null,
+        inventory_identity: widen_text_64(inventory_value.bytes, inventory_value.length),
+        run_identity_present: state.run_identity_seen,
+        run_identity_null: run_identity_is_null,
+        run_identity: widen_text_512(run_identity_value.bytes, run_identity_value.length)
+    };
+}
+
 fn json_result(
     supported: bool,
-    request: check_result.CheckResultProjectionRequestV1
+    request: check_result.CheckResultProjectionRequestV1,
+    family_metadata: FamilyResultMetadataV1
 ) -> (result: CheckResultJsonNativeResultV1) {
     return CheckResultJsonNativeResultV1 {
         schema_version: result_schema(),
         supported: supported,
-        projection: check_result.build_result(request)
+        projection: check_result.build_result(request),
+        family_metadata: family_metadata
     };
 }
 
@@ -1615,11 +1873,16 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     let extracted: ExtractedTestResultV1 = extract_token_result(
         request.document, tokenized, request
     );
+    let family_metadata: FamilyResultMetadataV1 = extract_family_metadata(
+        request.document, tokenized
+    );
     let supported: bool = transport_valid && syntax_valid && extracted.supported;
     let selected_request: check_result.CheckResultProjectionRequestV1 = select(
         supported, extracted.request, empty_projection_request(request)
     );
-    let output: CheckResultJsonNativeResultV1 = json_result(supported, selected_request);
+    let output: CheckResultJsonNativeResultV1 = json_result(
+        supported, selected_request, family_metadata
+    );
     let published: u64 = structured_write(context.argv[1], result_schema(), output);
     if published == 0 {
         return failure([67, 104, 101, 99, 107, 82, 101, 115, 117, 108, 116, 32, 74, 83, 79, 78, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);

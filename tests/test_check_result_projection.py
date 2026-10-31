@@ -61,9 +61,17 @@ def test_native_check_result_projection_matches_family_contract(
         "provenance": {"runner": {"source_sha256": source_digest}},
         "run_id": "run-native-17",
         "selection": {
-            "selected_test_identities": ["mncs:test-case:execution"]
+            "selected_test_identities": ["mncs:test-case:execution"],
+            "future": {"label": "opaque value 🛰️", "flags": [True, None]},
         },
+        "test_inventory": {"inventory_identity": "b" * 64},
+        "experiment": {"run_identity": "run-family-17"},
     }
+    test_result_document = mncs_test.json.dumps(result, ensure_ascii=False).encode("utf-8")
+    test_result_document = test_result_document.replace(
+        b"mncs:test-case:execution",
+        b"mncs:test-case:\\u0065xecution",
+    )
 
     native_responses: list[dict] = []
     original_run_native_app = mncs_test.run_native_app
@@ -83,7 +91,7 @@ def test_native_check_result_projection_matches_family_contract(
         environment=_environment(),
         check_id="family:exact:check",
         claim="The exact repository-owned behavioral family check was executed by mncs-test",
-        test_result_document=mncs_test.json.dumps(result, ensure_ascii=False).encode("utf-8"),
+        test_result_document=test_result_document,
     )
 
     digest = f"sha256:{result_digest}"
@@ -118,6 +126,36 @@ def test_native_check_result_projection_matches_family_contract(
     }
     assert len(native_responses) == 1
     assert native_responses[0]["supported"] is True
+    family_native = native_responses[0]["family_metadata"]
+    assert family_native["supported"] is True
+    assert family_native["test_result_schema_valid"] is True
+    assert family_native["verdict"] == "UNKNOWN"
+    assert family_native["selected_test_identities"] == ["mncs:test-case:execution"]
+    assert family_native["inventory_identity_present"] is True
+    assert family_native["inventory_identity"] == "b" * 64
+    assert family_native["run_identity_present"] is True
+    assert family_native["run_identity"] == "run-family-17"
+    selection_bytes = test_result_document[
+        family_native["selection_start"] :
+        family_native["selection_start"] + family_native["selection_length"]
+    ]
+    assert b"\\u0065" in selection_bytes
+
+    decoded_inputs: list[object] = []
+    original_loads = mncs_test.json.loads
+
+    def observe_loads(payload, *args, **kwargs):
+        decoded_inputs.append(payload)
+        return original_loads(payload, *args, **kwargs)
+
+    monkeypatch.setattr(mncs_test.json, "loads", observe_loads)
+    family = mncs_test._family_check_metadata_from_native(
+        native_responses[0], test_result_document
+    )
+    assert family is not None
+    assert family["selected_test_identities"] == ["mncs:test-case:execution"]
+    assert family["selection"] == result["selection"]
+    assert decoded_inputs == [selection_bytes]
 
 
 def test_native_projection_uses_external_check_id_when_source_id_is_missing(

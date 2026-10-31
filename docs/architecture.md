@@ -211,10 +211,15 @@ bounded token document, extracts the policy fields, and calls the existing
 `check_result_projection_v1` implementation; Python no longer builds the typed
 projection request for native-supported documents. The ordinary `--check-result`
 path passes the same serialized result document when one is available. The
-adapter still decodes the result once for validation and the opaque `selection`
-field, and uses the existing host projection when the document or a field is
-outside the native parser's limits. The shared native JSON document shape
-admits at most 65,536 input bytes in 64 UTF-8-safe chunks of up to 1,024 bytes.
+family-check path uses the same cursor scan to validate the TestResult schema
+and verdict, extract selected test identities and inventory/run identities,
+and retain the opaque `selection` source span. It no longer builds a Python
+value tree for the surrounding TestResult; Python decodes only that opaque
+selection span so CheckResult keeps its forward-compatible selection value.
+The existing host projection remains the compatibility path when the document
+or a required field is outside the native parser's limits. The shared native
+JSON document shape admits at most 65,536 input bytes in 64 UTF-8-safe chunks
+of up to 1,024 bytes.
 The adapter returns to the compatibility path if UTF-8 boundaries would
 require a 65th chunk. For CheckResult, the adapter also preflights native
 execution to 16,384 document bytes: the fixed 8,000,000-step application
@@ -238,7 +243,16 @@ CheckResult, and stores only decoded key histories needed for that check.
 Unescaped failure messages reuse packed UTF-8-safe source chunks directly;
 escaped strings continue through the native decoder. The exact 10,240-byte
 message and 16,384-byte document cases pass through the native application at
-the existing 8,000,000-step ceiling.
+the existing 8,000,000-step ceiling. P-013 extends that same token stream with
+family-check metadata for the TestResult schema, verdict, selected identities,
+inventory identity, and experiment run identity. The selected identities are
+decoded natively; the opaque selection is copied from a bounded source span.
+The family consumer uses native metadata for its exact-selection and
+inventory-freshness policy, and keeps its previous Python tree path for native
+fallback cases. Differential projection tests cover escaped selected
+identities, nested unknown selection values, inventory/run identities, and
+selection-span preservation; the family-check integration test verifies that
+the complete retained TestResult is not passed to Python `json.loads`.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

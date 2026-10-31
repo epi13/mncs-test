@@ -857,6 +857,7 @@ class RunnerTests(unittest.TestCase):
             )
             native_applications: list[str] = []
             native_json_requests: list[dict] = []
+            family_metadata_results: list[dict] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
                 "test-public-result-json-native-token-tape.json",
@@ -872,14 +873,24 @@ class RunnerTests(unittest.TestCase):
                 native_applications.append(name)
                 if name == "test-check-result-json-native.json":
                     native_json_requests.append(native_request)
+                    family_metadata_results.append(response["family_metadata"])
                 return response
 
             public_payload_inputs = []
             original_public_payload = mncs_test._public_result_json_payload
+            decoded_json_documents = []
+            original_json_loads = mncs_test.json.loads
 
             def observe_public_payload(value, **kwargs):
                 public_payload_inputs.append(value)
                 return original_public_payload(value, **kwargs)
+
+            def observe_json_loads(value, *args, **kwargs):
+                if isinstance(value, bytes):
+                    decoded_json_documents.append(value)
+                elif isinstance(value, str):
+                    decoded_json_documents.append(value.encode("utf-8"))
+                return original_json_loads(value, *args, **kwargs)
 
             output = io.StringIO()
             with (
@@ -896,6 +907,9 @@ class RunnerTests(unittest.TestCase):
                     "_public_result_json_payload",
                     side_effect=observe_public_payload,
                 ),
+                mock.patch.object(
+                    mncs_test.json, "loads", side_effect=observe_json_loads
+                ),
                 redirect_stdout(output),
             ):
                 exit_code = mncs_test.run_family_check(arguments)
@@ -903,7 +917,22 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0, output.getvalue())
         response = json.loads(output.getvalue())
         self.assertIn("test-check-result-json-native.json", native_applications)
+        self.assertEqual(len(family_metadata_results), 1)
+        self.assertTrue(
+            family_metadata_results[0]["supported"],
+            family_metadata_results[0],
+        )
         expected_test_result_document = json.dumps(result).encode("utf-8")
+        self.assertNotIn(
+            expected_test_result_document,
+            decoded_json_documents,
+            "family checks should not build a Python value tree for the retained TestResult",
+        )
+        self.assertIn(
+            json.dumps(result["selection"]).encode("utf-8"),
+            decoded_json_documents,
+            "the opaque selection field remains compatible through its native source span",
+        )
         expected_native_document, _ = mncs_test._native_public_result_document_request(
             expected_test_result_document
         )
