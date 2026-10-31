@@ -12,6 +12,7 @@ WORKSPACE_ROOT = next(
     (path for path in (ROOT.parent, *ROOT.parents) if (path / "mncs-language").is_dir()),
     ROOT.parent,
 )
+COMMONS_ROOT = Path(os.environ.get("MNCS_COMMONS_REPO", WORKSPACE_ROOT / "MNCS-Commons"))
 LANGUAGE_ROOT = WORKSPACE_ROOT / "mncs-language"
 _default_mncs = LANGUAGE_ROOT / "target/release/mncs"
 if not _default_mncs.is_file():
@@ -27,9 +28,11 @@ def _native_environment() -> dict[str, str]:
     stdlib = Path(explicit) / "library" if explicit else WORKSPACE_ROOT / "mncs-stdlib/library"
     if not stdlib.is_dir():
         stdlib = LANGUAGE_ROOT / "library"
-    environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(
-        (str(stdlib), str(ROOT / "native"))
-    )
+    roots = [stdlib, ROOT / "native"]
+    commons_library = COMMONS_ROOT / "src" / "mncs_commons" / "mesh" / "mncs"
+    if commons_library.is_dir():
+        roots.append(commons_library)
+    environment["MNCS_LIBRARY_PATH"] = os.pathsep.join(map(str, roots))
     return environment
 
 
@@ -55,6 +58,7 @@ def _run_inputs() -> dict[str, object]:
         "test_results": [
             {"id": 'line\n"quoted" and slash\\\\'},
             {"id": "Lúna 東京\tcase"},
+            {"id": "control-\x01\x08\x0b\x0c\r"},
         ],
         "test_inventory": {
             "subject_identity": "mncs:test:subject:case-1",
@@ -113,9 +117,44 @@ def _call_native_run_identity(
 
 def test_native_run_identity_matches_independent_compact_json(tmp_path: Path) -> None:
     inputs = _run_inputs()
-    actual = _call_native_run_identity(inputs, tmp_path)
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual = _call_native_run_identity(inputs, tmp_path)
 
     assert actual == _reference_run_identity(inputs)
+    identity_calls = [
+        call for call in native_app.call_args_list
+        if call.args and call.args[0] == "test-run-identity.json"
+    ]
+    assert len(identity_calls) == 1
+    request = identity_calls[0].args[1]
+    assert set(request) == {
+        "schema_version", "compiler", "execution", "manifest", "obligation_plan",
+        "profile", "source", "subject_fingerprint", "subject_identity",
+        "test_count", "tests", "verification_plan",
+    }
+    records = list(request["compiler"].values())
+    records.extend(
+        request["execution"][key]
+        for key in ("artifact_identity", "artifact_sha256", "mode")
+    )
+    records.extend(request["manifest"].values())
+    records.extend(request["source"].values())
+    records.extend(
+        request[key]
+        for key in (
+            "obligation_plan", "profile", "subject_fingerprint", "subject_identity",
+            "verification_plan",
+        )
+    )
+    records.extend(request["tests"])
+    for record in records:
+        assert type(record["value"]) is str
+        assert record["length"] == len(record["value"].encode("utf-8"))
+    assert request["compiler"]["sha256"] == {
+        "value": "", "length": 0, "is_null": True
+    }
 
 
 def test_make_result_uses_native_run_identity(tmp_path: Path) -> None:
@@ -224,3 +263,23 @@ def test_over_bound_run_identity_uses_exact_compatibility_payload(
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
+
+
+def test_native_budget_run_identity_uses_exact_compatibility_payload(
+    tmp_path: Path,
+) -> None:
+    inputs = _run_inputs()
+    expected = _reference_run_identity(inputs)
+    with mock.patch.object(
+        mncs_test,
+        "run_native_app",
+        side_effect=mncs_test.NativeBudgetExhaustedError("fixture budget"),
+    ) as native_app, mock.patch.object(
+        mncs_test, "result_identity_sha256", return_value=expected
+    ) as fallback:
+        actual = _call_native_run_identity(inputs, tmp_path)
+
+    assert actual == expected
+    native_app.assert_called_once()
+    material = mncs_test._compatibility_run_identity_material(**inputs)
+    assert fallback.call_args.args[0] == mncs_test.compact_json(material).encode("utf-8")

@@ -409,10 +409,14 @@ case still takes its compatibility fallback at the enforced 8,000,000-step
 limit; no limit was raised. The 256-item manifest sort and canonical digest
 remain native and pass their independent loader comparison.
 
-`mncs.test.result_identity_v1` constructs canonical run-identity JSON and
-hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
-fields into the request and formats the final result envelope; out-of-contract
-run identities retain the compact-JSON compatibility path. The batch identity
+`mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
+`mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded
+UTF-8 fields as strings in the existing typed request, avoiding one JSON
+integer node per byte while MNCS retains field validation, escaping, ordering,
+and hashing. Independent compact-JSON digest fixtures include Unicode and
+control characters; the `make_result` consumer uses the same native path.
+Values outside the existing 64-test, 1,024-byte-per-text, 8,192-byte aggregate,
+and 8,000,000-step bounds retain the compatibility hash. The batch identity
 application accepts up to 16 payloads, 64 chunks, 65,536 bytes, and the
 toolchain's 8,000,000-step ceiling per request. `ArtifactStore` uses the
 streaming identity application when a payload or file exceeds the batch's

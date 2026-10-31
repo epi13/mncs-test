@@ -2314,9 +2314,9 @@ def result_identity_sha256_many(
 
 
 def _native_run_text(value: Any, *, nullable: bool = False) -> dict[str, Any] | None:
-    """Project one ordinary JSON string into the bounded MNCS text record."""
+    """Project one bounded string without expanding UTF-8 into JSON integers."""
     if value is None and nullable:
-        return {"value": [], "length": 0, "is_null": True}
+        return {"value": "", "length": 0, "is_null": True}
     if not isinstance(value, str):
         return None
     try:
@@ -2325,7 +2325,7 @@ def _native_run_text(value: Any, *, nullable: bool = False) -> dict[str, Any] | 
         return None
     if len(encoded) > TEST_RUN_IDENTITY_MAX_TEXT_BYTES:
         return None
-    return {"value": list(encoded), "length": len(encoded), "is_null": False}
+    return {"value": value, "length": len(encoded), "is_null": False}
 
 
 def _native_run_identity_request(
@@ -2518,6 +2518,7 @@ def build_run_identity_sha256(
     )
     if prepared is not None:
         request, step_budget = prepared
+        result: dict[str, Any] | None = None
         try:
             result = run_native_app(
                 "test-run-identity.json",
@@ -2529,12 +2530,15 @@ def build_run_identity_sha256(
                 environment=environment,
                 step_budget=step_budget,
             )
+        except (NativeBudgetExhaustedError, NativeInputBoundError):
+            pass
         except NativeTransportError as error:
             raise AdapterError(f"native Test run identity failed: {error}") from error
-        digest = result.get("digest")
-        if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
-            raise AdapterError("MNCS run-identity app returned a malformed SHA-256 digest")
-        return digest
+        if result is not None:
+            digest = result.get("digest")
+            if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
+                raise AdapterError("MNCS run-identity app returned a malformed SHA-256 digest")
+            return digest
 
     material = _compatibility_run_identity_material(
         provenance=provenance,
