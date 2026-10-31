@@ -49,7 +49,7 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
-CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/4"
+CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/5"
 CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/5"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
@@ -66,7 +66,7 @@ PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-manifest-request/1"
-FAMILY_CHECK_MANIFEST_NATIVE_RESULT_SCHEMA = "mncs.test.family-check-manifest/1"
+FAMILY_CHECK_MANIFEST_NATIVE_RESULT_SCHEMA = "mncs.test.family-check-manifest/2"
 FAMILY_CHECK_MANIFEST_NATIVE_MAX_BYTES = 65_536
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS = 64
@@ -7289,6 +7289,7 @@ def _native_check_result_json_response(
     *,
     check_document: bytes | None = None,
     expected_test_identities: list[str] | None = None,
+    expected_test_identities_digest: str | None = None,
     expected_inventory_identity: str | None = None,
     preserve_public_projection_document: bool = False,
     result_digest: str,
@@ -7323,6 +7324,19 @@ def _native_check_result_json_response(
         ):
             native_expected_test_identities = expected_test_identities
             selection_expectation_present = True
+    native_expected_test_identities_digest = ""
+    selection_digest_expectation_present = False
+    if expected_test_identities_digest is not None:
+        try:
+            digest_bytes = expected_test_identities_digest.encode("ascii")
+        except (AttributeError, UnicodeEncodeError):
+            return None
+        if len(digest_bytes) != 64 or not SHA256_HEX.fullmatch(expected_test_identities_digest):
+            return None
+        if selection_expectation_present:
+            return None
+        native_expected_test_identities_digest = expected_test_identities_digest
+        selection_digest_expectation_present = True
     native_expected_inventory_identity = ""
     inventory_expectation_present = False
     if expected_inventory_identity is not None:
@@ -7350,6 +7364,8 @@ def _native_check_result_json_response(
         ),
         "selection_expectation_present": selection_expectation_present,
         "expected_test_identities": native_expected_test_identities,
+        "selection_digest_expectation_present": selection_digest_expectation_present,
+        "expected_test_identities_digest": native_expected_test_identities_digest,
         "inventory_expectation_present": inventory_expectation_present,
         "expected_inventory_identity": native_expected_inventory_identity,
         "projection_document_only": preserve_public_projection_document,
@@ -7938,6 +7954,7 @@ def _native_family_check_manifest_projection(
     manifest = response.get("manifest")
     inventory_identity = response.get("inventory_identity")
     test_identities = response.get("test_identities")
+    test_identities_digest = response.get("test_identities_digest")
     definition_identity = response.get("check_definition_identity")
     if (
         not isinstance(manifest, str)
@@ -7954,6 +7971,8 @@ def _native_family_check_manifest_projection(
             for identity in test_identities
         )
         or test_identities != sorted(set(test_identities))
+        or not isinstance(test_identities_digest, str)
+        or not SHA256_HEX.fullmatch(test_identities_digest)
         or not isinstance(definition_identity, str)
         or not SHA256_HEX.fullmatch(definition_identity)
     ):
@@ -7962,6 +7981,7 @@ def _native_family_check_manifest_projection(
         "manifest": manifest,
         "inventory_identity": inventory_identity,
         "test_identities": test_identities,
+        "test_identities_digest": test_identities_digest,
         "check_definition_identity": definition_identity,
     }
 
@@ -8130,6 +8150,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             )
             selector = check["selector"]
             check_definition_identity: str | None = None
+            expected_identity_digest: str | None = None
         else:
             selector = {
                 "manifest": native_check["manifest"],
@@ -8137,6 +8158,7 @@ def run_family_check(args: argparse.Namespace) -> int:
                 "test_identities": native_check["test_identities"],
             }
             check_definition_identity = native_check["check_definition_identity"]
+            expected_identity_digest = native_check["test_identities_digest"]
         manifest_path = resolve_path(selector["manifest"], checks_path.parent, must_exist=True)
         with tempfile.TemporaryDirectory(prefix="mncs-family-check-") as directory:
             root = Path(directory)
@@ -8195,7 +8217,10 @@ def run_family_check(args: argparse.Namespace) -> int:
         native_json_response = _native_check_result_json_response(
             result_document_bytes,
             check_document=check_document_bytes,
-            expected_test_identities=selector["test_identities"],
+            expected_test_identities=(
+                selector["test_identities"] if expected_identity_digest is None else None
+            ),
+            expected_test_identities_digest=expected_identity_digest,
             expected_inventory_identity=selector.get("inventory_identity"),
             result_digest=result_digest,
             mncs=args.mncs,
@@ -8262,7 +8287,11 @@ def run_family_check(args: argparse.Namespace) -> int:
             # Keep the supported path on scalar metadata instead of synthesizing
             # a Python TestResult mapping just to pass a few fields downstream.
             result_exit_code = completed.returncode
-            selected = family_metadata["selected_test_identities"]
+            selected = (
+                selector["test_identities"]
+                if family_metadata["selection_comparison_supported"]
+                else family_metadata["selected_test_identities"]
+            )
             inventory_identity = family_metadata["inventory_identity"]
             run_identity = family_metadata["run_identity"]
         if native_verdict_agreement is False or (

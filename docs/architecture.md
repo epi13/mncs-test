@@ -381,6 +381,21 @@ application budget; the native app does not claim support after budget
 exhaustion. The combined manifest and CheckResult suites pass 29 tests, and the
 compiler-backed live family-check consumer passes with both shared-sort users.
 
+P-028 adds canonical JSON string writing and seeded writer hashing to the
+shared Test JSON module, removing the duplicate escaping and chunk-hash loops
+from the manifest projector. The family manifest returns a domain-separated
+digest of its sorted identity array; `run_family_check` passes that digest to
+CheckResult instead of transporting a second copy of up to 256 identities.
+CheckResult hashes decoded identity tokens as it scans them, retaining only the
+previous identity for strict-order validation and a SHA-256 state. This avoids
+both a Python typed-value tree and the native 256-element identity array on the
+supported digest path. Independent tests cover compact canonical digests,
+quote, backslash, newline, and Unicode escaping, plus the 128-item native
+CheckResult bound. A 256-item digest comparison still exceeds the existing
+8,000,000-step budget and retains its compatibility fallback. The focused
+manifest and CheckResult suites pass, as do the affected public-result binding
+regressions and the compiler-backed live family-check consumer.
+
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
 fields into the request and formats the final result envelope; out-of-contract

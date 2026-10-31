@@ -39,6 +39,11 @@ EMBED_LIBRARY = Path(os.environ.get("MNCS_EMBED_LIBRARY", _DEFAULT_EMBED_LIBRARY
 LIVE = MNCS.is_file() and os.access(MNCS, os.X_OK)
 
 
+def _identity_set_digest(identities: list[str]) -> str:
+    canonical = json.dumps(sorted(identities), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(b"mncs.test.identity-set.v1\x00" + canonical.encode("utf-8")).hexdigest()
+
+
 def _stdlib_library() -> Path:
     """Standard-library tree: explicit root, else family sibling, else legacy."""
     explicit = os.environ.get("MNCS_STDLIB_ROOT")
@@ -1043,9 +1048,11 @@ class RunnerTests(unittest.TestCase):
             expected_check_document["document"],
             "the family validator should receive the exact produced CheckResult bytes",
         )
+        self.assertEqual(native_json_requests[0]["expected_test_identities"], [])
+        self.assertTrue(native_json_requests[0]["selection_digest_expectation_present"])
         self.assertEqual(
-            native_json_requests[0]["expected_test_identities"],
-            check["selector"]["test_identities"],
+            native_json_requests[0]["expected_test_identities_digest"],
+            _identity_set_digest(check["selector"]["test_identities"]),
         )
         self.assertEqual(
             native_json_requests[0]["expected_inventory_identity"],

@@ -25,6 +25,7 @@ record FamilyCheckManifestResultV1 {
     manifest: [byte; up_to 512],
     inventory_identity: [byte; up_to 64],
     test_identities: [[byte; up_to 512]; up_to 256],
+    test_identities_digest: [byte; up_to 64],
     check_definition_identity: [byte; up_to 64]
 }
 
@@ -53,7 +54,8 @@ record SelectorProjectionV1 {
     manifest: [byte; up_to 512],
     inventory_identity: [byte; up_to 64],
     test_identities: [[byte; up_to 512]; up_to 256],
-    identity_count: u64
+    identity_count: u64,
+    test_identities_digest: [byte; up_to 64]
 }
 record ManifestProjectionV1 {
     supported: bool,
@@ -61,6 +63,7 @@ record ManifestProjectionV1 {
     inventory_identity: [byte; up_to 64],
     test_identities: [[byte; up_to 512]; up_to 256],
     identity_count: u64,
+    test_identities_digest: [byte; up_to 64],
     check_definition_identity: [byte; up_to 64]
 }
 record DigestChunkStateV1 { digest: sha256.DigestState }
@@ -70,7 +73,7 @@ fn request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109,110,99,115,46,116,101,115,116,46,102,97,109,105,108,121,45,99,104,101,99,107,45,109,97,110,105,102,101,115,116,47,49];
+    return [109,110,99,115,46,116,101,115,116,46,102,97,109,105,108,121,45,99,104,101,99,107,45,109,97,110,105,102,101,115,116,47,50];
 }
 
 fn same_bytes64(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -359,7 +362,8 @@ fn empty_selector() -> (result: SelectorProjectionV1) {
     let identities: [[byte; up_to 512]; 256] = [empty; 256];
     return SelectorProjectionV1 {
         supported: false, manifest: [], inventory_identity: [],
-        test_identities: identities[0..0], identity_count: 0
+        test_identities: identities[0..0], identity_count: 0,
+        test_identities_digest: []
     };
 }
 
@@ -391,7 +395,10 @@ fn project_selector_fields(fields: json_order.JsonValueV1, document: json_order.
         manifest: manifest.bytes,
         inventory_identity: inventory.bytes,
         test_identities: identities.values[0..identities.count],
-        identity_count: identities.count
+        identity_count: identities.count,
+        test_identities_digest: identity_array_digest(
+            identities.values[0..identities.count], identities.count
+        )
     };
 }
 
@@ -462,28 +469,32 @@ fn search_checks(items: json_order.JsonValueV1, request: FamilyCheckManifestRequ
     return CheckSearchV1 { ..searched, valid: searched.valid && json_order.is_array_nil(searched.remaining) && searched.count == 1 };
 }
 
-fn sha_part(digest: sha256.DigestState, chunk: json_order.JsonOrderChunkV1, index: u64) -> (result: sha256.DigestState) {
-    let start: u64 = index *% 64;
-    if start >= chunk.length { return digest; }
-    let remaining: u64 = chunk.length -% start;
-    let size: u64 = select(remaining < 64, remaining, 64);
-    return sha256.update_standard(digest, chunk.bytes[start..start +% size], size);
-}
-
-fn sha_chunk(digest: sha256.DigestState, chunk: json_order.JsonOrderChunkV1) -> (result: sha256.DigestState) {
-    iterate i up_to 16 carrying current: sha256.DigestState = digest {
-        next current = sha_part(current, chunk, i);
-    }
-    return current;
+fn writer_digest_seeded(
+    writer: json_order.JsonOrderWriterV1,
+    initial: sha256.DigestState
+) -> (result: [byte; up_to 64]) {
+    let hashed: sha256.DigestState = json_order.digest_writer_seeded(writer, initial);
+    return json_order.encode_digest(sha256.finalize_standard(hashed));
 }
 
 fn writer_digest(writer: json_order.JsonOrderWriterV1) -> (result: [byte; up_to 64]) {
-    let output: json_order.JsonOrderChunkBuilderV1 = json_order.output_chunks(writer);
-    iterate i over output.chunks[0..output.count] carrying digest: sha256.DigestState = sha256.init() {
-        next digest = sha_chunk(digest, output.chunks[i]);
-    }
-    let hashed: sha256.DigestState = digest;
-    return json_order.encode_digest(sha256.finalize_standard(hashed));
+    return writer_digest_seeded(writer, sha256.init());
+}
+
+fn identity_array_digest(
+    identities: [[byte; up_to 512]; up_to 256],
+    count: u64
+) -> (result: [byte; up_to 64]) {
+    if count > 256 { return []; }
+    let writer: json_order.JsonOrderWriterV1 = write_sorted_identities(
+        json_order.writer_empty(), identities, count
+    );
+    if !writer.ok { return []; }
+    let domain: [byte; 26] = [
+        109,110,99,115,46,116,101,115,116,46,105,100,101,110,116,105,116,121,45,115,101,116,46,118,49,0
+    ];
+    let tagged: sha256.DigestState = sha256.update_standard(sha256.init(), domain, domain.len);
+    return writer_digest_seeded(writer, tagged);
 }
 
 fn empty_projection() -> (result: ManifestProjectionV1) {
@@ -492,46 +503,9 @@ fn empty_projection() -> (result: ManifestProjectionV1) {
     return ManifestProjectionV1 {
         supported: false, manifest: [], inventory_identity: [],
         test_identities: identities[0..0], identity_count: 0,
+        test_identities_digest: [],
         check_definition_identity: []
     };
-}
-
-fn lower_hex_digit(value: u64) -> (result: byte) {
-    if value < 10 { return (48 +% value) as byte; }
-    return (87 +% value) as byte;
-}
-
-fn escaped_control(writer: json_order.JsonOrderWriterV1, value: byte) -> (result: json_order.JsonOrderWriterV1) {
-    let number: u64 = value as u64;
-    let first: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 92);
-    let second: json_order.JsonOrderWriterV1 = json_order.writer_byte(first, 117);
-    let third: json_order.JsonOrderWriterV1 = json_order.writer_byte(second, 48);
-    let fourth: json_order.JsonOrderWriterV1 = json_order.writer_byte(third, 48);
-    let fifth: json_order.JsonOrderWriterV1 = json_order.writer_byte(fourth, lower_hex_digit(number / 16));
-    return json_order.writer_byte(fifth, lower_hex_digit(number % 16));
-}
-
-fn canonical_text_step(writer: json_order.JsonOrderWriterV1, value: byte) -> (result: json_order.JsonOrderWriterV1) {
-    if !writer.ok { return writer; }
-    if value == 34 || value == 92 {
-        return json_order.writer_byte(json_order.writer_byte(writer, 92), value);
-    }
-    if value == 8 { return json_order.writer_bytes(writer, [92, 98]); }
-    if value == 9 { return json_order.writer_bytes(writer, [92, 116]); }
-    if value == 10 { return json_order.writer_bytes(writer, [92, 110]); }
-    if value == 12 { return json_order.writer_bytes(writer, [92, 102]); }
-    if value == 13 { return json_order.writer_bytes(writer, [92, 114]); }
-    if value < 32 { return escaped_control(writer, value); }
-    return json_order.writer_byte(writer, value);
-}
-
-fn write_canonical_text(writer: json_order.JsonOrderWriterV1, value: TextValueV1) -> (result: json_order.JsonOrderWriterV1) {
-    if !value.valid { return json_order.JsonOrderWriterV1 { ..writer, ok: false }; }
-    let opened: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 34);
-    iterate i over value.bytes carrying current: json_order.JsonOrderWriterV1 = opened {
-        next current = canonical_text_step(current, value.bytes[i]);
-    }
-    return json_order.writer_byte(current, 34);
 }
 
 fn write_sorted_identity_step(
@@ -543,14 +517,10 @@ fn write_sorted_identity_step(
     if index >= count { return writer; }
     let identity: [byte; up_to 512] = identities[index];
     if index == 0 {
-        return write_canonical_text(writer, TextValueV1 {
-            bytes: identity, length: identity.len, valid: identity.len > 0
-        });
+        return json_order.write_canonical_string(writer, identity);
     }
     let separated: json_order.JsonOrderWriterV1 = json_order.writer_byte(writer, 44);
-    return write_canonical_text(separated, TextValueV1 {
-        bytes: identity, length: identity.len, valid: identity.len > 0
-    });
+    return json_order.write_canonical_string(separated, identity);
 }
 
 fn write_sorted_identities(
@@ -580,6 +550,14 @@ fn short_text_value(bytes: [byte; up_to 64], valid: bool) -> (result: TextValueV
         next copied = copy_short_text_byte(copied, bytes, i);
     }
     return TextValueV1 { bytes: copied.bytes[0..copied.length], length: copied.length, valid: copied.valid };
+}
+
+fn write_canonical_text(
+    writer: json_order.JsonOrderWriterV1,
+    value: TextValueV1
+) -> (result: json_order.JsonOrderWriterV1) {
+    if !value.valid { return json_order.JsonOrderWriterV1 { ..writer, ok: false }; }
+    return json_order.write_canonical_string(writer, value.bytes);
 }
 
 fn write_check_definition(
@@ -648,6 +626,7 @@ fn project_check(fields: json_order.JsonValueV1, request: FamilyCheckManifestReq
         inventory_identity: selector.inventory_identity,
         test_identities: selector.test_identities,
         identity_count: selector.identity_count,
+        test_identities_digest: selector.test_identities_digest,
         check_definition_identity: writer_digest(writer)
     };
 }
@@ -747,6 +726,7 @@ fn family_check_manifest_native_app_v1(context: ApplicationContext) -> (result: 
         manifest: projected.manifest,
         inventory_identity: projected.inventory_identity,
         test_identities: projected.test_identities,
+        test_identities_digest: projected.test_identities_digest,
         check_definition_identity: projected.check_definition_identity
     };
     let published: u64 = structured_write(context.argv[1], result_schema(), response);

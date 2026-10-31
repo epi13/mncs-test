@@ -5,7 +5,7 @@
   "module": "mncs.test.check_result_json_native_v1",
   "entry_function": "check_result_json_native_app_v1",
   "profile": "0.18",
-  "interface_identity": "a7eaed25219e8b8214bcf555076d47d4de207f76ae65193aa7468d8796414248",
+  "interface_identity": "77bfb8fa7c1f7e6f4cbc2bf70cc3692a8958e24a9223e860f7d7d7268993037f",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

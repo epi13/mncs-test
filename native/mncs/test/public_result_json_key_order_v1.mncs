@@ -785,6 +785,43 @@ fn writer_append_step(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOr
     return writer;
 }
 
+fn canonical_lower_hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (48 +% value) as byte; }
+    return (87 +% value) as byte;
+}
+
+fn canonical_escaped_control(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
+    let number: u64 = value as u64;
+    let first: JsonOrderWriterV1 = writer_byte(writer, 92);
+    let second: JsonOrderWriterV1 = writer_byte(first, 117);
+    let third: JsonOrderWriterV1 = writer_byte(second, 48);
+    let fourth: JsonOrderWriterV1 = writer_byte(third, 48);
+    let fifth: JsonOrderWriterV1 = writer_byte(fourth, canonical_lower_hex_digit(number / 16));
+    return writer_byte(fifth, canonical_lower_hex_digit(number % 16));
+}
+
+fn canonical_string_step(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
+    if !writer.ok { return writer; }
+    if value == 34 || value == 92 {
+        return writer_byte(writer_byte(writer, 92), value);
+    }
+    if value == 8 { return writer_bytes(writer, [92, 98]); }
+    if value == 9 { return writer_bytes(writer, [92, 116]); }
+    if value == 10 { return writer_bytes(writer, [92, 110]); }
+    if value == 12 { return writer_bytes(writer, [92, 102]); }
+    if value == 13 { return writer_bytes(writer, [92, 114]); }
+    if value < 32 { return canonical_escaped_control(writer, value); }
+    return writer_byte(writer, value);
+}
+
+fn write_canonical_string(writer: JsonOrderWriterV1, value: [byte; up_to 512]) -> (result: JsonOrderWriterV1) {
+    let opened: JsonOrderWriterV1 = writer_byte(writer, 34);
+    iterate i over value carrying current: JsonOrderWriterV1 = opened {
+        next current = canonical_string_step(current, value[i]);
+    }
+    return writer_byte(current, 34);
+}
+
 fn is_array_nil(value: JsonValueV1) -> (result: bool) {
     return match value {
         ArrayNil => true,
@@ -962,6 +999,39 @@ fn output_chunks(writer: JsonOrderWriterV1) -> (result: JsonOrderChunkBuilderV1)
         chunks: replace(completed, writer.completed_count, current),
         count: writer.completed_count +% 1
     };
+}
+
+fn digest_writer_chunk_part(
+    digest: sha256.DigestState,
+    chunk: JsonOrderChunkV1,
+    part: u64
+) -> (result: sha256.DigestState) {
+    let start: u64 = part *% 64;
+    if start >= chunk.length { return digest; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    return sha256.update_standard(digest, chunk.bytes[start..start +% size], size);
+}
+
+fn digest_writer_chunk(
+    digest: sha256.DigestState,
+    chunk: JsonOrderChunkV1
+) -> (result: sha256.DigestState) {
+    iterate part up_to 16 carrying current: sha256.DigestState = digest {
+        next current = digest_writer_chunk_part(current, chunk, part);
+    }
+    return current;
+}
+
+fn digest_writer_seeded(
+    writer: JsonOrderWriterV1,
+    initial: sha256.DigestState
+) -> (result: sha256.DigestState) {
+    let output: JsonOrderChunkBuilderV1 = output_chunks(writer);
+    iterate i over output.chunks[0..output.count] carrying digest: sha256.DigestState = initial {
+        next digest = digest_writer_chunk(digest, output.chunks[i]);
+    }
+    return digest;
 }
 
 fn order_result(supported: bool, input_sha256: [byte; up_to 64], writer: JsonOrderWriterV1) -> (result: JsonOrderResultV1) {

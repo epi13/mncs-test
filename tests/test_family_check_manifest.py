@@ -55,6 +55,11 @@ def _project(path: Path) -> dict | None:
     )
 
 
+def _identity_set_digest(identities: list[str]) -> str:
+    canonical = json.dumps(sorted(identities), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(b"mncs.test.identity-set.v1\x00" + canonical.encode("utf-8")).hexdigest()
+
+
 def test_native_family_check_manifest_matches_independent_loader() -> None:
     path = ROOT / "family-verification-checks-v1.json"
     expected = mncs_test.load_family_check(
@@ -119,6 +124,9 @@ def test_native_manifest_sorts_unsorted_identity_list_at_64_item_bound(tmp_path:
 
     assert actual is not None
     assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["test_identities_digest"] == _identity_set_digest(
+        compatibility["selector"]["test_identities"]
+    )
     assert actual["check_definition_identity"] == hashlib.sha256(
         mncs_test.compact_json(compatibility).encode("utf-8")
     ).hexdigest()
@@ -169,6 +177,9 @@ def test_native_merge_sorts_unsorted_identity_list_at_256_item_bound(tmp_path: P
 
     assert actual is not None
     assert actual["test_identities"] == compatibility["selector"]["test_identities"]
+    assert actual["test_identities_digest"] == _identity_set_digest(
+        compatibility["selector"]["test_identities"]
+    )
     assert actual["check_definition_identity"] == hashlib.sha256(
         mncs_test.compact_json(compatibility).encode("utf-8")
     ).hexdigest()

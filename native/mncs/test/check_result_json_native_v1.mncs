@@ -9,6 +9,7 @@ module mncs.test.check_result_json_native_v1;
 use mncs.std.application.v1;
 use mncs.std.json.v1 as json;
 use mncs.std.json_cursor.v1 as json_cursor;
+use mncs.std.sha256.v1 as sha256;
 use mncs.test.public_result_json_key_order_v1 as json_order;
 use mncs.test.check_result_projection_v1 as check_result;
 use mncs.test.identity_sort_v1 as identity_sort;
@@ -22,6 +23,8 @@ record CheckResultJsonNativeRequestV1 {
     check_input_sha256: [byte; up_to 64],
     selection_expectation_present: bool,
     expected_test_identities: [[byte; up_to 512]; up_to 256],
+    selection_digest_expectation_present: bool,
+    expected_test_identities_digest: [byte; up_to 64],
     inventory_expectation_present: bool,
     expected_inventory_identity: [byte; up_to 64],
     projection_document_only: bool,
@@ -188,6 +191,11 @@ record CheckResultTokenStateV1 {
     selected_test_identities_valid: bool,
     selected_test_identities: [[byte; up_to 512]; 256],
     selected_test_identity_count: u64,
+    selection_digest_mode: bool,
+    selection_digest_ordered: bool,
+    selected_identity_previous: [byte; up_to 512],
+    selection_identity_digest_state: sha256.DigestState,
+    selected_test_identities_digest: [byte; up_to 64],
     test_inventory_seen: bool,
     test_inventory_valid: bool,
     inventory_identity_seen: bool,
@@ -245,7 +253,7 @@ record StringSkipStateV1 {
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 52];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 53];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
@@ -727,7 +735,17 @@ fn empty_projection_request(metadata: CheckResultJsonNativeRequestV1) -> (result
     };
 }
 
-fn empty_token_state() -> (result: CheckResultTokenStateV1) {
+fn initial_selection_identity_digest(selection_digest_mode: bool) -> (result: sha256.DigestState) {
+    if !selection_digest_mode { return sha256.init(); }
+    let domain: [byte; 26] = [
+        109,110,99,115,46,116,101,115,116,46,105,100,101,110,116,105,116,121,45,115,101,116,46,118,49,0
+    ];
+    let opening: [byte; 1] = [91];
+    let tagged: sha256.DigestState = sha256.update_standard(sha256.init(), domain, domain.len);
+    return sha256.update_standard(tagged, opening, opening.len);
+}
+
+fn empty_token_state(selection_digest_mode: bool) -> (result: CheckResultTokenStateV1) {
     let zero_summary: check_result.CheckSummaryV1 = check_result.CheckSummaryV1 {
         passed: 0, failed: 0, skipped: 0
     };
@@ -761,6 +779,11 @@ fn empty_token_state() -> (result: CheckResultTokenStateV1) {
         selected_test_identities_valid: true,
         selected_test_identities: [empty_identity; 256],
         selected_test_identity_count: 0,
+        selection_digest_mode: selection_digest_mode,
+        selection_digest_ordered: true,
+        selected_identity_previous: empty_identity,
+        selection_identity_digest_state: initial_selection_identity_digest(selection_digest_mode),
+        selected_test_identities_digest: [],
         test_inventory_seen: false,
         test_inventory_valid: true,
         inventory_identity_seen: false,
@@ -1285,24 +1308,58 @@ fn token_store_scalar(
         let identity: TextValueV1 = decode_text_value(document, field, false);
         let within_bound: bool = identity.valid && identity.length <= 512
             && scalar.selected_test_identity_count < 256;
+        if !within_bound {
+            return CheckResultTokenStateV1 {
+                ..scalar,
+                selected_test_identities_valid: false,
+                selection_digest_ordered: false
+            };
+        }
         let row: [byte; up_to 512] = widen_text_512(identity.bytes, identity.length);
+        if state.selection_digest_mode {
+            let ordered: bool = scalar.selected_test_identity_count == 0
+                || identity_sort.compare(scalar.selected_identity_previous, row) < 0;
+            let separator: [byte; 1] = [44];
+            let digest_before_identity: sha256.DigestState = select(
+                scalar.selected_test_identity_count == 0,
+                scalar.selection_identity_digest_state,
+                sha256.update_standard(
+                    scalar.selection_identity_digest_state, separator, separator.len
+                )
+            );
+            let identity_writer: json_order.JsonOrderWriterV1 = json_order.write_canonical_string(
+                json_order.writer_empty(), identity.bytes
+            );
+            if !identity_writer.ok {
+                return CheckResultTokenStateV1 {
+                    ..scalar,
+                    selected_test_identities_valid: false,
+                    selection_digest_ordered: false
+                };
+            }
+            let digest_after_identity: sha256.DigestState = json_order.digest_writer_seeded(
+                identity_writer, digest_before_identity
+            );
+            return CheckResultTokenStateV1 {
+                ..scalar,
+                selected_test_identity_count: scalar.selected_test_identity_count +% 1,
+                selection_digest_ordered: scalar.selection_digest_ordered && ordered,
+                selected_identity_previous: row,
+                selection_identity_digest_state: digest_after_identity
+            };
+        }
         let safe_index: u64 = select(
             scalar.selected_test_identity_count < 256,
             scalar.selected_test_identity_count,
             255
         );
-        let identities: [[byte; up_to 512]; 256] = select(
-            within_bound,
-            replace(scalar.selected_test_identities, safe_index, row),
-            scalar.selected_test_identities
+        let identities: [[byte; up_to 512]; 256] = replace(
+            scalar.selected_test_identities, safe_index, row
         );
         return CheckResultTokenStateV1 {
             ..scalar,
             selected_test_identities: identities,
-            selected_test_identity_count: select(
-                within_bound, scalar.selected_test_identity_count +% 1, scalar.selected_test_identity_count
-            ),
-            selected_test_identities_valid: scalar.selected_test_identities_valid && within_bound
+            selected_test_identity_count: scalar.selected_test_identity_count +% 1
         };
     }
     if context == 11 && tag == 1 {
@@ -1350,6 +1407,18 @@ fn token_close_container(
                 length: select(span_valid, token_end -% state.selection_span.start, 0)
             },
             selection_valid: state.selection_valid && span_valid
+        };
+    }
+    if context == 10 {
+        let closing: [byte; 1] = [93];
+        let digest_finished: sha256.DigestState = sha256.update_standard(
+            state.selection_identity_digest_state, closing, closing.len
+        );
+        return CheckResultTokenStateV1 {
+            ..closed,
+            selected_test_identities_digest: json_order.encode_digest(
+                sha256.finalize_standard(digest_finished)
+            )
         };
     }
     return closed;
@@ -1708,8 +1777,11 @@ fn token_scan_chunk(
     return current;
 }
 
-fn token_scan_document(document: json_order.JsonTokenDocumentV1) -> (result: CheckResultTokenStateV1) {
-    iterate i over document.chunks carrying state: CheckResultTokenStateV1 = empty_token_state() {
+fn token_scan_document(
+    document: json_order.JsonTokenDocumentV1,
+    selection_digest_mode: bool
+) -> (result: CheckResultTokenStateV1) {
+    iterate i over document.chunks carrying state: CheckResultTokenStateV1 = empty_token_state(selection_digest_mode) {
         next state = token_scan_chunk(state, document, document.chunks[i]);
     }
     let finished: json_cursor.Cursor = json_cursor.finish(state.cursor);
@@ -1723,10 +1795,11 @@ fn token_scan_document(document: json_order.JsonTokenDocumentV1) -> (result: Che
 fn checked_token_scan(
     document: json_order.JsonTokenDocumentV1,
     request_valid: bool,
-    syntax_valid: bool
+    syntax_valid: bool,
+    selection_digest_mode: bool
 ) -> (result: CheckResultTokenStateV1) {
-    if request_valid && syntax_valid { return token_scan_document(document); }
-    return CheckResultTokenStateV1 { ..empty_token_state(), valid: false };
+    if request_valid && syntax_valid { return token_scan_document(document, selection_digest_mode); }
+    return CheckResultTokenStateV1 { ..empty_token_state(selection_digest_mode), valid: false };
 }
 
 fn extract_token_result(
@@ -1855,6 +1928,48 @@ fn selected_identities_match_expected(
     return matches;
 }
 
+fn lowercase_digest_valid(value: [byte; up_to 64]) -> (result: bool) {
+    if value.len != 64 { return false; }
+    iterate i over value carrying valid: bool = true {
+        let ch: u64 = value[i] as u64;
+        next valid = valid && ((ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102));
+    }
+    return valid;
+}
+
+fn selected_identities_match_digest(
+    state: CheckResultTokenStateV1,
+    expected_digest: [byte; up_to 64]
+) -> (result: bool) {
+    if state.selected_test_identity_count > 256 || !state.selection_digest_ordered
+        || !lowercase_digest_valid(expected_digest) { return false; }
+    return same_bytes64(state.selected_test_identities_digest, expected_digest);
+}
+
+fn selection_matches_expectation(
+    state: CheckResultTokenStateV1,
+    request: CheckResultJsonNativeRequestV1
+) -> (result: bool) {
+    if request.selection_digest_expectation_present {
+        return selected_identities_match_digest(
+            state, request.expected_test_identities_digest
+        );
+    }
+    if request.selection_expectation_present {
+        return selected_identities_match_expected(
+            state.selected_test_identities,
+            state.selected_test_identity_count,
+            request.expected_test_identities
+        );
+    }
+    return false;
+}
+
+fn selected_identity_output(state: CheckResultTokenStateV1) -> (result: [[byte; up_to 512]; up_to 256]) {
+    if state.selection_digest_mode { return state.selected_test_identities[0..0]; }
+    return state.selected_test_identities[0..state.selected_test_identity_count];
+}
+
 fn inventory_identity_matches_expected(
     value: TextValueV1,
     expected: [byte; up_to 64]
@@ -1918,14 +2033,20 @@ fn extract_family_metadata(
     let selection_span_valid: bool = !state.selection_seen
         || (state.selection_span.found && state.selection_span.kind == 7
             && state.selection_span.length > 0);
-    let selection_comparison_supported: bool = request.selection_expectation_present
+    let selection_digest_mode: bool = request.selection_digest_expectation_present
+        && !request.selection_expectation_present;
+    let selection_list_mode: bool = request.selection_expectation_present
+        && !request.selection_digest_expectation_present;
+    let selection_comparison_supported: bool = (selection_list_mode || selection_digest_mode)
+        && (!request.selection_digest_expectation_present
+            || lowercase_digest_valid(request.expected_test_identities_digest))
         && state.selected_test_identities_valid
-        && state.selected_test_identity_count <= 256;
+        && state.selected_test_identity_count <= 256
+        && (!selection_digest_mode || state.selection_digest_ordered);
     let selection_matches_expected: bool = selection_comparison_supported
-        && selected_identities_match_expected(
-            state.selected_test_identities,
-            state.selected_test_identity_count,
-            request.expected_test_identities
+        && selection_matches_expectation(
+            state,
+            request
         );
     let inventory_comparison_supported: bool = request.inventory_expectation_present
         && inventory_value_valid;
@@ -1938,6 +2059,9 @@ fn extract_family_metadata(
         && state.root_is_object && state.verdict_seen && verdict_value.valid
         && verdict_value.length <= 16 && state.selection_valid
         && state.selected_test_identities_valid && state.selected_test_identity_count <= 256
+        && (!selection_digest_mode || state.selection_digest_ordered)
+        && (!selection_digest_mode
+            || lowercase_digest_valid(request.expected_test_identities_digest))
         && selection_span_valid
         && (!state.test_inventory_seen || state.test_inventory_valid)
         && (!state.experiment_seen || state.experiment_valid)
@@ -1946,7 +2070,7 @@ fn extract_family_metadata(
         supported: supported,
         test_result_schema_valid: test_result_schema_matches(schema_value),
         verdict: widen_text_16(verdict_value.bytes, verdict_value.length),
-        selected_test_identities: state.selected_test_identities[0..state.selected_test_identity_count],
+        selected_test_identities: selected_identity_output(state),
         selection_present: state.selection_seen,
         selection_start: state.selection_span.start,
         selection_length: state.selection_span.length,
@@ -1989,7 +2113,7 @@ fn inspect_check_artifact(
     let scanned: json.ScanState = json_order.scan_document(request.check_document);
     let syntax_valid: bool = json.is_valid(scanned);
     let tokenized: CheckResultTokenStateV1 = checked_token_scan(
-        request.check_document, transport_valid, syntax_valid
+        request.check_document, transport_valid, syntax_valid, false
     );
     let supported: bool = transport_valid && syntax_valid && tokenized.valid
         && json_cursor.is_valid(tokenized.cursor);
@@ -2108,7 +2232,8 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     let scanned: json.ScanState = json_order.scan_document(request.document);
     let syntax_valid: bool = json.is_valid(scanned);
     let tokenized: CheckResultTokenStateV1 = checked_token_scan(
-        request.document, transport_valid, syntax_valid
+        request.document, transport_valid, syntax_valid,
+        request.selection_digest_expectation_present
     );
     let extracted: ExtractedTestResultV1 = extract_token_result(
         request.document, tokenized, request
