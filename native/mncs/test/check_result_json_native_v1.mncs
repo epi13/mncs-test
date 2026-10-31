@@ -33,8 +33,16 @@ record FieldLookupV1 {
 record TextValueV1 {
     valid: bool,
     present: bool,
-    bytes: [byte; up_to 256],
+    bytes: [byte; up_to 1024],
     length: u64
+}
+
+record TextDecodeStateV1 {
+    bytes: [byte; 1024],
+    length: u64,
+    escaped: bool,
+    skip: u64,
+    valid: bool
 }
 
 record NumberValueV1 { valid: bool, value: u64 }
@@ -92,7 +100,7 @@ fn key_value(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
 
 fn widen_text_step<N: Nat>(
     output: [byte; N],
-    input: [byte; up_to 256],
+    input: [byte; up_to 1024],
     index: u64,
     length: u64,
     capacity: u64
@@ -101,7 +109,7 @@ fn widen_text_step<N: Nat>(
     return replace(output, index, input[index]);
 }
 
-fn widen_text_16(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 16]) {
+fn widen_text_16(input: [byte; up_to 1024], length: u64) -> (result: [byte; up_to 16]) {
     iterate i up_to 16 carrying output: [byte; 16] = [0; 16] {
         next output = widen_text_step<16>(output, input, i, length, 16);
     }
@@ -109,7 +117,7 @@ fn widen_text_16(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to
     return output[0..bounded_length];
 }
 
-fn widen_text_64(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 64]) {
+fn widen_text_64(input: [byte; up_to 1024], length: u64) -> (result: [byte; up_to 64]) {
     iterate i up_to 64 carrying output: [byte; 64] = [0; 64] {
         next output = widen_text_step<64>(output, input, i, length, 64);
     }
@@ -117,7 +125,7 @@ fn widen_text_64(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to
     return output[0..bounded_length];
 }
 
-fn widen_text_128(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 128]) {
+fn widen_text_128(input: [byte; up_to 1024], length: u64) -> (result: [byte; up_to 128]) {
     iterate i up_to 128 carrying output: [byte; 128] = [0; 128] {
         next output = widen_text_step<128>(output, input, i, length, 128);
     }
@@ -125,16 +133,24 @@ fn widen_text_128(input: [byte; up_to 256], length: u64) -> (result: [byte; up_t
     return output[0..bounded_length];
 }
 
-fn widen_text_512(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 512]) {
-    iterate i up_to 256 carrying output: [byte; 512] = [0; 512] {
+fn widen_text_256(input: [byte; up_to 1024], length: u64) -> (result: [byte; up_to 256]) {
+    iterate i up_to 256 carrying output: [byte; 256] = [0; 256] {
+        next output = widen_text_step<256>(output, input, i, length, 256);
+    }
+    let bounded_length: u64 = select(length < 256, length, 256);
+    return output[0..bounded_length];
+}
+
+fn widen_text_512(input: [byte; up_to 1024], length: u64) -> (result: [byte; up_to 512]) {
+    iterate i up_to 512 carrying output: [byte; 512] = [0; 512] {
         next output = widen_text_step<512>(output, input, i, length, 512);
     }
     let bounded_length: u64 = select(length < 512, length, 512);
     return output[0..bounded_length];
 }
 
-fn widen_text_1024(input: [byte; up_to 256], length: u64) -> (result: [byte; up_to 1024]) {
-    iterate i up_to 256 carrying output: [byte; 1024] = [0; 1024] {
+fn widen_text_1024(input: [byte; up_to 1024], length: u64) -> (result: [byte; up_to 1024]) {
+    iterate i up_to 1024 carrying output: [byte; 1024] = [0; 1024] {
         next output = widen_text_step<1024>(output, input, i, length, 1024);
     }
     let bounded_length: u64 = select(length < 1024, length, 1024);
@@ -191,19 +207,134 @@ fn lookup_is_object(value: json_order.JsonValueV1) -> (result: bool) {
     };
 }
 
+fn text_decoded_byte(state: TextDecodeStateV1, value: byte) -> (result: TextDecodeStateV1) {
+    if !state.valid || state.length >= 1024 {
+        return TextDecodeStateV1 { ..state, valid: false };
+    }
+    return TextDecodeStateV1 {
+        ..state,
+        bytes: replace(state.bytes, state.length, value),
+        length: state.length +% 1
+    };
+}
+
+fn text_decoded_codepoint(state: TextDecodeStateV1, value: u64) -> (result: TextDecodeStateV1) {
+    if value <= 127 { return text_decoded_byte(state, value as byte); }
+    if value <= 2047 {
+        let first: TextDecodeStateV1 = text_decoded_byte(state, (192 +% (value / 64)) as byte);
+        return text_decoded_byte(first, (128 +% (value % 64)) as byte);
+    }
+    if value <= 65535 && !(value >= 55296 && value <= 57343) {
+        let first: TextDecodeStateV1 = text_decoded_byte(state, (224 +% (value / 4096)) as byte);
+        let second: TextDecodeStateV1 = text_decoded_byte(first, (128 +% ((value / 64) % 64)) as byte);
+        return text_decoded_byte(second, (128 +% (value % 64)) as byte);
+    }
+    if value <= 1114111 {
+        let first: TextDecodeStateV1 = text_decoded_byte(state, (240 +% (value / 262144)) as byte);
+        let second: TextDecodeStateV1 = text_decoded_byte(first, (128 +% ((value / 4096) % 64)) as byte);
+        let third: TextDecodeStateV1 = text_decoded_byte(second, (128 +% ((value / 64) % 64)) as byte);
+        return text_decoded_byte(third, (128 +% (value % 64)) as byte);
+    }
+    return TextDecodeStateV1 { ..state, valid: false };
+}
+
+fn decode_text_step(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: TextDecodeStateV1) {
+    if index >= length || !state.valid { return state; }
+    let value: byte = json_order.located_byte(document, start +% index);
+    if state.skip > 0 {
+        return TextDecodeStateV1 { ..state, skip: state.skip -% 1 };
+    }
+    if state.escaped {
+        if value == 117 {
+            if index +% 4 >= length {
+                return TextDecodeStateV1 { ..state, valid: false, escaped: false };
+            }
+            let code: u64 = json_order.decode_hex4(document, start, index +% 1);
+            if code >= 55296 && code <= 56319 {
+                if index +% 10 >= length
+                    || json_order.located_byte(document, start +% index +% 5) != 92
+                    || json_order.located_byte(document, start +% index +% 6) != 117 {
+                    return TextDecodeStateV1 { ..state, valid: false, escaped: false };
+                }
+                let low: u64 = json_order.decode_hex4(document, start, index +% 7);
+                if low < 56320 || low > 57343 {
+                    return TextDecodeStateV1 { ..state, valid: false, escaped: false };
+                }
+                let point: u64 = 65536 +% (code -% 55296) *% 1024 +% (low -% 56320);
+                return TextDecodeStateV1 {
+                    ..text_decoded_codepoint(state, point),
+                    escaped: false,
+                    skip: 10
+                };
+            }
+            if code >= 56320 && code <= 57343 {
+                return TextDecodeStateV1 { ..state, valid: false, escaped: false };
+            }
+            return TextDecodeStateV1 {
+                ..text_decoded_codepoint(state, code),
+                escaped: false,
+                skip: 4
+            };
+        }
+        if value == 34 || value == 92 || value == 47 {
+            return TextDecodeStateV1 { ..text_decoded_byte(state, value), escaped: false };
+        }
+        if value == 98 { return TextDecodeStateV1 { ..text_decoded_byte(state, 8), escaped: false }; }
+        if value == 102 { return TextDecodeStateV1 { ..text_decoded_byte(state, 12), escaped: false }; }
+        if value == 110 { return TextDecodeStateV1 { ..text_decoded_byte(state, 10), escaped: false }; }
+        if value == 114 { return TextDecodeStateV1 { ..text_decoded_byte(state, 13), escaped: false }; }
+        if value == 116 { return TextDecodeStateV1 { ..text_decoded_byte(state, 9), escaped: false }; }
+        return TextDecodeStateV1 { ..state, valid: false, escaped: false };
+    }
+    if value == 92 { return TextDecodeStateV1 { ..state, escaped: true }; }
+    return text_decoded_byte(state, value);
+}
+
+fn decode_text_block(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64
+) -> (result: TextDecodeStateV1) {
+    iterate i up_to 1024 carrying decoded: TextDecodeStateV1 = state {
+        next decoded = decode_text_step(decoded, document, start, length, block_start +% i);
+    }
+    return decoded;
+}
+
+fn decoded_text_value(decoded: TextDecodeStateV1) -> (result: TextValueV1) {
+    return TextValueV1 {
+        valid: decoded.valid && !decoded.escaped && decoded.skip == 0,
+        present: true,
+        bytes: decoded.bytes[0..decoded.length],
+        length: decoded.length
+    };
+}
+
 fn decode_text_span(
     document: json_order.JsonTokenDocumentV1,
     start: u64,
     length: u64
 ) -> (result: TextValueV1) {
-    if length > 256 { return TextValueV1 { ..empty_text(), valid: false }; }
-    let decoded: json_order.KeyV1 = json_order.decode_key(document, start, length);
-    return TextValueV1 {
-        valid: decoded.valid,
-        present: true,
-        bytes: decoded.ordered,
-        length: decoded.ordered_length
+    if length > 6144 { return TextValueV1 { ..empty_text(), valid: false }; }
+    if length == 0 { return TextValueV1 { valid: true, present: true, bytes: [], length: 0 }; }
+    let initial: TextDecodeStateV1 = TextDecodeStateV1 {
+        bytes: [0; 1024], length: 0, escaped: false, skip: 0, valid: true
     };
+    if length <= 1024 {
+        return decoded_text_value(decode_text_block(initial, document, start, length, 0));
+    }
+    iterate block up_to 6 carrying decoded: TextDecodeStateV1 = initial {
+        next decoded = decode_text_block(decoded, document, start, length, block *% 1024);
+    }
+    return decoded_text_value(decoded);
 }
 
 fn decode_text_value(
@@ -449,7 +580,7 @@ fn extract_test_result(
     let request: check_result.CheckResultProjectionRequestV1 = check_result.CheckResultProjectionRequestV1 {
         schema_version: check_result.request_schema(),
         id: check_id,
-        provider: provider.bytes[0..provider.length],
+        provider: widen_text_256(provider.bytes, provider.length),
         verdict: widen_text_16(verdict.bytes, verdict.length),
         scope_manifest: widen_text_1024(manifest.bytes, manifest.length),
         scope_manifest_present: manifest.present,

@@ -5,11 +5,13 @@
   "module": "mncs.test.check_result_json_native_v1",
   "entry_function": "check_result_json_native_app_v1",
   "profile": "0.18",
-  "interface_identity": "2cfd6ca2ac068b7c2faf0958784e79f6acddf5f255c43e3475368b302069482a",
+  "interface_identity": "1c17f79a69ce5e0e0dec572fd8b2d430be6d059f036f541744eff6ff2561fb06",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }

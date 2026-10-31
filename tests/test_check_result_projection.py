@@ -40,7 +40,8 @@ pytestmark = pytest.mark.skipif(
 def test_native_check_result_projection_matches_family_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    long_identity = "mncs:test-case:" + ("long-identity-" * 12)
+    long_identity = "mncs:test-case:" + ("long-identity-" * 23)
+    assert 256 < len(long_identity.encode("utf-8")) <= 512
     result_digest = "d" * 64
     source_digest = "a" * 64
     result = {
@@ -160,7 +161,9 @@ def test_native_source_projection_decodes_escaped_values_and_utf8_failure_chunks
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity = 'mncs:test-case:quoted-"-duck-🦆-é'
-    message = ('line one\nquoted "failure" 🦆 café ' * 4) + "end"
+    message_prefix = ('line one\nquoted "failure" 🦆 café ' * 10) + "end"
+    message = message_prefix + "x" * (1024 - len(message_prefix.encode("utf-8")))
+    assert len(message.encode("utf-8")) == 1024
     result = {
         "schema_version": "mncs.test-result/1",
         "id": "runner-check",

@@ -215,11 +215,15 @@ adapter still decodes the result once for validation and the opaque `selection`
 field, and uses the existing host projection when the document or a field is
 outside the native parser's limits. The current native extractor accepts at
 most 65,536 input bytes, 512 JSON values, depth 12, 64 object members, 256-byte
-decoded strings, and 256 test rows. Larger failure messages therefore retain
-the established chunked host projection. Differential tests assert both that
-an in-bound family result is accepted by the native app and that a long UTF-8
-message follows the compatible fallback. The existing Test JSON cursor and
-CheckResult policy are sufficient; this slice adds no duplicate Stdlib parser.
+decoded keys, 1,024 decoded bytes per text field, and 256 test rows. Text
+decoding scans raw spans in six bounded 1,024-byte blocks and carries escape
+and surrogate-pair state between blocks, respecting the MNCS profile's
+iteration ceiling. Failure messages up to 1,024 UTF-8 bytes are native;
+larger messages retain the established chunked host projection. Differential
+tests cover a 322-byte test identity, escaped Unicode at the exact 1,024-byte
+message bound, and the compatible fallback for a longer message. The existing
+Test JSON cursor and CheckResult policy are sufficient; this slice adds no
+duplicate Stdlib parser.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
