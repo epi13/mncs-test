@@ -20,7 +20,8 @@
     "mncs-actions:7701127",
     "mncs-test:d29f132",
     "mncs-test:a214eb1",
-    "mncs-test:b8b08bf"
+    "mncs-test:b8b08bf",
+    "mncs-test:6f40ccd"
   ],
   "relevant_files": [
     "tools/mncs_test.py",
