@@ -8013,64 +8013,50 @@ def run_family_check(args: argparse.Namespace) -> int:
                 native_verdict_agreement = check_metadata[
                     "verdict_matches_test_result"
                 ]
+        result: dict[str, Any] | None = None
         if family_metadata is None:
             result = json.loads(result_document_bytes)
-        else:
-            result = {
-                "schema_version": (
-                    RESULT_SCHEMA
-                    if family_metadata["test_result_schema_valid"]
-                    else None
-                ),
-                "verdict": family_metadata["verdict"],
-                "test_inventory": {
-                    "inventory_identity": family_metadata["inventory_identity"]
-                },
-                "experiment": {"run_identity": family_metadata["run_identity"]},
-            }
-        if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
-            raise AdapterError("family check produced an invalid mncs.test-result/1 document")
-        if native_verdict_agreement is False or (
-            native_verdict_agreement is None
-            and produced_check_verdict != result.get("verdict")
-        ):
-            raise AdapterError("family check TestResult and CheckResult verdicts disagree")
-        expected_inventory = selector.get("inventory_identity")
-        if family_metadata is not None and family_metadata["selection_comparison_supported"]:
-            selection_matches = family_metadata["selection_matches_expected"]
-        else:
-            selected = (
-                family_metadata["selected_test_identities"]
-                if family_metadata is not None
-                else result.get("selection", {}).get("selected_test_identities", [])
-            )
-            selection_matches = sorted(selected) == selector["test_identities"]
-        if not selection_matches:
-            raise AdapterError("family check did not execute exactly the declared test identities")
-        selected = (
-            family_metadata["selected_test_identities"]
-            if family_metadata is not None
-            else result.get("selection", {}).get("selected_test_identities", [])
-        )
-        if family_metadata is not None:
-            inventory_identity = family_metadata["inventory_identity"]
-        else:
+            if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
+                raise AdapterError("family check produced an invalid mncs.test-result/1 document")
+            result_verdict = result.get("verdict")
+            result_exit_code = result.get("exit_code", completed.returncode)
+            selection = result.get("selection", {})
+            selected = selection.get("selected_test_identities", [])
             inventory = result.get("test_inventory")
             inventory_identity = (
                 inventory.get("inventory_identity")
                 if isinstance(inventory, dict)
                 else None
             )
+            run = result.get("experiment", {})
+            run_identity = run.get("run_identity")
+        else:
+            if not family_metadata["test_result_schema_valid"]:
+                raise AdapterError("family check produced an invalid mncs.test-result/1 document")
+            result_verdict = family_metadata["verdict"]
+            # The native runner process already returns the TestResult exit code.
+            # Keep the supported path on scalar metadata instead of synthesizing
+            # a Python TestResult mapping just to pass a few fields downstream.
+            result_exit_code = completed.returncode
+            selected = family_metadata["selected_test_identities"]
+            inventory_identity = family_metadata["inventory_identity"]
+            run_identity = family_metadata["run_identity"]
+        if native_verdict_agreement is False or (
+            native_verdict_agreement is None
+            and produced_check_verdict != result_verdict
+        ):
+            raise AdapterError("family check TestResult and CheckResult verdicts disagree")
+        expected_inventory = selector.get("inventory_identity")
+        if family_metadata is not None and family_metadata["selection_comparison_supported"]:
+            selection_matches = family_metadata["selection_matches_expected"]
+        else:
+            selection_matches = sorted(selected) == selector["test_identities"]
+        if not selection_matches:
+            raise AdapterError("family check did not execute exactly the declared test identities")
         if expected_inventory is not None:
             if family_metadata is not None and family_metadata["inventory_comparison_supported"]:
                 inventory_matches = family_metadata["inventory_matches_expected"]
             else:
-                inventory = result.get("test_inventory")
-                inventory_identity = (
-                    inventory.get("inventory_identity")
-                    if isinstance(inventory, dict)
-                    else None
-                )
                 inventory_matches = inventory_identity == expected_inventory
             if not inventory_matches:
                 raise AdapterError("family check compiler inventory identity is stale")
@@ -8085,7 +8071,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             None
             if native_check_result_document is not None
             else check_result(
-                result,
+                result if result is not None else json.loads(result_document_bytes),
                 result_digest,
                 mncs=args.mncs,
                 cwd=cwd,
@@ -8122,7 +8108,6 @@ def run_family_check(args: argparse.Namespace) -> int:
                 native_document=native_check_result_document,
             )
         check_definition_identity = sha256_bytes(compact_json(check).encode())
-        run_identity = result.get("experiment", {}).get("run_identity")
         family_binding = {
             key: request[key]
             for key in (
@@ -8136,7 +8121,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             request=request,
             result_document=result_document_bytes,
             check_result_document=check_result_payload,
-            verdict=result.get("verdict", "UNKNOWN"),
+            verdict=result_verdict if result_verdict is not None else "UNKNOWN",
             run_identity=run_identity,
             test_case_identities=selected,
             inventory_identity=inventory_identity,
@@ -8177,7 +8162,7 @@ def run_family_check(args: argparse.Namespace) -> int:
                 "contract_identity": request["contract_identity"],
                 "contract_revision": request["contract_revision"],
                 "runner": "mncs-test",
-                "verdict": result.get("verdict", "UNKNOWN"),
+                "verdict": result_verdict if result_verdict is not None else "UNKNOWN",
                 "test_result": fallback_result,
                 "check_result": fallback_check_result,
                 "execution": {
@@ -8198,7 +8183,7 @@ def run_family_check(args: argparse.Namespace) -> int:
                 environment=check_result_environment,
             )
         sys.stdout.write(response_payload.decode("utf-8"))
-        return int(result.get("exit_code", completed.returncode))
+        return int(result_exit_code)
     except (ManifestError, AdapterError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         print_cli_json(
             {

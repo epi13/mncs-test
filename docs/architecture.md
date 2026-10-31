@@ -281,6 +281,11 @@ established compatibility path. The independent public-document golden,
 multichunk bound, field-text key-order case, projection regressions, family
 consumer integration, and live declared family check pass with matching
 CheckResult bytes and digest.
+P-018 removes the native-supported family path's synthetic Python TestResult
+mapping as well. Verdict, selected identities, inventory identity, run identity,
+and runner exit status stay in scalar locals; the full TestResult tree is
+materialized only for native or response-serialization fallback. The two live
+family consumer regressions pass with the integrated Stdlib JSON cursor provider.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
