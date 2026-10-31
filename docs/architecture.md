@@ -430,6 +430,20 @@ so each application call stays within its 8,000,000-step ceiling. The 256-ID
 family envelope now matches independent JSON bytes and SHA-256 expectations
 through native execution.
 
+P-033 raises the Test key-order parser's value ceiling to 1,024 and keeps
+compact scalar-only arrays as source spans in its MNCS value representation.
+That avoids reversing and recursively emitting one linked node per array
+element. A public object containing a 1,021-item array reaches exactly 1,024
+native values; after the 512-token tape declines, MNCS orders the object keys
+and the existing cursor formatter emits the document. A 520-element array
+with a nested unsorted object keeps its structure and also sorts natively. Both
+results match the independent Python byte and SHA-256 goldens, and the adapter
+calls compact JSON transport once with `sort_keys=False`. A direct whitespace
+case verifies that the source-span optimization keeps canonical compact
+output. The 65,536-byte source, depth-12, 64-member, 256-byte key, and
+8,000,000-step bounds remain in force. Arrays whose descendants exceed the
+value or execution bounds retain the established compatibility path.
+
 `mncs.test.run_identity_v1` constructs canonical JSON and hashes it with
 `mncs.std.sha256.v1` for bounded run identities. The adapter sends bounded
 UTF-8 fields as strings in the existing typed request, avoiding one JSON

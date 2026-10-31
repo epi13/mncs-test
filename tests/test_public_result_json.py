@@ -503,6 +503,107 @@ def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path)
     _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
+@pytest.mark.parametrize(
+    "item_count", [520, 1021], ids=["past-legacy-bound", "at-native-bound"]
+)
+def test_native_key_order_handles_values_past_the_legacy_token_bound(
+    item_count: int,
+    tmp_path: Path,
+) -> None:
+    value = {"z": list(range(item_count)), "a": True}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
+    assert observed[0][1]["supported"] is False
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    compact.assert_called_once_with(value, sort_keys=False)
+
+
+def test_native_key_order_sorts_object_descendants_in_large_arrays(
+    tmp_path: Path,
+) -> None:
+    value = {"z": [{"z": 0, "a": 1}, *range(519)], "a": True}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert observed[0][1]["supported"] is False
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    compact.assert_called_once_with(value, sort_keys=False)
+
+
+def test_native_key_order_compacts_whitespace_around_scalar_array(
+    tmp_path: Path,
+) -> None:
+    source = b'{ "z" : [1, 2, 3], "a" : true }'
+    actual = mncs_test._native_public_result_key_order(
+        source,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+
+    assert actual == b'{"a":true,"z":[1,2,3]}'
+
+
 def test_native_token_tape_decides_support_from_the_encoded_document(tmp_path: Path) -> None:
     value = {"nested": {"z": [3, 2, 1], "a": {"Ω": 1, "A": 2}}}
     expected = _python_result_bytes(value)

@@ -46,8 +46,11 @@ enum JsonValueV1 {
 record FrameV1 {
     kind: byte,
     items: JsonValueV1,
+    source_start: u64,
     pending_key: KeyV1,
     has_pending_key: bool,
+    contains_object: bool,
+    compact: bool,
     child_count: u64,
     expect: byte
 }
@@ -55,6 +58,7 @@ record FrameV1 {
 record ParseStateV1 {
     frames: [FrameV1; 12],
     depth: u64,
+    span_compact_arrays: bool,
     root: JsonValueV1,
     has_root: bool,
     string_start: u64,
@@ -111,6 +115,8 @@ record JsonDigestWriterV1 {
 }
 
 record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
+
+record ArrayReverseStateV1 { remaining: JsonValueV1, reversed: JsonValueV1 }
 
 record JsonOrderChunkBuilderV1 {
     chunks: [JsonOrderChunkV1; 64],
@@ -388,21 +394,33 @@ fn prepend_array(items: JsonValueV1, value: JsonValueV1) -> (result: JsonValueV1
     };
 }
 
-fn reverse_array(items: JsonValueV1, accumulated: JsonValueV1) -> (result: JsonValueV1) {
-    return match items {
-        ArrayNil => accumulated,
-        ArrayCons { head: head, tail: tail } => reverse_array(
-            tail, JsonValueV1.ArrayCons { head: head, tail: accumulated }
-        ),
-        Empty => accumulated,
-        Null => accumulated,
-        Raw { start: raw_start, length: raw_length } => accumulated,
-        String { start: raw_start, length: raw_length } => accumulated,
-        Array { items: nested } => accumulated,
-        Object { fields: nested } => accumulated,
-        ObjectNil => accumulated,
-        ObjectCons { key: key, value: inner, tail: rest } => accumulated
+fn reverse_array_step(state: ArrayReverseStateV1) -> (result: ArrayReverseStateV1) {
+    return match state.remaining {
+        ArrayNil => state,
+        ArrayCons { head: head, tail: tail } => ArrayReverseStateV1 {
+            remaining: tail,
+            reversed: JsonValueV1.ArrayCons { head: head, tail: state.reversed }
+        },
+        Empty => state,
+        Null => state,
+        Raw { start: raw_start, length: raw_length } => state,
+        String { start: raw_start, length: raw_length } => state,
+        Array { items: nested } => state,
+        Object { fields: nested } => state,
+        ObjectNil => state,
+        ObjectCons { key: key, value: inner, tail: rest } => state
     };
+}
+
+fn reverse_array(items: JsonValueV1, accumulated: JsonValueV1) -> (result: JsonValueV1) {
+    let initial: ArrayReverseStateV1 = ArrayReverseStateV1 {
+        remaining: items,
+        reversed: accumulated
+    };
+    iterate i up_to 1024 carrying reversed: ArrayReverseStateV1 = initial {
+        next reversed = reverse_array_step(reversed);
+    }
+    return reversed.reversed;
 }
 
 fn empty_key() -> (result: KeyV1) {
@@ -434,8 +452,11 @@ fn empty_frame(kind: byte) -> (result: FrameV1) {
     return FrameV1 {
         kind: kind,
         items: select(kind == 1, JsonValueV1.ObjectNil, JsonValueV1.ArrayNil),
+        source_start: 0,
         pending_key: empty_key(),
         has_pending_key: false,
+        contains_object: false,
+        compact: true,
         child_count: 0,
         expect: select(kind == 1, 1, 5)
     };
@@ -458,7 +479,7 @@ fn located_byte(document: JsonTokenDocumentV1, position: u64) -> (result: byte) 
 }
 
 fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV1) {
-    if !state.valid || state.value_count >= 512 { return ParseStateV1 { ..state, valid: false }; }
+    if !state.valid || state.value_count >= 1024 { return ParseStateV1 { ..state, valid: false }; }
     if state.depth == 0 {
         if state.has_root { return ParseStateV1 { ..state, valid: false }; }
         return ParseStateV1 { ..state, root: value, has_root: true, value_count: state.value_count +% 1 };
@@ -517,8 +538,16 @@ fn maybe_finalize_scalar(state: ParseStateV1, position: u64, boundary: bool) -> 
     return state;
 }
 
-fn container_value(frame: FrameV1) -> (result: JsonValueV1) {
+fn container_value(
+    frame: FrameV1, end_position: u64, span_compact_arrays: bool
+) -> (result: JsonValueV1) {
     if frame.kind == 1 { return JsonValueV1.Object { fields: frame.items }; }
+    if span_compact_arrays && !frame.contains_object && frame.compact {
+        return JsonValueV1.Raw {
+            start: frame.source_start,
+            length: end_position -% frame.source_start +% 1
+        };
+    }
     return JsonValueV1.Array { items: reverse_array(frame.items, JsonValueV1.ArrayNil) };
 }
 
@@ -582,27 +611,63 @@ fn parse_string_step(
     );
 }
 
-fn parse_open_container(state: ParseStateV1, value: byte) -> (result: ParseStateV1) {
+fn mark_array_object_step(frames: [FrameV1; 12], depth: u64, index: u64) -> (result: [FrameV1; 12]) {
+    if index >= depth { return frames; }
+    let frame: FrameV1 = frames[index];
+    if frame.kind != 2 { return frames; }
+    return replace(frames, index, FrameV1 { ..frame, contains_object: true });
+}
+
+fn mark_object_in_array_ancestors(
+    frames: [FrameV1; 12], depth: u64, is_object: bool
+) -> (result: [FrameV1; 12]) {
+    if !is_object { return frames; }
+    iterate i up_to 12 carrying marked: [FrameV1; 12] = frames {
+        next marked = mark_array_object_step(marked, depth, i);
+    }
+    return marked;
+}
+
+fn mark_array_noncompact_step(frames: [FrameV1; 12], depth: u64, index: u64) -> (result: [FrameV1; 12]) {
+    if index >= depth { return frames; }
+    let frame: FrameV1 = frames[index];
+    if frame.kind != 2 { return frames; }
+    return replace(frames, index, FrameV1 { ..frame, compact: false });
+}
+
+fn mark_array_ancestors_noncompact(frames: [FrameV1; 12], depth: u64) -> (result: [FrameV1; 12]) {
+    iterate i up_to 12 carrying marked: [FrameV1; 12] = frames {
+        next marked = mark_array_noncompact_step(marked, depth, i);
+    }
+    return marked;
+}
+
+fn parse_open_container(state: ParseStateV1, position: u64, value: byte) -> (result: ParseStateV1) {
     if !parse_expects_value(state) || state.depth >= 12 {
         return ParseStateV1 { ..state, valid: false };
     }
     let kind: byte = select(value == 123, 1, 2);
-    let frame: FrameV1 = empty_frame(kind);
+    let marked: [FrameV1; 12] = mark_object_in_array_ancestors(
+        state.frames, state.depth, value == 123
+    );
+    let frame: FrameV1 = FrameV1 { ..empty_frame(kind), source_start: position };
     return ParseStateV1 {
         ..state,
-        frames: replace(state.frames, state.depth, frame),
+        frames: replace(marked, state.depth, frame),
         depth: state.depth +% 1
     };
 }
 
-fn parse_close_container(state: ParseStateV1, value: byte) -> (result: ParseStateV1) {
+fn parse_close_container(state: ParseStateV1, position: u64, value: byte) -> (result: ParseStateV1) {
     if state.depth == 0 { return ParseStateV1 { ..state, valid: false }; }
     let frame_index: u64 = state.depth -% 1;
     let frame: FrameV1 = state.frames[frame_index];
     let correct: bool = (value == 125 && frame.kind == 1 && (frame.expect == 1 || frame.expect == 4))
         || (value == 93 && frame.kind == 2 && (frame.expect == 5 || frame.expect == 6));
     if !correct || frame.has_pending_key { return ParseStateV1 { ..state, valid: false }; }
-    let container: JsonValueV1 = container_value(frame);
+    let container: JsonValueV1 = container_value(
+        frame, position, state.span_compact_arrays
+    );
     let popped: ParseStateV1 = ParseStateV1 { ..state, depth: frame_index };
     return append_value(popped, container);
 }
@@ -644,7 +709,12 @@ fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64,
     let boundary: bool = scalar_boundary(value);
     let advanced: ParseStateV1 = maybe_finalize_scalar(state, position, boundary);
     if !advanced.valid { return advanced; }
-    if json_space(value) { return advanced; }
+    if json_space(value) {
+        return ParseStateV1 {
+            ..advanced,
+            frames: mark_array_ancestors_noncompact(advanced.frames, advanced.depth)
+        };
+    }
     if value == 34 {
         if parse_expects_key(advanced) {
             return ParseStateV1 {
@@ -666,8 +736,8 @@ fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64,
         }
         return ParseStateV1 { ..advanced, valid: false };
     }
-    if value == 123 || value == 91 { return parse_open_container(advanced, value); }
-    if value == 125 || value == 93 { return parse_close_container(advanced, value); }
+    if value == 123 || value == 91 { return parse_open_container(advanced, position, value); }
+    if value == 125 || value == 93 { return parse_close_container(advanced, position, value); }
     if value == 44 { return parse_comma(advanced); }
     if value == 58 { return parse_colon(advanced); }
     if !advanced.scalar_active {
@@ -677,11 +747,12 @@ fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64,
     return advanced;
 }
 
-fn empty_parse_state() -> (result: ParseStateV1) {
+fn empty_parse_state(span_compact_arrays: bool) -> (result: ParseStateV1) {
     let frame: FrameV1 = empty_frame(0);
     return ParseStateV1 {
         frames: [frame; 12],
         depth: 0,
+        span_compact_arrays: span_compact_arrays,
         root: JsonValueV1.Empty,
         has_root: false,
         string_start: 0,
@@ -726,8 +797,10 @@ fn scan_document(document: JsonTokenDocumentV1) -> (result: json.ScanState) {
     return json.finish(scanned);
 }
 
-fn parse_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
-    iterate i over document.chunks carrying parsed: ParseStateV1 = empty_parse_state() {
+fn parse_document_with_array_spans(
+    document: JsonTokenDocumentV1, span_compact_arrays: bool
+) -> (result: ParseStateV1) {
+    iterate i over document.chunks carrying parsed: ParseStateV1 = empty_parse_state(span_compact_arrays) {
         next parsed = parse_chunk(parsed, document, i);
     }
     let finalized: ParseStateV1 = finalize_scalar(parsed, document.byte_length);
@@ -736,6 +809,14 @@ fn parse_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
         valid: finalized.valid && !finalized.in_string
             && finalized.depth == 0 && finalized.has_root
     };
+}
+
+fn parse_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
+    return parse_document_with_array_spans(document, false);
+}
+
+fn parse_key_order_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
+    return parse_document_with_array_spans(document, true);
 }
 
 fn writer_empty() -> (result: JsonOrderWriterV1) {
@@ -1183,7 +1264,15 @@ fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result:
         let scanned: json.ScanState = scan_document(document);
         if json.is_valid(scanned) { return parse_document(document); }
     }
-    return ParseStateV1 { ..empty_parse_state(), valid: false };
+    return ParseStateV1 { ..empty_parse_state(false), valid: false };
+}
+
+fn parse_key_order_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result: ParseStateV1) {
+    if request_valid {
+        let scanned: json.ScanState = scan_document(document);
+        if json.is_valid(scanned) { return parse_key_order_document(document); }
+    }
+    return ParseStateV1 { ..empty_parse_state(true), valid: false };
 }
 
 fn writer_for_parse(parsed: ParseStateV1, document: JsonTokenDocumentV1) -> (result: JsonOrderWriterV1) {
@@ -1210,7 +1299,7 @@ fn public_result_json_key_order_app_v1(context: ApplicationContext) -> (result: 
     let request: JsonOrderRequestV1 = structured_read(context.argv[0], request_schema_v1());
     let shape: DocumentShapeV1 = document_shape(request.document);
     let request_valid: bool = valid_order_request(request, shape);
-    let parsed: ParseStateV1 = parse_checked(request.document, request_valid);
+    let parsed: ParseStateV1 = parse_key_order_checked(request.document, request_valid);
     let writer: JsonOrderWriterV1 = writer_for_parse(parsed, request.document);
     let result: JsonOrderResultV1 = order_result(request_valid && parsed.valid, request.input_sha256, writer);
     let published: u64 = structured_write(context.argv[1], result_schema_v1(), result);
