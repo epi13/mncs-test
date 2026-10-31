@@ -29,7 +29,8 @@
     "mncs-test:7dba7f9",
     "mncs-test:5908f5a",
     "mncs-test:23679ff",
-    "mncs-test:585723c"
+    "mncs-test:585723c",
+    "mncs-test:f5420a6"
   ],
   "relevant_files": [
     "tools/mncs_test.py",
