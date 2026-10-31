@@ -45,6 +45,21 @@ record TextDecodeStateV1 {
     valid: bool
 }
 
+record MessageChunksV1 {
+    chunks: [[byte; up_to 1024]; 256],
+    count: u64,
+    offset: u64,
+    decoder: TextDecodeStateV1,
+    valid: bool
+}
+
+record MessageProjectionV1 {
+    valid: bool,
+    present: bool,
+    chunks: [[byte; up_to 1024]; 256],
+    count: u64
+}
+
 record NumberValueV1 { valid: bool, value: u64 }
 record NumberParseV1 { valid: bool, value: u64 }
 
@@ -80,12 +95,141 @@ fn empty_text() -> (result: TextValueV1) {
     return TextValueV1 { valid: true, present: false, bytes: [], length: 0 };
 }
 
-fn failure_message_chunks(message: TextValueV1) -> (result: [[byte; up_to 1024]; up_to 256]) {
-    if !message.present { return []; }
-    let empty: [[byte; up_to 1024]; 256] = [[0; 0]; 256];
-    let message_bytes: [byte; up_to 1024] = widen_text_1024(message.bytes, message.length);
-    let with_message: [[byte; up_to 1024]; 256] = replace(empty, 0, message_bytes);
-    return with_message[0..1];
+fn empty_message_chunks() -> (result: MessageChunksV1) {
+    let empty_chunk: [byte; up_to 1024] = [];
+    let decoder: TextDecodeStateV1 = TextDecodeStateV1 {
+        bytes: [0; 1024], length: 0, escaped: false, skip: 0, valid: true
+    };
+    return MessageChunksV1 {
+        chunks: [empty_chunk; 256], count: 0, offset: 0, decoder: decoder, valid: true
+    };
+}
+
+fn is_utf8_continuation(value: byte) -> (result: bool) {
+    return value >= 128 && value <= 191;
+}
+
+fn raw_message_block_end(
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    offset: u64
+) -> (result: u64) {
+    let limit: u64 = select(length < offset +% 1024, length, offset +% 1024);
+    iterate i up_to 3 carrying end: u64 = limit {
+        let splits_codepoint: bool = end > offset && end < length
+            && is_utf8_continuation(json_order.located_byte(document, start +% end));
+        next end = select(splits_codepoint, end -% 1, end);
+    }
+    return end;
+}
+
+fn decode_message_block_step(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64,
+    block_length: u64,
+    index: u64
+) -> (result: TextDecodeStateV1) {
+    if index >= block_length { return state; }
+    return decode_text_step(state, document, start, length, block_start +% index);
+}
+
+fn decode_message_block(
+    state: TextDecodeStateV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    block_start: u64,
+    block_length: u64
+) -> (result: TextDecodeStateV1) {
+    iterate i up_to 1024 carrying decoded: TextDecodeStateV1 = state {
+        next decoded = decode_message_block_step(
+            decoded, document, start, length, block_start, block_length, i
+        );
+    }
+    return decoded;
+}
+
+fn append_decoded_message_block(
+    state: MessageChunksV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: MessageChunksV1) {
+    if !state.valid || state.offset >= length { return state; }
+    let end: u64 = raw_message_block_end(document, start, length, state.offset);
+    if end <= state.offset { return MessageChunksV1 { ..state, valid: false }; }
+    let decoded: TextDecodeStateV1 = decode_message_block(
+        state.decoder, document, start, length, state.offset, end -% state.offset
+    );
+    if !decoded.valid { return MessageChunksV1 { ..state, decoder: decoded, valid: false }; }
+    if decoded.length > 0 && state.count >= 256 {
+        return MessageChunksV1 { ..state, decoder: decoded, valid: false };
+    }
+    let chunk: [byte; up_to 1024] = decoded.bytes[0..decoded.length];
+    let chunks: [[byte; up_to 1024]; 256] = select(
+        decoded.length > 0,
+        replace(state.chunks, state.count, chunk),
+        state.chunks
+    );
+    let count: u64 = select(decoded.length > 0, state.count +% 1, state.count);
+    let next_decoder: TextDecodeStateV1 = TextDecodeStateV1 {
+        ..decoded, bytes: [0; 1024], length: 0
+    };
+    return MessageChunksV1 {
+        ..state,
+        chunks: chunks,
+        count: count,
+        offset: end,
+        decoder: next_decoder
+    };
+}
+
+fn empty_message_projection(valid: bool, present: bool) -> (result: MessageProjectionV1) {
+    let empty_chunk: [byte; up_to 1024] = [];
+    return MessageProjectionV1 {
+        valid: valid, present: present, chunks: [empty_chunk; 256], count: 0
+    };
+}
+
+fn decode_message_span(
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: MessageProjectionV1) {
+    if length > 6144 { return empty_message_projection(false, true); }
+    let initial: MessageChunksV1 = empty_message_chunks();
+    iterate i up_to 8 carrying state: MessageChunksV1 = initial {
+        next state = append_decoded_message_block(state, document, start, length);
+    }
+    let valid: bool = state.valid && state.offset == length
+        && !state.decoder.escaped && state.decoder.skip == 0;
+    return MessageProjectionV1 {
+        valid: valid, present: true, chunks: state.chunks, count: state.count
+    };
+}
+
+fn decode_failure_message(
+    document: json_order.JsonTokenDocumentV1,
+    field: FieldLookupV1
+) -> (result: MessageProjectionV1) {
+    if !field.found { return empty_message_projection(true, false); }
+    return match field.value {
+        json_order.JsonValueV1.String { start: start, length: length } =>
+            decode_message_span(document, start, length),
+        Null => empty_message_projection(false, false),
+        Empty => empty_message_projection(false, false),
+        Raw { start: raw_start, length: raw_length } => empty_message_projection(false, false),
+        Array { items: items } => empty_message_projection(false, false),
+        Object { fields: fields } => empty_message_projection(false, false),
+        ArrayNil => empty_message_projection(false, false),
+        ArrayCons { head: head, tail: tail } => empty_message_projection(false, false),
+        ObjectNil => empty_message_projection(false, false),
+        ObjectCons { key: key, value: value, tail: tail } => empty_message_projection(false, false)
+    };
 }
 
 fn key_value(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
@@ -566,7 +710,7 @@ fn extract_test_result(
     let failure_field: FieldLookupV1 = object_field(root, [102, 97, 105, 108, 117, 114, 101]);
     let failure_object: bool = lookup_is_object(failure_field.value);
     let failure_message_field: FieldLookupV1 = object_field(failure_field.value, [109, 101, 115, 115, 97, 103, 101]);
-    let failure_message: TextValueV1 = decode_text_value(document, failure_message_field, true, false);
+    let failure_message: MessageProjectionV1 = decode_failure_message(document, failure_message_field);
     let provenance_field: FieldLookupV1 = object_field(root, [112, 114, 111, 118, 101, 110, 97, 110, 99, 101]);
     let provenance_object: bool = lookup_is_object(provenance_field.value);
     let runner_field: FieldLookupV1 = object_field(provenance_field.value, [114, 117, 110, 110, 101, 114]);
@@ -576,7 +720,8 @@ fn extract_test_result(
     let run_id: TextValueV1 = decode_text_value(document, object_field(root, [114, 117, 110, 95, 105, 100]), true, false);
     let source_id: [byte; up_to 1024] = widen_text_1024(id_text.bytes, id_text.length);
     let check_id: [byte; up_to 1024] = select(metadata.check_id.len > 0, metadata.check_id, source_id);
-    let message_chunks: [[byte; up_to 1024]; up_to 256] = failure_message_chunks(failure_message);
+    let message_chunks: [[byte; up_to 1024]; up_to 256] =
+        failure_message.chunks[0..failure_message.count];
     let request: check_result.CheckResultProjectionRequestV1 = check_result.CheckResultProjectionRequestV1 {
         schema_version: check_result.request_schema(),
         id: check_id,
@@ -591,13 +736,14 @@ fn extract_test_result(
         source_sha256: widen_text_64(source_sha.bytes, source_sha.length),
         summary: summary.value,
         failure_message_present: failure_object && failure_message.present,
-        failure_message_count: message_chunks.len,
+        failure_message_count: failure_message.count,
         failure_message_chunks: message_chunks,
         run_id: widen_text_512(run_id.bytes, run_id.length),
         test_count: tests.count,
         tests: tests.rows[0..tests.count]
     };
-    let supported: bool = (id_text.valid || metadata.check_id.len > 0) && provider.valid && verdict.valid
+    let supported: bool = (metadata.check_id.len > 0 || (id_text.valid && id_text.length <= 1024))
+        && provider.valid && verdict.valid
         && classification.valid && failure_class.valid && scope_valid && manifest.valid
         && summary.valid && tests.valid && failure_message.valid && source_sha.valid
         && run_id.valid && provider.length <= 256 && verdict.length <= 16
