@@ -711,6 +711,8 @@ class RunnerTests(unittest.TestCase):
             serializer_applications
             and set(serializer_applications)
             <= {
+                "test-public-result-json-native-token-tape.json",
+                "test-public-result-json-source-digest.json",
                 "test-public-result-json-token-tape.json",
                 "test-public-result-json-key-order.json",
                 "test-public-result-json-token.json",
@@ -816,6 +818,8 @@ class RunnerTests(unittest.TestCase):
             native_applications: list[str] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
+                "test-public-result-json-native-token-tape.json",
+                "test-public-result-json-source-digest.json",
                 "test-public-result-json-token-tape.json",
                 "test-public-result-json-key-order.json",
                 "test-public-result-json-token.json",

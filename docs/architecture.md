@@ -145,24 +145,29 @@ supplies bounded fields and preserves the opaque `selection` object. Failure
 messages cross the 1,024-byte native field bound as UTF-8-safe chunks; the
 adapter rejoins those chunks when it writes the public JSON document. The
 compact count text reuses `mncs.std.json_emit.v1::put_u64`.
-`mncs.test.public_result_json_token_tape_v1` receives a bounded typed token
-tape and UTF-8 payload chunks directly from the Python boundary adapter. The
-adapter walks supported Python values but does not build a Python value tree,
-sort keys, or serialize a compact JSON document. MNCS validates the tape and
-scalar JSON spellings, constructs a bounded native value, sorts object keys by
-decoded UTF-8, and writes the public indented JSON with a trailing newline.
-Flat scalar arrays retain token ranges instead of allocating linked native
-value nodes. This path accepts at most 512 tokens, 65,536 payload bytes, depth
-12, 64 object members, 256-byte keys, 1,024-byte scalar text, 65,536 output
-bytes, and the runner's 8,000,000-step budget. Python preserves its float
-spelling at the scalar boundary; MNCS owns structure, ordering, escaping,
-formatting, bounds, and output bytes. The adapter rejoins bounded native
-output chunks and computes the public payload digest over those exact bytes.
-Differential tests compare the result with the independent Python golden,
-including Unicode, escaping, nested containers, and a 33 KB result; that large
-case uses one native application call without invoking the host JSON serializer.
+`mncs.test.public_result_json_token_tape_v1` receives the compact JSON transport
+chunks and token spans produced by its MNCS cursor application. The Python
+boundary encodes each supported value once so it can cross the structured
+application boundary; it does not project the Python tree into typed tokens or
+sort object keys. MNCS scans the bounded source in four 1 KiB chunks per
+window, carries cursor and JSON validation state between calls, validates the
+token spans, constructs a bounded native value, sorts object keys by decoded
+UTF-8, and writes the public indented JSON with a trailing newline. Flat scalar
+arrays retain token ranges instead of allocating linked native value nodes.
+This path accepts at most 512 tokens, 65,536 source bytes, depth 12, 64 object
+members, 256-byte decoded keys, 3,072-byte token spans, 65,536 output bytes,
+and the runner's 8,000,000-step budget. A separate native digest application
+verifies the compact source once in bounded sixteen-chunk windows after
+tokenization, so changes between tokenizer windows are rejected without
+rehashing the full document in every window or consuming the formatter's
+output budget. Raw scalar spellings, including the host's float
+representation, are validated and copied by MNCS. The adapter rejoins bounded
+native output chunks and computes the public payload digest over those exact
+bytes. Differential tests compare the result with the
+independent Python golden, including numeric forms, Unicode, escaping, nested
+containers, and 33 KB arrays and objects.
 
-Values outside the typed-tape contract and native input or step-budget outcomes
+Values outside the raw-token contract and native input or step-budget outcomes
 retain the compatibility path. For those values Python may produce compact
 JSON; `mncs.test.public_result_json_key_order_v1` sorts bounded documents when
 needed, and `mncs.test.public_result_json_token_v1` plus its window continuation

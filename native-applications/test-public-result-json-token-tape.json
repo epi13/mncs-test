@@ -5,11 +5,13 @@
   "module": "mncs.test.public_result_json_token_tape_v1",
   "entry_function": "public_result_json_token_tape_app_v1",
   "profile": "0.18",
-  "interface_identity": "b9994778551804c9d222b847cb4c489828de5ae4826752858fdf22c1c4ac4af9",
+  "interface_identity": "60853c4e1b0d99b2ceef3dc579cb63828b1a37be3282d0db42e1a81d6d60c311",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }

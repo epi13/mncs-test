@@ -1,14 +1,13 @@
 mncs 0.18;
 
 // Canonicalize compact public-result JSON without a host-built value tree.
-// Input and output stay within eight UTF-8-safe 1 KiB chunks. JSON values are
+// Input and output stay within sixty-four UTF-8-safe 1 KiB chunks. JSON values are
 // represented as bounded recursive MNCS variants; object members are inserted
 // into Unicode-ordered lists as the token cursor closes each value.
 module mncs.test.public_result_json_key_order_v1;
 
 use mncs.std.application.v1;
 use mncs.std.json.v1 as json;
-use mncs.std.json_cursor.v1 as cursor;
 use mncs.std.sha256.v1 as sha256;
 
 record JsonTokenInputChunkV1 {
@@ -49,16 +48,19 @@ record FrameV1 {
     items: JsonValueV1,
     pending_key: KeyV1,
     has_pending_key: bool,
-    child_count: u64
+    child_count: u64,
+    expect: byte
 }
 
 record ParseStateV1 {
-    cursor_state: cursor.Cursor,
     frames: [FrameV1; 12],
     depth: u64,
     root: JsonValueV1,
     has_root: bool,
     string_start: u64,
+    in_string: bool,
+    string_escape: bool,
+    string_is_key: bool,
     scalar_start: u64,
     scalar_active: bool,
     value_count: u64,
@@ -83,7 +85,7 @@ record JsonOrderRequestV1 {
     input_sha256: [byte; up_to 64]
 }
 
-record JsonOrderChunkV1 { bytes: [byte; 64], length: u64 }
+record JsonOrderChunkV1 { bytes: [byte; 1024], length: u64 }
 
 enum JsonOrderChunkListV1 {
     ChunkNil,
@@ -91,7 +93,7 @@ enum JsonOrderChunkListV1 {
 }
 
 record JsonOrderWriterV1 {
-    current_bytes: [byte; 64],
+    current_bytes: [byte; 1024],
     current_length: u64,
     completed: JsonOrderChunkListV1,
     completed_count: u64,
@@ -102,7 +104,7 @@ record JsonOrderWriterV1 {
 record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
 
 record JsonOrderChunkBuilderV1 {
-    chunks: [JsonOrderChunkV1; 256],
+    chunks: [JsonOrderChunkV1; 64],
     count: u64
 }
 
@@ -112,7 +114,7 @@ record JsonOrderResultV1 {
     input_sha256: [byte; up_to 64],
     document_length: u64,
     chunk_count: u64,
-    chunks: [JsonOrderChunkV1; up_to 256]
+    chunks: [JsonOrderChunkV1; up_to 64]
 }
 
 fn request_schema_v1() -> (result: [byte; up_to 64]) {
@@ -136,7 +138,7 @@ fn document_shape(document: JsonTokenDocumentV1) -> (result: DocumentShapeV1) {
     iterate i over document.chunks carrying shape: DocumentShapeV1 = initial {
         let chunk: JsonTokenInputChunkV1 = document.chunks[i];
         let valid_chunk: bool = chunk.length > 0 && chunk.length <= 1024
-            && chunk.length == chunk.bytes.len && shape.total +% chunk.length <= 16384;
+            && chunk.length == chunk.bytes.len && shape.total +% chunk.length <= 65536;
         next shape = DocumentShapeV1 {
             total: shape.total +% chunk.length,
             valid: shape.valid && valid_chunk
@@ -144,8 +146,8 @@ fn document_shape(document: JsonTokenDocumentV1) -> (result: DocumentShapeV1) {
     }
     return DocumentShapeV1 {
         total: shape.total,
-        valid: shape.valid && document.chunks.len > 0 && document.chunks.len <= 16
-            && document.byte_length == shape.total && document.byte_length <= 16384
+        valid: shape.valid && document.chunks.len > 0 && document.chunks.len <= 64
+            && document.byte_length == shape.total && document.byte_length <= 65536
     };
 }
 
@@ -398,7 +400,8 @@ fn empty_frame(kind: byte) -> (result: FrameV1) {
         items: select(kind == 1, JsonValueV1.ObjectNil, JsonValueV1.ArrayNil),
         pending_key: empty_key(),
         has_pending_key: false,
-        child_count: 0
+        child_count: 0,
+        expect: select(kind == 1, 1, 5)
     };
 }
 
@@ -426,12 +429,13 @@ fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV
     }
     let frame_index: u64 = state.depth -% 1;
     let frame: FrameV1 = state.frames[frame_index];
-    if frame.kind == 2 {
+    if frame.kind == 2 && frame.expect == 5 {
         let prepended: JsonValueV1 = prepend_array(frame.items, value);
         let updated_frame: FrameV1 = FrameV1 {
             ..frame,
             items: prepended,
-            child_count: frame.child_count +% 1
+            child_count: frame.child_count +% 1,
+            expect: 6
         };
         return ParseStateV1 {
             ..state,
@@ -440,14 +444,15 @@ fn append_value(state: ParseStateV1, value: JsonValueV1) -> (result: ParseStateV
             valid: !is_empty_value(prepended)
         };
     }
-    if frame.kind == 1 && frame.has_pending_key && frame.child_count < 64 {
+    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 64 {
         let inserted: JsonValueV1 = insert_field(frame.items, frame.pending_key, value);
         let updated_frame: FrameV1 = FrameV1 {
             ..frame,
             items: inserted,
             pending_key: empty_key(),
             has_pending_key: false,
-            child_count: frame.child_count +% 1
+            child_count: frame.child_count +% 1,
+            expect: 4
         };
         return ParseStateV1 {
             ..state,
@@ -482,88 +487,171 @@ fn container_value(frame: FrameV1) -> (result: JsonValueV1) {
 }
 
 fn parse_chunk_step(parsed: ParseStateV1, document: JsonTokenDocumentV1, base: u64, chunk: JsonTokenInputChunkV1, index: u64) -> (result: ParseStateV1) {
-    if index < chunk.length { return parse_step(parsed, document, base +% index); }
+    if index < chunk.length {
+        return parse_step(parsed, document, base +% index, chunk.bytes[index]);
+    }
     return parsed;
 }
 
-fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64) -> (result: ParseStateV1) {
-    let value: byte = located_byte(document, position);
-    let before: cursor.Cursor = state.cursor_state;
-    let boundary: bool = !before.in_string && scalar_boundary(value);
-    let finalized: ParseStateV1 = maybe_finalize_scalar(state, position, boundary);
-    let after: cursor.Cursor = cursor.feed_byte(before, value);
-    let advanced: ParseStateV1 = ParseStateV1 { ..finalized, cursor_state: after };
-    if !after.valid { return ParseStateV1 { ..advanced, valid: false }; }
+fn parse_expects_key(state: ParseStateV1) -> (result: bool) {
+    if state.depth == 0 { return false; }
+    let frame: FrameV1 = state.frames[state.depth -% 1];
+    return frame.kind == 1 && frame.expect == 1;
+}
 
-    if after.event == 2 {
-        if after.depth == 0 || after.depth > 12 { return ParseStateV1 { ..advanced, valid: false }; }
-        let frame_index: u64 = (after.depth as u64) -% 1;
-        let raw_length: u64 = after.string_end -% after.string_start;
-        if after.string_end < after.string_start || raw_length > 256 {
-            return ParseStateV1 { ..advanced, valid: false };
+fn parse_expects_value(state: ParseStateV1) -> (result: bool) {
+    if state.depth == 0 { return !state.has_root; }
+    let frame: FrameV1 = state.frames[state.depth -% 1];
+    return (frame.kind == 1 && frame.expect == 3)
+        || (frame.kind == 2 && frame.expect == 5);
+}
+
+fn parse_string_step(
+    state: ParseStateV1,
+    document: JsonTokenDocumentV1,
+    position: u64,
+    value: byte
+) -> (result: ParseStateV1) {
+    if state.string_escape {
+        return ParseStateV1 { ..state, string_escape: false };
+    }
+    if value == 92 { return ParseStateV1 { ..state, string_escape: true }; }
+    if value != 34 { return state; }
+    let closed: ParseStateV1 = ParseStateV1 { ..state, in_string: false };
+    let raw_start: u64 = state.string_start +% 1;
+    let raw_length: u64 = position -% raw_start;
+    if state.string_is_key {
+        if closed.depth == 0 || raw_length > 256 {
+            return ParseStateV1 { ..closed, valid: false };
         }
-        let key: KeyV1 = decode_key(document, after.string_start, raw_length);
-        let frame: FrameV1 = advanced.frames[frame_index];
-        if frame.kind != 1 || frame.has_pending_key || !key.valid {
-            return ParseStateV1 { ..advanced, valid: false };
+        let frame_index: u64 = closed.depth -% 1;
+        let frame: FrameV1 = closed.frames[frame_index];
+        let key: KeyV1 = decode_key(document, raw_start, raw_length);
+        if frame.kind != 1 || frame.expect != 1 || frame.has_pending_key || !key.valid {
+            return ParseStateV1 { ..closed, valid: false };
         }
         return ParseStateV1 {
-            ..advanced,
-            frames: replace(advanced.frames, frame_index, FrameV1 { ..frame, pending_key: key, has_pending_key: true })
+            ..closed,
+            frames: replace(closed.frames, frame_index, FrameV1 {
+                ..frame,
+                pending_key: key,
+                has_pending_key: true,
+                expect: 2
+            })
         };
     }
-    if after.event == 3 {
-        return ParseStateV1 { ..advanced, string_start: before.position };
-    }
-    if after.event == 4 {
-        if after.position <= state.string_start +% 1 { return ParseStateV1 { ..advanced, valid: false }; }
-        return append_value(
-            advanced,
-            JsonValueV1.String {
-                start: state.string_start +% 1,
-                length: after.position -% state.string_start -% 2
-            }
-        );
-    }
-    if after.event == 5 || after.event == 6 {
-        if after.depth == 0 || after.depth > 12 { return ParseStateV1 { ..advanced, valid: false }; }
-        let kind: byte = select(after.event == 5, 1, 2);
-        let frame: FrameV1 = empty_frame(kind);
-        return ParseStateV1 {
-            ..advanced,
-            frames: replace(advanced.frames, (after.depth as u64) -% 1, frame),
-            depth: after.depth as u64
-        };
-    }
-    if after.event == 7 || after.event == 8 {
-        if before.depth == 0 { return ParseStateV1 { ..advanced, valid: false }; }
-        let frame_index: u64 = (before.depth as u64) -% 1;
-        let frame: FrameV1 = advanced.frames[frame_index];
-        if after.event == 7 && frame.kind != 1 { return ParseStateV1 { ..advanced, valid: false }; }
-        if after.event == 8 && frame.kind != 2 { return ParseStateV1 { ..advanced, valid: false }; }
-        if frame.has_pending_key { return ParseStateV1 { ..advanced, valid: false }; }
-        let container: JsonValueV1 = container_value(frame);
-        let popped: ParseStateV1 = ParseStateV1 { ..advanced, depth: after.depth as u64 };
-        return append_value(popped, container);
-    }
+    return append_value(
+        closed,
+        JsonValueV1.String { start: raw_start, length: raw_length }
+    );
+}
 
-    let scalar_character: bool = !after.in_string && !scalar_boundary(value);
-    if scalar_character && !advanced.scalar_active {
+fn parse_open_container(state: ParseStateV1, value: byte) -> (result: ParseStateV1) {
+    if !parse_expects_value(state) || state.depth >= 12 {
+        return ParseStateV1 { ..state, valid: false };
+    }
+    let kind: byte = select(value == 123, 1, 2);
+    let frame: FrameV1 = empty_frame(kind);
+    return ParseStateV1 {
+        ..state,
+        frames: replace(state.frames, state.depth, frame),
+        depth: state.depth +% 1
+    };
+}
+
+fn parse_close_container(state: ParseStateV1, value: byte) -> (result: ParseStateV1) {
+    if state.depth == 0 { return ParseStateV1 { ..state, valid: false }; }
+    let frame_index: u64 = state.depth -% 1;
+    let frame: FrameV1 = state.frames[frame_index];
+    let correct: bool = (value == 125 && frame.kind == 1 && (frame.expect == 1 || frame.expect == 4))
+        || (value == 93 && frame.kind == 2 && (frame.expect == 5 || frame.expect == 6));
+    if !correct || frame.has_pending_key { return ParseStateV1 { ..state, valid: false }; }
+    let container: JsonValueV1 = container_value(frame);
+    let popped: ParseStateV1 = ParseStateV1 { ..state, depth: frame_index };
+    return append_value(popped, container);
+}
+
+fn parse_comma(state: ParseStateV1) -> (result: ParseStateV1) {
+    if state.depth == 0 { return ParseStateV1 { ..state, valid: false }; }
+    let frame_index: u64 = state.depth -% 1;
+    let frame: FrameV1 = state.frames[frame_index];
+    if frame.kind == 1 && frame.expect == 4 {
+        return ParseStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, FrameV1 { ..frame, expect: 1 })
+        };
+    }
+    if frame.kind == 2 && frame.expect == 6 {
+        return ParseStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, FrameV1 { ..frame, expect: 5 })
+        };
+    }
+    return ParseStateV1 { ..state, valid: false };
+}
+
+fn parse_colon(state: ParseStateV1) -> (result: ParseStateV1) {
+    if state.depth == 0 { return ParseStateV1 { ..state, valid: false }; }
+    let frame_index: u64 = state.depth -% 1;
+    let frame: FrameV1 = state.frames[frame_index];
+    if frame.kind == 1 && frame.expect == 2 && frame.has_pending_key {
+        return ParseStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, FrameV1 { ..frame, expect: 3 })
+        };
+    }
+    return ParseStateV1 { ..state, valid: false };
+}
+
+fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64, value: byte) -> (result: ParseStateV1) {
+    if state.in_string { return parse_string_step(state, document, position, value); }
+    let boundary: bool = scalar_boundary(value);
+    let advanced: ParseStateV1 = maybe_finalize_scalar(state, position, boundary);
+    if !advanced.valid { return advanced; }
+    if json_space(value) { return advanced; }
+    if value == 34 {
+        if parse_expects_key(advanced) {
+            return ParseStateV1 {
+                ..advanced,
+                string_start: position,
+                in_string: true,
+                string_escape: false,
+                string_is_key: true
+            };
+        }
+        if parse_expects_value(advanced) {
+            return ParseStateV1 {
+                ..advanced,
+                string_start: position,
+                in_string: true,
+                string_escape: false,
+                string_is_key: false
+            };
+        }
+        return ParseStateV1 { ..advanced, valid: false };
+    }
+    if value == 123 || value == 91 { return parse_open_container(advanced, value); }
+    if value == 125 || value == 93 { return parse_close_container(advanced, value); }
+    if value == 44 { return parse_comma(advanced); }
+    if value == 58 { return parse_colon(advanced); }
+    if !advanced.scalar_active {
+        if !parse_expects_value(advanced) { return ParseStateV1 { ..advanced, valid: false }; }
         return ParseStateV1 { ..advanced, scalar_start: position, scalar_active: true };
     }
-    if boundary { return ParseStateV1 { ..advanced, scalar_active: false }; }
     return advanced;
 }
 
 fn empty_parse_state() -> (result: ParseStateV1) {
     let frame: FrameV1 = empty_frame(0);
     return ParseStateV1 {
-        cursor_state: cursor.init(),
         frames: [frame; 12],
         depth: 0,
         root: JsonValueV1.Empty,
         has_root: false,
         string_start: 0,
+        in_string: false,
+        string_escape: false,
+        string_is_key: false,
         scalar_start: 0,
         scalar_active: false,
         value_count: 0,
@@ -580,23 +668,43 @@ fn parse_chunk(state: ParseStateV1, document: JsonTokenDocumentV1, chunk_index: 
     return parsed;
 }
 
+fn scan_document_part(scanned: json.ScanState, chunk: JsonTokenInputChunkV1, index: u64) -> (result: json.ScanState) {
+    let start: u64 = index *% 64;
+    if start >= chunk.length { return scanned; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    return json.feed_chunk(scanned, chunk.bytes[start..start +% size]);
+}
+
+fn scan_document_chunk(scanned: json.ScanState, chunk: JsonTokenInputChunkV1) -> (result: json.ScanState) {
+    iterate i up_to 16 carrying current: json.ScanState = scanned {
+        next current = scan_document_part(current, chunk, i);
+    }
+    return current;
+}
+
+fn scan_document(document: JsonTokenDocumentV1) -> (result: json.ScanState) {
+    iterate i over document.chunks carrying scanned: json.ScanState = json.init() {
+        next scanned = scan_document_chunk(scanned, document.chunks[i]);
+    }
+    return json.finish(scanned);
+}
+
 fn parse_document(document: JsonTokenDocumentV1) -> (result: ParseStateV1) {
     iterate i over document.chunks carrying parsed: ParseStateV1 = empty_parse_state() {
         next parsed = parse_chunk(parsed, document, i);
     }
     let finalized: ParseStateV1 = finalize_scalar(parsed, document.byte_length);
-    let completed: cursor.Cursor = cursor.finish(finalized.cursor_state);
     return ParseStateV1 {
         ..finalized,
-        cursor_state: completed,
-        valid: finalized.valid && cursor.is_valid(completed)
+        valid: finalized.valid && !finalized.in_string
             && finalized.depth == 0 && finalized.has_root
     };
 }
 
 fn writer_empty() -> (result: JsonOrderWriterV1) {
     return JsonOrderWriterV1 {
-        current_bytes: [0; 64],
+        current_bytes: [0; 1024],
         current_length: 0,
         completed: JsonOrderChunkListV1.ChunkNil,
         completed_count: 0,
@@ -608,9 +716,9 @@ fn writer_empty() -> (result: JsonOrderWriterV1) {
 fn writer_next_chunk(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
     let finished: JsonOrderChunkV1 = JsonOrderChunkV1 {
         bytes: writer.current_bytes,
-        length: 64
+        length: 1024
     };
-    let empty: [byte; 64] = [0; 64];
+    let empty: [byte; 1024] = [0; 1024];
     return JsonOrderWriterV1 {
         ..writer,
         current_bytes: replace(empty, 0, value),
@@ -625,9 +733,9 @@ fn writer_next_chunk(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrd
 }
 
 fn writer_byte(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
-    if !writer.ok || writer.length >= 16384 { return JsonOrderWriterV1 { ..writer, ok: false }; }
-    if writer.current_length >= 64 { return writer_next_chunk(writer, value); }
-    let updated: [byte; 64] = replace(writer.current_bytes, writer.current_length, value);
+    if !writer.ok || writer.length >= 65536 { return JsonOrderWriterV1 { ..writer, ok: false }; }
+    if writer.current_length >= 1024 { return writer_next_chunk(writer, value); }
+    let updated: [byte; 1024] = replace(writer.current_bytes, writer.current_length, value);
     return JsonOrderWriterV1 {
         ..writer,
         current_bytes: updated,
@@ -709,7 +817,7 @@ fn writer_source_range(
     start: u64,
     length: u64
 ) -> (result: JsonOrderWriterV1) {
-    if length > 1024 || start > document.byte_length || length > document.byte_length -% start {
+    if length > 65536 || start > document.byte_length || length > document.byte_length -% start {
         return JsonOrderWriterV1 { ..writer, ok: false };
     }
     let initial: WriterSourceStateV1 = WriterSourceStateV1 { writer: writer, base: 0 };
@@ -785,14 +893,14 @@ fn write_json(
 }
 
 fn empty_output_chunk() -> (result: JsonOrderChunkV1) {
-    return JsonOrderChunkV1 { bytes: [0; 64], length: 0 };
+    return JsonOrderChunkV1 { bytes: [0; 1024], length: 0 };
 }
 
 fn output_completed_chunks(
     completed: JsonOrderChunkListV1,
-    chunks: [JsonOrderChunkV1; 256],
+    chunks: [JsonOrderChunkV1; 64],
     index: u64
-) -> (result: [JsonOrderChunkV1; 256]) {
+) -> (result: [JsonOrderChunkV1; 64]) {
     return match completed {
         ChunkNil => chunks,
         ChunkCons { head: head, tail: tail } => output_completed_chunks(
@@ -805,8 +913,8 @@ fn output_completed_chunks(
 
 fn output_chunks(writer: JsonOrderWriterV1) -> (result: JsonOrderChunkBuilderV1) {
     let empty: JsonOrderChunkV1 = empty_output_chunk();
-    let initial: [JsonOrderChunkV1; 256] = [empty; 256];
-    let completed: [JsonOrderChunkV1; 256] = output_completed_chunks(
+    let initial: [JsonOrderChunkV1; 64] = [empty; 64];
+    let completed: [JsonOrderChunkV1; 64] = output_completed_chunks(
         writer.completed,
         initial,
         writer.completed_count -% 1
@@ -838,29 +946,6 @@ fn order_result(supported: bool, input_sha256: [byte; up_to 64], writer: JsonOrd
         chunk_count: select(ready, built.count, 0),
         chunks: select(ready, built.chunks[0..built.count], built.chunks[0..0])
     };
-}
-
-fn scan_document_part(scanned: json.ScanState, chunk: JsonTokenInputChunkV1, index: u64) -> (result: json.ScanState) {
-    let start: u64 = index *% 64;
-    if start >= chunk.length { return scanned; }
-    let remaining: u64 = chunk.length -% start;
-    let size: u64 = select(remaining < 64, remaining, 64);
-    let part: [byte; up_to 64] = chunk.bytes[start..start +% size];
-    return json.feed_chunk(scanned, part);
-}
-
-fn scan_document_chunk(scanned: json.ScanState, chunk: JsonTokenInputChunkV1) -> (result: json.ScanState) {
-    iterate i up_to 16 carrying current: json.ScanState = scanned {
-        next current = scan_document_part(current, chunk, i);
-    }
-    return current;
-}
-
-fn scan_document(document: JsonTokenDocumentV1) -> (result: json.ScanState) {
-    iterate i over document.chunks carrying scanned: json.ScanState = json.init() {
-        next scanned = scan_document_chunk(scanned, document.chunks[i]);
-    }
-    return json.finish(scanned);
 }
 
 fn document_digest(document: JsonTokenDocumentV1) -> (result: [byte; up_to 64]) {
@@ -903,8 +988,11 @@ fn encode_digest(raw: [byte; 32]) -> (result: [byte; up_to 64]) {
     return encoded;
 }
 
-fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool, scanned: json.ScanState) -> (result: ParseStateV1) {
-    if request_valid && json.is_valid(scanned) { return parse_document(document); }
+fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result: ParseStateV1) {
+    if request_valid {
+        let scanned: json.ScanState = scan_document(document);
+        if json.is_valid(scanned) { return parse_document(document); }
+    }
     return ParseStateV1 { ..empty_parse_state(), valid: false };
 }
 
@@ -915,7 +1003,7 @@ fn writer_for_parse(parsed: ParseStateV1, document: JsonTokenDocumentV1) -> (res
 
 fn valid_order_request(request: JsonOrderRequestV1, shape: DocumentShapeV1) -> (result: bool) {
     if !same_bytes(request.schema_version, request_schema_v1()) || !shape.valid
-        || request.document.byte_length > 16384 || request.input_sha256.len != 64 {
+        || request.document.byte_length > 65536 || request.input_sha256.len != 64 {
         return false;
     }
     return same_bytes(request.input_sha256, document_digest(request.document));
@@ -932,10 +1020,9 @@ fn public_result_json_key_order_app_v1(context: ApplicationContext) -> (result: 
     let request: JsonOrderRequestV1 = structured_read(context.argv[0], request_schema_v1());
     let shape: DocumentShapeV1 = document_shape(request.document);
     let request_valid: bool = valid_order_request(request, shape);
-    let scanned: json.ScanState = scan_document(request.document);
-    let parsed: ParseStateV1 = parse_checked(request.document, request_valid, scanned);
+    let parsed: ParseStateV1 = parse_checked(request.document, request_valid);
     let writer: JsonOrderWriterV1 = writer_for_parse(parsed, request.document);
-    let result: JsonOrderResultV1 = order_result(request_valid && json.is_valid(scanned) && parsed.valid, request.input_sha256, writer);
+    let result: JsonOrderResultV1 = order_result(request_valid && parsed.valid, request.input_sha256, writer);
     let published: u64 = structured_write(context.argv[1], result_schema_v1(), result);
     if published == 0 {
         return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 107, 101, 121, 45, 111, 114, 100, 101, 114, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);

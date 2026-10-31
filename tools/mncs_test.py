@@ -54,7 +54,11 @@ PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
-PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/2"
+PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-request/1"
+PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA = "mncs.test.public-json-native-tokenize-window/2"
+PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA = "mncs.test.public-json-source-digest-request/1"
+PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-digest/1"
+PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/3"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/2"
@@ -62,9 +66,10 @@ PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
-PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = 16384
+PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 512
-PUBLIC_RESULT_JSON_TOKEN_TAPE_MAX_INPUT_BYTES = 65536
+PUBLIC_RESULT_JSON_NATIVE_TAPE_CHUNKS_PER_WINDOW = 4
+PUBLIC_RESULT_JSON_SOURCE_DIGEST_CHUNKS_PER_WINDOW = 16
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
 MANIFEST_TEST_VALIDATION_RESULT_SCHEMA = "mncs.test.manifest-test-validation/2"
@@ -277,44 +282,113 @@ def _decode_public_result_chunks(
     return bytes(document)
 
 
-def _decode_public_result_token_tape_chunks(result: dict[str, Any], *, byte_length: int) -> bytes:
-    grouped = result.get("chunks")
-    chunk_count = result.get("chunk_count")
+def _initial_native_json_tokenizer_state() -> tuple[dict[str, Any], dict[str, Any]]:
+    scan_state = {
+        "stack": [0] * 64,
+        "depth": 0,
+        "expect": 0,
+        "mode": 0,
+        "number": 0,
+        "literal": 0,
+        "position": 0,
+        "escape": False,
+        "unicode": 0,
+        "valid": True,
+        "error": 0,
+        "objects": 0,
+        "arrays": 0,
+        "strings": 0,
+    }
+    cursor_state = {
+        "position": 0,
+        "depth": 0,
+        "stack": [0] * 64,
+        "expect_key": False,
+        "in_string": False,
+        "string_is_key": False,
+        "escaped": False,
+        "unicode_remaining": 0,
+        "unicode_value": 0,
+        "pending_high_surrogate": False,
+        "utf8_remaining": 0,
+        "utf8_lead": 0,
+        "valid": True,
+        "event": 0,
+        "string_start": 0,
+        "string_end": 0,
+        "key": [0] * 32,
+        "key_length": 0,
+        "string_length": 0,
+        "pending_key": False,
+        "root_seen": False,
+        "atom_active": False,
+        "atom_kind": 0,
+        "atom_remaining": 0,
+        "token_event": False,
+        "token_kind": 0,
+        "token_start": 0,
+        "token_end": 0,
+        "token_depth": 0,
+    }
+    return scan_state, cursor_state
+
+
+def _decode_public_result_token_tape_chunks(
+    result: dict[str, Any],
+    *,
+    byte_length: int,
+) -> bytes:
+    groups = result.get("chunks")
+    group_count = result.get("chunk_count")
     if (
-        not isinstance(grouped, list)
-        or not isinstance(chunk_count, int)
-        or isinstance(chunk_count, bool)
-        or chunk_count != len(grouped)
-        or not 0 < chunk_count <= 64
+        not isinstance(groups, list)
+        or type(group_count) is not int
+        or group_count != len(groups)
+        or not 1 <= group_count <= 64
     ):
-        raise AdapterError("MNCS public-result token tape app returned malformed grouped chunks")
-    flat_chunks: list[dict[str, Any]] = []
-    for group in grouped:
+        raise AdapterError("MNCS native token-tape app returned malformed chunk metadata")
+
+    document = bytearray()
+    for group in groups:
         if not isinstance(group, dict):
-            raise AdapterError("MNCS public-result token tape app returned a malformed chunk group")
+            raise AdapterError("MNCS native token-tape app returned a malformed output group")
         parts = group.get("parts")
-        length = group.get("length")
-        if not isinstance(parts, list) or len(parts) != 16:
-            raise AdapterError("MNCS public-result token tape app returned malformed chunk parts")
-        if not isinstance(length, int) or isinstance(length, bool) or not 0 <= length <= 1024:
-            raise AdapterError("MNCS public-result token tape app returned an invalid group length")
-        part_total = 0
+        group_length = group.get("length")
+        if (
+            not isinstance(parts, list)
+            or type(group_length) is not int
+            or not 0 < group_length <= 1024
+        ):
+            raise AdapterError("MNCS native token-tape app returned invalid output-group bounds")
+        output_group = bytearray()
         for part in parts:
             if not isinstance(part, dict):
-                raise AdapterError("MNCS public-result token tape app returned a malformed byte part")
-            part_length = part.get("length")
-            if not isinstance(part_length, int) or isinstance(part_length, bool) or not 0 <= part_length <= 64:
-                raise AdapterError("MNCS public-result token tape app returned an invalid part length")
-            part_total += part_length
-            flat_chunks.append(part)
-        if part_total != length:
-            raise AdapterError("MNCS public-result token tape group length does not match its parts")
-    return _decode_public_result_chunks(
-        {"chunks": flat_chunks, "chunk_count": len(flat_chunks)},
-        byte_length=byte_length,
-        maximum_chunks=1024,
-        maximum_chunk_bytes=64,
-    )
+                raise AdapterError("MNCS native token-tape app returned a malformed output part")
+            raw_bytes = part.get("bytes")
+            length = part.get("length")
+            if type(length) is not int or not 0 <= length <= 64:
+                raise AdapterError("MNCS native token-tape app returned an invalid part length")
+            if isinstance(raw_bytes, str):
+                try:
+                    encoded = raw_bytes.encode("utf-8")
+                except UnicodeEncodeError as error:
+                    raise AdapterError("MNCS native token-tape app returned invalid UTF-8") from error
+            elif isinstance(raw_bytes, list) and all(
+                type(byte) is int and 0 <= byte <= 255 for byte in raw_bytes
+            ):
+                encoded = bytes(raw_bytes)
+            else:
+                raise AdapterError("MNCS native token-tape app returned malformed output bytes")
+            if length > len(encoded):
+                raise AdapterError("MNCS native token-tape app returned a short output part")
+            output_group.extend(encoded[:length])
+        if len(output_group) != group_length:
+            raise AdapterError("MNCS native token-tape app returned an incomplete output group")
+        document.extend(output_group)
+
+    if len(document) != byte_length:
+        raise AdapterError("MNCS native token-tape app returned an incomplete document")
+    return bytes(document)
 
 
 def _public_result_ordering_preflight(value: Any) -> tuple[bool, bool]:
@@ -413,7 +487,7 @@ def _native_public_result_key_order(
     cwd: Path,
     environment: dict[str, str],
 ) -> bytes | None:
-    """Sort one bounded JSON document's object keys in the native Test app."""
+    """Parse, sort, and pretty-print one bounded JSON document in MNCS."""
     if not document or len(document) > PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES:
         return None
     packed = _native_public_result_document_request(document)
@@ -459,203 +533,235 @@ def _native_public_result_key_order(
     ordered = _decode_public_result_chunks(
         result,
         byte_length=byte_length,
-        maximum_chunks=256,
-        maximum_chunk_bytes=64,
+        maximum_chunks=64,
+        maximum_chunk_bytes=1024,
     )
     return ordered
 
 
-def _native_public_result_payload(
-    value: Any,
+def _initial_native_sha256_state() -> dict[str, Any]:
+    return {
+        "h": [
+            1779033703,
+            3144134277,
+            1013904242,
+            2773480762,
+            1359893119,
+            2600822924,
+            528734635,
+            1541459225,
+        ],
+        "total": 0,
+        "buf": "\x00" * 64,
+        "buffered": 0,
+    }
+
+
+def _native_public_result_source_digest(
+    document_request: dict[str, Any],
     *,
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
-) -> tuple[bytes, str] | None:
-    """Render supported values from a native typed token tape."""
-    native_document = _native_public_result_token_tape(
-        value,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )
-    if native_document is not None:
-        return native_document, hashlib.sha256(native_document).hexdigest()
+) -> bool | None:
+    """Verify the transported source digest in bounded native windows."""
+    document = document_request.get("document")
+    input_hash = document_request.get("input_sha256")
+    chunks = document.get("chunks") if isinstance(document, dict) else None
+    if not isinstance(chunks, list) or not chunks or len(chunks) > 64 or not isinstance(input_hash, str):
+        return False
 
-    key_order_candidate, requires_sorted_keys = _public_result_ordering_preflight(value)
-    if key_order_candidate and requires_sorted_keys:
-        try:
-            source = compact_json(value, sort_keys=False).encode("utf-8")
-        except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
-            return None
-        ordered = _native_public_result_key_order(
-            source,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
+    hash_state = _initial_native_sha256_state()
+    chunk_index = 0
+    while chunk_index < len(chunks):
+        next_expected = min(
+            chunk_index + PUBLIC_RESULT_JSON_SOURCE_DIGEST_CHUNKS_PER_WINDOW,
+            len(chunks),
         )
-        if ordered is not None:
-            source = ordered
-        else:
-            try:
-                source = compact_json(value).encode("utf-8")
-            except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
-                return None
-    else:
+        request = {
+            "schema_version": PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA,
+            "document": document,
+            "input_sha256": input_hash,
+            "chunk_index": chunk_index,
+            "hash_state": hash_state,
+        }
         try:
-            source = compact_json(value, sort_keys=requires_sorted_keys).encode("utf-8")
-        except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+            result = run_native_app(
+                "test-public-result-json-source-digest.json",
+                request,
+                request_schema=PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA,
+                result_schema=PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=8_000_000,
+            )
+        except (NativeBudgetExhaustedError, NativeInputBoundError):
             return None
-    return _native_public_result_document_payload(
-        source,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )
+        except NativeTransportError as error:
+            raise AdapterError(f"MNCS public-result source digest failed: {error}") from error
 
-
-def _public_result_token_tape(value: Any) -> tuple[list[dict[str, int]], list[bytes], int] | None:
-    """Pack typed tokens and bounded UTF-8 chunks without JSON serialization."""
-    tokens: list[dict[str, int]] = []
-    payload = bytearray()
-    payload_bytes = 0
-    pending: list[tuple[str, Any, int]] = [("value", value, 0)]
-    active: set[int] = set()
-    value_count = 0
-
-    def append_token(kind: int, data: bytes = b"") -> bool:
-        nonlocal payload_bytes
-        if (
-            len(tokens) >= 512
-            or len(data) > 1024
-            or payload_bytes + len(data) > PUBLIC_RESULT_JSON_TOKEN_TAPE_MAX_INPUT_BYTES
-        ):
+        if result.get("schema_version") != PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA:
+            raise AdapterError("MNCS public-result source digest returned an unsupported result schema")
+        if type(result.get("supported")) is not bool:
+            raise AdapterError("MNCS public-result source digest returned malformed support metadata")
+        if not result["supported"]:
             return False
-        tokens.append({"kind": kind, "offset": payload_bytes, "length": len(data)})
-        payload.extend(data)
-        payload_bytes += len(data)
-        return True
 
-    while pending:
-        event, current, depth = pending.pop()
-        if event == "object_end":
-            active.remove(current)
-            if not append_token(ord("}")):
-                return None
-            continue
-        if event == "array_end":
-            active.remove(current)
-            if not append_token(ord("]")):
-                return None
-            continue
-        if event == "key":
-            try:
-                encoded_key = current.encode("utf-8")
-            except (UnicodeEncodeError, AttributeError):
-                return None
-            if len(encoded_key) > 256 or not append_token(ord("K"), encoded_key):
-                return None
-            continue
+        output_hash = result.get("hash_state")
+        output_next = result.get("next_chunk_index")
+        complete = result.get("complete")
+        if (
+            result.get("input_sha256") != input_hash
+            or type(output_next) is not int
+            or output_next != next_expected
+            or type(complete) is not bool
+            or complete != (next_expected == len(chunks))
+            or not isinstance(output_hash, dict)
+        ):
+            raise AdapterError("MNCS public-result source digest returned malformed continuation state")
+        if complete:
+            return True
 
-        value_count += 1
-        if value_count > PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES:
-            return None
-        if current is None:
-            if not append_token(ord("V"), b"null"):
-                return None
-        elif type(current) is bool:
-            if not append_token(ord("V"), b"true" if current else b"false"):
-                return None
-        elif type(current) is str:
-            try:
-                encoded = current.encode("utf-8")
-            except UnicodeEncodeError:
-                return None
-            if not append_token(ord("S"), encoded):
-                return None
-        elif type(current) is int:
-            if not append_token(ord("V"), str(current).encode("ascii")):
-                return None
-        elif type(current) is float:
-            try:
-                # Python owns the scalar float spelling for compatibility;
-                # MNCS owns structure, escaping, ordering, and serialization.
-                scalar = json.dumps(current, allow_nan=False, separators=(",", ":"))
-                encoded = scalar.encode("ascii")
-            except (TypeError, ValueError, UnicodeEncodeError):
-                return None
-            if not append_token(ord("V"), encoded):
-                return None
-        elif type(current) is dict:
-            if depth >= 12:
-                return None
-            identity = id(current)
-            if identity in active:
-                return None
-            entries = list(current.items())
-            if len(entries) > 64 or any(type(key) is not str for key, _child in entries):
-                return None
-            active.add(identity)
-            if not append_token(ord("{")):
-                return None
-            pending.append(("object_end", identity, depth))
-            for key, child in reversed(entries):
-                pending.append(("value", child, depth + 1))
-                pending.append(("key", key, depth + 1))
-        elif type(current) in (list, tuple):
-            if depth >= 12:
-                return None
-            identity = id(current)
-            if identity in active:
-                return None
-            active.add(identity)
-            if not append_token(ord("[")):
-                return None
-            pending.append(("array_end", identity, depth))
-            pending.extend(("value", child, depth + 1) for child in reversed(current))
-        else:
-            return None
+        h = output_hash.get("h")
+        buf = output_hash.get("buf")
+        total = output_hash.get("total")
+        buffered = output_hash.get("buffered")
+        expected_offset = sum(chunk["length"] for chunk in chunks[:next_expected])
+        if (
+            not isinstance(h, list)
+            or len(h) != 8
+            or any(type(word) is not int or not 0 <= word <= 0xFFFFFFFF for word in h)
+            or not isinstance(buf, str)
+            or len(buf.encode("utf-8")) != 64
+            or type(total) is not int
+            or type(buffered) is not int
+            or buffered >= 64
+            or total != expected_offset
+            or buffered != expected_offset % 64
+        ):
+            raise AdapterError("MNCS public-result source digest returned malformed hash state")
+        hash_state = output_hash
+        chunk_index = output_next
 
-    if not tokens:
-        return None
-    payload_chunks = _public_result_input_chunks(bytes(payload))
-    if len(payload_chunks) > 64:
-        return None
-    chunk_offsets = list(_chunk_offsets(payload_chunks))
-    for token in tokens:
-        chunk_index, chunk_offset = _payload_chunk_position(chunk_offsets, token["offset"])
-        token["chunk_index"] = chunk_index
-        token["chunk_offset"] = chunk_offset
-    return tokens, payload_chunks, payload_bytes
+    return complete is True
 
 
 def _native_public_result_token_tape(
-    value: Any,
+    document: bytes,
     *,
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
 ) -> bytes | None:
-    """Ask MNCS to render a bounded typed token tape as public JSON."""
-    prepared = _public_result_token_tape(value)
+    """Tokenize compact JSON in MNCS, then format the native token spans."""
+    if not document or len(document) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+        return None
+    prepared = _native_public_result_document_request(document)
     if prepared is None:
         return None
-    tokens, payload_chunks, payload_bytes = prepared
-    request = {
+    start_request, source_length = prepared
+    source_chunks = start_request["document"]["chunks"]
+    input_hash = hashlib.sha256(document).hexdigest()
+    packed_source = b"".join(chunk["bytes"].encode("utf-8") for chunk in source_chunks)
+    if packed_source != document or source_length != len(document) or input_hash != start_request["input_sha256"]:
+        raise AdapterError("MNCS public-result token source changed during transport packing")
+
+    scan_state, cursor_state = _initial_native_json_tokenizer_state()
+    tokens: list[dict[str, Any]] = []
+    token_count = 0
+    next_chunk_index = 0
+    window_chunks = PUBLIC_RESULT_JSON_NATIVE_TAPE_CHUNKS_PER_WINDOW
+    while next_chunk_index < len(source_chunks):
+        next_expected = min(next_chunk_index + window_chunks, len(source_chunks))
+        request = {
+            "schema_version": PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+            "document": start_request["document"],
+            "input_sha256": input_hash,
+            "chunk_index": next_chunk_index,
+            "scan_state": scan_state,
+            "cursor_state": cursor_state,
+            "tokens": tokens,
+            "token_count": token_count,
+        }
+        try:
+            result = run_native_app(
+                "test-public-result-json-native-token-tape.json",
+                request,
+                request_schema=PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+                result_schema=PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=8_000_000,
+            )
+        except (NativeBudgetExhaustedError, NativeInputBoundError):
+            return None
+        except NativeTransportError as error:
+            raise AdapterError(f"MNCS native JSON tokenization failed: {error}") from error
+
+        if result.get("schema_version") != PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA:
+            raise AdapterError("MNCS native JSON tokenizer returned an unsupported result schema")
+        if type(result.get("supported")) is not bool:
+            raise AdapterError("MNCS native JSON tokenizer returned malformed support metadata")
+        if not result["supported"]:
+            return None
+        output_tokens = result.get("tokens")
+        output_count = result.get("token_count")
+        output_next = result.get("next_chunk_index")
+        complete = result.get("complete")
+        output_scan = result.get("scan_state")
+        output_cursor = result.get("cursor_state")
+        if (
+            result.get("input_sha256") != input_hash
+            or type(output_count) is not int
+            or not 1 <= output_count <= 512
+            or not isinstance(output_tokens, list)
+            or len(output_tokens) != output_count
+            or any(not isinstance(token, dict) for token in output_tokens)
+            or output_next != next_expected
+            or type(complete) is not bool
+            or complete != (next_expected == len(source_chunks))
+            or not isinstance(output_scan, dict)
+            or not isinstance(output_cursor, dict)
+        ):
+            raise AdapterError("MNCS native JSON tokenizer returned malformed continuation state")
+        tokens = output_tokens
+        token_count = output_count
+        scan_state = output_scan
+        cursor_state = output_cursor
+        next_chunk_index = output_next
+
+    if _native_public_result_source_digest(
+        start_request,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    ) is not True:
+        return None
+
+    tape_chunks: list[dict[str, Any]] = []
+    offset = 0
+    for source_chunk in source_chunks:
+        tape_chunks.append({
+            "offset": offset,
+            "bytes": source_chunk["bytes"],
+            "length": source_chunk["length"],
+        })
+        offset += source_chunk["length"]
+    tape_request = {
         "schema_version": PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
+        "input_sha256": input_hash,
         "tape": {
             "tokens": tokens,
-            "chunks": [
-                {"bytes": chunk.decode("utf-8"), "length": len(chunk), "offset": start}
-                for start, chunk in _chunk_offsets(payload_chunks)
-            ],
-            "byte_length": payload_bytes,
+            "chunks": tape_chunks,
+            "byte_length": len(document),
         },
     }
     try:
-        result = run_native_app(
+        formatted = run_native_app(
             "test-public-result-json-token-tape.json",
-            request,
+            tape_request,
             request_schema=PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
             result_schema=PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA,
             mncs=mncs,
@@ -666,22 +772,70 @@ def _native_public_result_token_tape(
     except (NativeBudgetExhaustedError, NativeInputBoundError):
         return None
     except NativeTransportError as error:
-        raise AdapterError(f"native Test public-result token tape failed: {error}") from error
-
-    if result.get("schema_version") != PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA:
-        raise AdapterError("MNCS public-result token tape app returned an unsupported result schema")
-    if type(result.get("supported")) is not bool:
-        raise AdapterError("MNCS public-result token tape app returned malformed support metadata")
-    if not result["supported"]:
+        raise AdapterError(f"MNCS native JSON token formatting failed: {error}") from error
+    if formatted.get("schema_version") != PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA:
+        raise AdapterError("MNCS native token formatter returned an unsupported result schema")
+    if type(formatted.get("supported")) is not bool:
+        raise AdapterError("MNCS native token formatter returned malformed support metadata")
+    if not formatted["supported"]:
         return None
-    byte_length = result.get("document_length")
-    if (
-        type(byte_length) is not int
-        or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
-    ):
-        raise AdapterError("MNCS public-result token tape app returned malformed document metadata")
-    document = _decode_public_result_token_tape_chunks(result, byte_length=byte_length)
-    return document
+    byte_length = formatted.get("document_length")
+    if type(byte_length) is not int or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+        raise AdapterError("MNCS native token formatter returned malformed document metadata")
+    return _decode_public_result_token_tape_chunks(formatted, byte_length=byte_length)
+
+
+def _native_public_result_payload(
+    value: Any,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Render bounded values through native tokenization, ordering, and emission."""
+    key_order_candidate, requires_sorted_keys = _public_result_ordering_preflight(value)
+    try:
+        source = compact_json(
+            value,
+            sort_keys=not key_order_candidate and requires_sorted_keys,
+        ).encode("utf-8")
+    except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+        return None
+
+    if key_order_candidate:
+        native_tokens = _native_public_result_token_tape(
+            source,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+        if native_tokens is not None:
+            return native_tokens, hashlib.sha256(native_tokens).hexdigest()
+
+        if requires_sorted_keys:
+            ordered = _native_public_result_key_order(
+                source,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            if ordered is not None:
+                source = ordered
+            else:
+                try:
+                    source = compact_json(value).encode("utf-8")
+                except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+                    return None
+
+    native_document = _native_public_result_document_payload(
+        source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if native_document is not None:
+        return native_document
+    return None
 
 
 def _native_public_result_document_payload(

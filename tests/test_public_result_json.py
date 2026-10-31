@@ -36,6 +36,16 @@ def _native_environment() -> dict[str, str]:
     return environment
 
 
+def _assert_native_raw_token_route(applications: list[str]) -> None:
+    assert applications[-1] == "test-public-result-json-token-tape.json"
+    assert applications[-2] == "test-public-result-json-source-digest.json"
+    assert applications[0] == "test-public-result-json-native-token-tape.json"
+    assert set(applications[:-1]) == {
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-source-digest.json",
+    }
+
+
 def _python_result_bytes(value: object) -> bytes:
     return (
         json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
@@ -124,6 +134,80 @@ def test_native_continuation_rejects_a_changed_source_document(tmp_path: Path) -
     assert continued["supported"] is False
 
 
+def test_native_raw_tokenizer_rejects_changed_source_between_windows(
+    tmp_path: Path,
+) -> None:
+    prepared = mncs_test._native_public_result_document_request(
+        b"[" + b",".join([b'"' + b"x" * 40 + b'"' for _ in range(100)]) + b"]"
+    )
+    assert prepared is not None
+    start_request, _source_length = prepared
+    scan_state, cursor_state = mncs_test._initial_native_json_tokenizer_state()
+    request = {
+        "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+        "document": start_request["document"],
+        "input_sha256": start_request["input_sha256"],
+        "chunk_index": 0,
+        "scan_state": scan_state,
+        "cursor_state": cursor_state,
+        "tokens": [],
+        "token_count": 0,
+    }
+    first = mncs_test.run_native_app(
+        "test-public-result-json-native-token-tape.json",
+        request,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+    assert first["supported"] is True
+    assert first["complete"] is False
+
+    document = json.loads(json.dumps(start_request["document"]))
+    first_chunk = document["chunks"][0]["bytes"]
+    replacement = "y" if first_chunk[10] != "y" else "z"
+    document["chunks"][0]["bytes"] = first_chunk[:10] + replacement + first_chunk[11:]
+    continued = mncs_test.run_native_app(
+        "test-public-result-json-native-token-tape.json",
+        {
+            "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+            "document": document,
+            "input_sha256": start_request["input_sha256"],
+            "chunk_index": first["next_chunk_index"],
+            "scan_state": first["scan_state"],
+            "cursor_state": first["cursor_state"],
+            "tokens": first["tokens"],
+            "token_count": first["token_count"],
+        },
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+    assert continued["supported"] is True, continued
+    assert continued["request_valid"] is True
+    assert continued["scan_valid"] is True
+    assert continued["cursor_valid"] is True
+    assert continued["complete"] is True
+    assert mncs_test._native_public_result_source_digest(
+        start_request,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    ) is True
+    assert mncs_test._native_public_result_source_digest(
+        {"document": document, "input_sha256": start_request["input_sha256"]},
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    ) is False
+
+
 def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path) -> None:
     value = _sample_result()
     path = tmp_path / "artifacts" / "result.json"
@@ -141,7 +225,10 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
 
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert [call.args[0] for call in native_app.call_args_list] == [
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert applications[-3:] == [
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-source-digest.json",
         "test-public-result-json-token-tape.json",
     ]
 
@@ -191,9 +278,7 @@ def test_family_check_error_response_uses_native_json_serializer(
     assert output.encode("utf-8") == (
         json.dumps(document, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def test_discover_json_uses_native_public_result_serializer(
@@ -224,9 +309,7 @@ def test_discover_json_uses_native_public_result_serializer(
     document = json.loads(output)
     assert exit_code == mncs_test.EXIT_SUCCESS
     assert output == _python_result_bytes(document)
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def test_validate_manifest_json_uses_native_serializer_for_ascii_output(
@@ -249,7 +332,12 @@ def test_validate_manifest_json_uses_native_serializer_for_ascii_output(
     document = json.loads(output)
     assert exit_code == mncs_test.EXIT_SUCCESS
     assert output == _python_result_bytes(document)
-    assert native_app.call_args_list[-1].args[0] == "test-public-result-json-token-tape.json"
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert applications[-3:] == [
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-source-digest.json",
+        "test-public-result-json-token-tape.json",
+    ]
 
 
 def test_ascii_json_mode_keeps_escaped_unicode_compatibility(
@@ -330,9 +418,7 @@ def test_artifact_store_json_uses_native_serializer_and_keeps_golden_digest(
             "sha256": hashlib.sha256(expected).hexdigest(),
         }
     ]
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path) -> None:
@@ -360,9 +446,7 @@ def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path)
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
@@ -382,9 +466,7 @@ def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Pat
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def test_native_key_order_sorts_documents_larger_than_eight_kibibytes(tmp_path: Path) -> None:
@@ -404,9 +486,51 @@ def test_native_key_order_sorts_documents_larger_than_eight_kibibytes(tmp_path: 
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    calls = [call.args[0] for call in native_app.call_args_list]
+    _assert_native_raw_token_route(calls)
+
+
+def test_native_key_order_sorts_a_33_kibibyte_object_with_one_host_transport_pass(
+    tmp_path: Path,
+) -> None:
+    value = {
+        f"field-{index:02d}": chr(65 + index) * 800
+        for index in reversed(range(40))
+    }
+    expected = _python_result_bytes(value)
+    source = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+    assert 32_000 < len(source) < 65_536
+
+    native_results: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        result = original_run_native_app(name, request, **kwargs)
+        native_results.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ) as native_app,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert native_results[0][0] == "test-public-result-json-native-token-tape.json"
+    assert native_results[0][1]["supported"] is True
+    calls = [call.args[0] for call in native_app.call_args_list]
+    _assert_native_raw_token_route(calls)
+    compact.assert_called_once_with(value, sort_keys=False)
 
 
 def test_non_string_mapping_keys_keep_python_sort_semantics(tmp_path: Path) -> None:
@@ -448,9 +572,7 @@ def test_native_json_chunks_preserve_utf8_across_boundaries(tmp_path: Path) -> N
     assert len(expected) > 1024
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-token-tape.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def _large_result_splitting_utf8_at_native_chunk() -> list[str]:
@@ -486,7 +608,7 @@ def test_native_json_supports_results_larger_than_legacy_window(tmp_path: Path) 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert calls == ["test-public-result-json-token-tape.json"]
+    _assert_native_raw_token_route(calls)
 
 
 def test_results_through_expanded_native_window_use_native_json(
@@ -512,12 +634,18 @@ def test_results_through_expanded_native_window_use_native_json(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert 1 < len(calls) <= 8
-    assert calls[0] == "test-public-result-json-token.json"
-    assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
+    assert 2 < len(calls) <= 13
+    assert calls[0] == "test-public-result-json-native-token-tape.json"
+    assert set(calls[1:]) == {
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-source-digest.json",
+        "test-public-result-json-token-tape.json",
+        "test-public-result-json-token.json",
+        "test-public-result-json-token-window.json",
+    }
 
 
-def test_packed_typed_tokens_keep_large_result_native_without_host_json_projection(
+def test_large_array_uses_native_json_without_python_typed_token_projection(
     tmp_path: Path,
 ) -> None:
     value = ["x" * 600 for _ in range(55)]
@@ -543,8 +671,8 @@ def test_packed_typed_tokens_keep_large_result_native_without_host_json_projecti
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert calls == ["test-public-result-json-token-tape.json"]
-    compact.assert_not_called()
+    _assert_native_raw_token_route(calls)
+    compact.assert_called_once_with(value, sort_keys=False)
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(
@@ -569,7 +697,7 @@ def test_results_above_expanded_native_window_keep_compatibility_json(
     native_app.assert_not_called()
 
 
-def test_out_of_bound_string_falls_back_after_native_cursor_rejects_it(
+def test_native_json_parser_preserves_long_string_keys_and_values(
     tmp_path: Path,
 ) -> None:
     value = {"text": "outside-native-string-bound-" * 40}
@@ -588,10 +716,7 @@ def test_out_of_bound_string_falls_back_after_native_cursor_rejects_it(
 
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert [call.args[0] for call in native_app.call_args_list] == [
-        "test-public-result-json-key-order.json",
-        "test-public-result-json-token.json",
-    ]
+    _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
 def test_native_budget_exhaustion_is_classified_separately(tmp_path: Path) -> None:
@@ -621,10 +746,10 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
-        "test-public-result-json-token-tape.json",
+        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-key-order.json",
         "test-public-result-json-token.json",
-        "test-public-result-json-token-tape.json",
+        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
     ]
 
@@ -747,8 +872,7 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
         for call in public_calls
     )
     assert any(
-        call["application"] == "test-public-result-json-token-tape.json"
-        and call.get("tape_bytes", 0) > 4096
+        max(call.get("document_bytes", 0), call.get("tape_bytes", 0)) > 4096
         for call in public_calls
     )
     assert all(not call.get("has_typed_tree") for call in public_calls)
