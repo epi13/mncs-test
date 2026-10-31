@@ -774,6 +774,38 @@ def test_native_json_supports_results_larger_than_legacy_window(tmp_path: Path) 
     _assert_native_raw_token_route(calls)
 
 
+def test_public_result_preflights_utf8_input_that_needs_a_65th_chunk(
+    tmp_path: Path,
+) -> None:
+    value: dict[str, str] = {"padding": ""}
+    base = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+    remaining = mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES - len(base)
+    pattern = "failure-🦆é"
+    pattern_bytes = len(pattern.encode("utf-8"))
+    value["padding"] = pattern * (remaining // pattern_bytes)
+    value["padding"] += "x" * (remaining - len(value["padding"].encode("utf-8")))
+    compact = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+
+    assert len(compact) == mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+    assert len(mncs_test._public_result_input_chunks(compact)) == 65
+    assert mncs_test._native_public_result_document_request(compact) is None
+
+    expected = _python_result_bytes(value)
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    native_app.assert_not_called()
+
+
 def test_results_through_expanded_native_window_use_native_json(
     tmp_path: Path,
 ) -> None:

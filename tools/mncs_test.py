@@ -66,9 +66,11 @@ PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
+PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS = 64
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = PUBLIC_RESULT_JSON_WINDOW_BYTES
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
+CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES = 16384
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 512
 PUBLIC_RESULT_JSON_NATIVE_TAPE_CHUNKS_PER_WINDOW = 4
@@ -218,6 +220,8 @@ def _native_public_result_document_request(
     if not encoded or len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
         return None
     chunks = _public_result_input_chunks(encoded)
+    if len(chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS:
+        return None
     return (
         {
             "schema_version": PUBLIC_RESULT_JSON_REQUEST_SCHEMA,
@@ -523,7 +527,7 @@ def _native_public_result_digest_document(
     if (
         not isinstance(chunks, list)
         or not chunks
-        or len(chunks) > 64
+        or len(chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS
         or type(byte_length) is not int
         or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
         or (expected_sha256 is not None and not SHA256_HEX.fullmatch(expected_sha256))
@@ -7306,7 +7310,11 @@ def check_result(
     maximum_u64 = (1 << 64) - 1
 
     if test_result_document is not None:
-        prepared_document = _native_public_result_document_request(test_result_document)
+        prepared_document = (
+            _native_public_result_document_request(test_result_document)
+            if len(test_result_document) <= CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
+            else None
+        )
         if prepared_document is not None:
             native_request = {
                 "schema_version": CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA,

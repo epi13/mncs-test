@@ -368,11 +368,164 @@ def test_native_check_result_projection_reassembles_long_utf8_failure_message(
     assert all(0 < len(chunk.encode("utf-8")) <= 1024 for chunk in chunks)
 
 
-def test_native_check_result_projection_falls_back_above_native_text_span_bound(
+def test_native_check_result_projection_streams_failure_message_at_native_span_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    message = ("failure-🦆é" * 500) + "end"
-    assert len(message.encode("utf-8")) > 6144
+    pattern = "failure-🦆é"
+    message_bytes = 10240
+    message = pattern * (message_bytes // len(pattern.encode("utf-8")))
+    message += "x" * (message_bytes - len(message.encode("utf-8")))
+    assert len(message.encode("utf-8")) == message_bytes
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "failure": {"message": message},
+        "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        "tests": [],
+        "run_id": "run-message-span-bound",
+    }
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(document) < 65536
+
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append({
+                "supported": response.get("supported"),
+                "chunks": list(response.get("projection", {}).get("unresolved_chunks", [])),
+            })
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    projected = mncs_test.check_result(
+        result,
+        "c" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=document,
+    )
+
+    assert projected["unresolved"] == [message]
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is True
+    chunks = native_responses[0]["chunks"]
+    assert len(chunks) > 8
+    assert "".join(chunks) == message
+    assert all(0 < len(chunk.encode("utf-8")) <= 1024 for chunk in chunks)
+
+
+def test_native_check_result_projection_falls_back_above_native_message_span_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = "x" * 10241
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "failure": {"message": message},
+        "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        "tests": [],
+        "run_id": "run-message-over-bound",
+    }
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(document) <= mncs_test.CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
+
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append({"supported": response.get("supported")})
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    projected = mncs_test.check_result(
+        result,
+        "c" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=document,
+    )
+
+    assert projected["unresolved"] == [message]
+    assert native_responses == [{"supported": False}]
+
+
+def test_native_check_result_projection_uses_native_execution_size_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "failure": {"message": "native bounded message"},
+        "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        "tests": [],
+        "run_id": "run-document-bound",
+        "padding": "",
+    }
+    base_document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    padding_bytes = mncs_test.CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES - len(base_document)
+    pattern = "failure-🦆é"
+    pattern_bytes = len(pattern.encode("utf-8"))
+    padding = pattern * (padding_bytes // pattern_bytes)
+    padding += "x" * (padding_bytes - len(padding.encode("utf-8")))
+    result["padding"] = padding
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(document) == mncs_test.CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
+    assert len(mncs_test._public_result_input_chunks(document)) <= 64
+
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append({"supported": response.get("supported")})
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    projected = mncs_test.check_result(
+        result,
+        "c" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=document,
+    )
+
+    assert projected["unresolved"] == ["native bounded message"]
+    assert native_responses == [{"supported": True}]
+
+
+def test_native_check_result_projection_preserves_full_document_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = ("failure-🦆é" * 5000) + "end"
     result = {
         "schema_version": "mncs.test-result/1",
         "id": "runner-check",
@@ -385,6 +538,11 @@ def test_native_check_result_projection_falls_back_above_native_text_span_bound(
         "tests": [],
         "run_id": "run-utf8-over-bound",
     }
+
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(document) > 65536
 
     native_responses: list[dict] = []
     original_run_native_app = mncs_test.run_native_app
@@ -402,14 +560,11 @@ def test_native_check_result_projection_falls_back_above_native_text_span_bound(
         mncs=str(MNCS),
         cwd=tmp_path,
         environment=_environment(),
-        test_result_document=mncs_test.json.dumps(
-            result, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8"),
+        test_result_document=document,
     )
 
     assert projected["unresolved"] == [message]
-    assert len(native_responses) == 1
-    assert native_responses[0]["supported"] is False
+    assert native_responses == []
 
 
 def test_native_check_result_projection_uses_string_scope_for_minimal_result(

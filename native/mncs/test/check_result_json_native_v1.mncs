@@ -200,9 +200,9 @@ fn decode_message_span(
     start: u64,
     length: u64
 ) -> (result: MessageProjectionV1) {
-    if length > 6144 { return empty_message_projection(false, true); }
+    if length > 10240 { return empty_message_projection(false, true); }
     let initial: MessageChunksV1 = empty_message_chunks();
-    iterate i up_to 8 carrying state: MessageChunksV1 = initial {
+    iterate i up_to 12 carrying state: MessageChunksV1 = initial {
         next state = append_decoded_message_block(state, document, start, length);
     }
     let valid: bool = state.valid && state.offset == length

@@ -213,19 +213,24 @@ projection request for native-supported documents. The ordinary `--check-result`
 path passes the same serialized result document when one is available. The
 adapter still decodes the result once for validation and the opaque `selection`
 field, and uses the existing host projection when the document or a field is
-outside the native parser's limits. The current native extractor accepts at
-most 65,536 input bytes, 512 JSON values, depth 12, 64 object members, 256-byte
-decoded keys, 1,024 decoded bytes for ordinary text fields, and 256 test rows.
-Failure messages decode from raw spans up to 6,144 bytes and return in at most
-eight UTF-8-safe chunks of up to 1,024 bytes. The bounded decoder carries JSON
-escape and surrogate-pair state between raw windows and moves window edges to
-avoid splitting raw UTF-8 characters, within the MNCS iteration ceiling.
-Longer messages retain the established chunked host projection. Differential
-tests cover a 322-byte test identity, escaped Unicode at the 1,024-byte
-message boundary, a surrogate-pair escape across a raw-window boundary,
-native chunking at the exact 6,144-byte span limit, and fallback above it. The
-existing Test JSON cursor and CheckResult policy are sufficient; this slice
-adds no duplicate Stdlib parser.
+outside the native parser's limits. The shared native JSON document shape
+admits at most 65,536 input bytes in 64 UTF-8-safe chunks of up to 1,024 bytes.
+The adapter returns to the compatibility path if UTF-8 boundaries would
+require a 65th chunk. For CheckResult, the adapter also preflights native
+execution to 16,384 document bytes: the fixed 8,000,000-step application
+budget is exhausted by larger documents in the recursive value-tree
+extractor. Within that execution bound, the extractor supports 512 JSON
+values, depth 12, 64 object members, 256-byte decoded keys, 1,024 decoded
+bytes for ordinary text fields, and 256 test rows. Failure messages decode
+raw spans up to 10,240 bytes in at most twelve UTF-8-safe windows and return
+chunks of up to 1,024 bytes. The decoder carries JSON escape and surrogate-pair
+state between windows and avoids splitting raw UTF-8 characters. Larger
+documents or message spans use the established compatibility projection.
+Differential tests cover the exact 16,384-byte execution bound, a 10,240-byte
+native message, fallback at 10,241 bytes, UTF-8-safe 65th-chunk preflight, a
+surrogate-pair escape across a raw-window boundary, and the compatibility path
+for larger documents. Existing Test JSON and CheckResult capabilities remain
+sufficient; this slice adds no duplicate Stdlib parser.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
