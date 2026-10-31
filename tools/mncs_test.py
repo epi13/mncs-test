@@ -56,8 +56,8 @@ PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-r
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-request/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA = "mncs.test.public-json-native-tokenize-window/2"
-PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA = "mncs.test.public-json-source-digest-request/1"
-PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-digest/1"
+PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA = "mncs.test.public-json-source-digest-request/2"
+PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-digest/2"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/3"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
@@ -515,8 +515,87 @@ def _native_public_result_source_digest(
     """Verify the transported source digest in bounded native windows."""
     document = document_request.get("document")
     input_hash = document_request.get("input_sha256")
-    chunks = document.get("chunks") if isinstance(document, dict) else None
-    if not isinstance(chunks, list) or not chunks or len(chunks) > 64 or not isinstance(input_hash, str):
+    if not isinstance(document, dict) or not isinstance(input_hash, str):
+        return False
+    return _native_public_result_digest_document(
+        document,
+        expected_sha256=input_hash,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+
+
+def _native_public_result_output_digest(
+    payload: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str | None:
+    """Hash native output bytes in bounded MNCS windows without a host digest."""
+    if not payload or len(payload) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+        return None
+    chunks = _public_result_input_chunks(payload)
+    document = {
+        "chunks": [
+            {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+            for chunk in chunks
+        ],
+        "byte_length": len(payload),
+    }
+    digest = _native_public_result_digest_document(
+        document,
+        expected_sha256=None,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    return digest if isinstance(digest, str) else None
+
+
+def _native_public_result_digest_document(
+    document: dict[str, Any],
+    *,
+    expected_sha256: str | None,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bool | str | None:
+    """Run the native digest continuation in verification or calculation mode."""
+    if set(document) != {"chunks", "byte_length"}:
+        return False
+    chunks = document.get("chunks")
+    byte_length = document.get("byte_length")
+    if (
+        not isinstance(chunks, list)
+        or not chunks
+        or len(chunks) > 64
+        or type(byte_length) is not int
+        or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+        or (expected_sha256 is not None and not SHA256_HEX.fullmatch(expected_sha256))
+    ):
+        return False
+    total_bytes = 0
+    for chunk in chunks:
+        if not isinstance(chunk, dict) or set(chunk) != {"bytes", "length"}:
+            return False
+        raw = chunk.get("bytes")
+        length = chunk.get("length")
+        if (
+            not isinstance(raw, str)
+            or type(length) is not int
+            or not 0 < length <= PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES
+        ):
+            return False
+        try:
+            encoded = raw.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        if len(encoded) != length:
+            return False
+        total_bytes += length
+    if total_bytes != byte_length:
         return False
 
     hash_state = _initial_native_sha256_state()
@@ -529,7 +608,8 @@ def _native_public_result_source_digest(
         request = {
             "schema_version": PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA,
             "document": document,
-            "input_sha256": input_hash,
+            "input_sha256": expected_sha256 or "",
+            "verify_input_sha256": expected_sha256 is not None,
             "chunk_index": chunk_index,
             "hash_state": hash_state,
         }
@@ -560,7 +640,7 @@ def _native_public_result_source_digest(
         output_next = result.get("next_chunk_index")
         complete = result.get("complete")
         if (
-            result.get("input_sha256") != input_hash
+            result.get("input_sha256") != (expected_sha256 or "")
             or type(output_next) is not int
             or output_next != next_expected
             or type(complete) is not bool
@@ -569,7 +649,14 @@ def _native_public_result_source_digest(
         ):
             raise AdapterError("MNCS public-result source digest returned malformed continuation state")
         if complete:
-            return True
+            digest = result.get("sha256")
+            if not isinstance(digest, str) or not SHA256_HEX.fullmatch(digest):
+                raise AdapterError("MNCS public-result source digest returned a malformed digest")
+            if expected_sha256 is not None:
+                return digest == expected_sha256
+            return digest
+        if result.get("sha256") != "":
+            raise AdapterError("MNCS public-result source digest returned an unexpected partial digest")
 
         h = output_hash.get("h")
         buf = output_hash.get("buf")
@@ -592,7 +679,7 @@ def _native_public_result_source_digest(
         hash_state = output_hash
         chunk_index = output_next
 
-    return complete is True
+    return False
 
 
 def _native_public_result_token_tape(
@@ -601,7 +688,7 @@ def _native_public_result_token_tape(
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
-) -> bytes | None:
+) -> tuple[bytes, str] | None:
     """Tokenize compact JSON in MNCS, then format the native token spans."""
     if not document or len(document) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
         return None
@@ -730,7 +817,16 @@ def _native_public_result_token_tape(
     byte_length = formatted.get("document_length")
     if type(byte_length) is not int or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
         raise AdapterError("MNCS native token formatter returned malformed document metadata")
-    return _decode_public_result_token_tape_chunks(formatted, byte_length=byte_length)
+    payload = _decode_public_result_token_tape_chunks(formatted, byte_length=byte_length)
+    digest = _native_public_result_output_digest(
+        payload,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if digest is None:
+        return None
+    return payload, digest
 
 
 def _native_public_result_payload(
@@ -755,7 +851,7 @@ def _native_public_result_payload(
             environment=environment,
         )
         if native_tokens is not None:
-            return native_tokens, hashlib.sha256(native_tokens).hexdigest()
+            return native_tokens
 
         if has_object:
             ordered = _native_public_result_key_order(

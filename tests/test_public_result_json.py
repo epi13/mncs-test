@@ -37,12 +37,13 @@ def _native_environment() -> dict[str, str]:
 
 
 def _assert_native_raw_token_route(applications: list[str]) -> None:
-    assert applications[-1] == "test-public-result-json-token-tape.json"
-    assert applications[-2] == "test-public-result-json-source-digest.json"
+    assert applications[-1] == "test-public-result-json-source-digest.json"
     assert applications[0] == "test-public-result-json-native-token-tape.json"
-    assert set(applications[:-1]) == {
+    assert "test-public-result-json-token-tape.json" in applications
+    assert set(applications) == {
         "test-public-result-json-native-token-tape.json",
         "test-public-result-json-source-digest.json",
+        "test-public-result-json-token-tape.json",
     }
 
 
@@ -227,9 +228,9 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
     assert digest == hashlib.sha256(expected).hexdigest()
     applications = [call.args[0] for call in native_app.call_args_list]
     assert applications[-3:] == [
-        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-source-digest.json",
         "test-public-result-json-token-tape.json",
+        "test-public-result-json-source-digest.json",
     ]
 
 
@@ -334,9 +335,9 @@ def test_validate_manifest_json_uses_native_serializer_for_ascii_output(
     assert output == _python_result_bytes(document)
     applications = [call.args[0] for call in native_app.call_args_list]
     assert applications[-3:] == [
-        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-source-digest.json",
         "test-public-result-json-token-tape.json",
+        "test-public-result-json-source-digest.json",
     ]
 
 

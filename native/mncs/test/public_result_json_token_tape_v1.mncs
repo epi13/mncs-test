@@ -39,6 +39,7 @@ record SourceDigestRequestV1 {
     schema_version: [byte; up_to 64],
     document: JsonInputDocumentV1,
     input_sha256: [byte; up_to 64],
+    verify_input_sha256: bool,
     chunk_index: u64,
     hash_state: sha256.DigestState
 }
@@ -48,6 +49,7 @@ record SourceDigestResultV1 {
     complete: bool,
     next_chunk_index: u64,
     input_sha256: [byte; up_to 64],
+    sha256: [byte; up_to 64],
     hash_state: sha256.DigestState
 }
 record RawDocumentShapeV1 { total_bytes: u64, valid: bool }
@@ -181,11 +183,11 @@ fn raw_result_schema_v1() -> (result: [byte; up_to 64]) {
 }
 
 fn source_digest_request_schema_v1() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 115, 111, 117, 114, 99, 101, 45, 100, 105, 103, 101, 115, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 115, 111, 117, 114, 99, 101, 45, 100, 105, 103, 101, 115, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
 }
 
 fn source_digest_result_schema_v1() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 115, 111, 117, 114, 99, 101, 45, 100, 105, 103, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 115, 111, 117, 114, 99, 101, 45, 100, 105, 103, 101, 115, 116, 47, 50];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -1722,7 +1724,9 @@ fn source_digest_request_valid(
 ) -> (result: bool) {
     if !same_bytes(request.schema_version, source_digest_request_schema_v1()) { return false; }
     if !shape.valid || request.chunk_index >= request.document.chunks.len { return false; }
-    if request.input_sha256.len != 64 || request.hash_state.buffered >= 64 { return false; }
+    if request.hash_state.buffered >= 64 { return false; }
+    if request.verify_input_sha256 && request.input_sha256.len != 64 { return false; }
+    if !request.verify_input_sha256 && request.input_sha256.len != 0 { return false; }
     return request.hash_state.total == expected_offset
         && request.hash_state.buffered == expected_offset % 64;
 }
@@ -1749,11 +1753,21 @@ fn source_digest_result_state(complete: bool, hash_state: sha256.DigestState) ->
 
 fn source_digest_end_valid(
     complete: bool,
+    verify_input_sha256: bool,
     input_sha256: [byte; up_to 64],
     hash_state: sha256.DigestState
 ) -> (result: bool) {
-    if !complete { return true; }
+    if !complete || !verify_input_sha256 { return true; }
     return same_bytes(input_sha256, source_digest_hex(hash_state));
+}
+
+fn source_digest_output(
+    complete: bool,
+    supported: bool,
+    hash_state: sha256.DigestState
+) -> (result: [byte; up_to 64]) {
+    if complete && supported { return source_digest_hex(hash_state); }
+    return [0; 0];
 }
 
 fn public_result_json_source_digest_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
@@ -1771,7 +1785,9 @@ fn public_result_json_source_digest_app_v1(context: ApplicationContext) -> (resu
     let end_chunk: u64 = source_digest_end_index(request.chunk_index, request.document.chunks.len);
     let complete: bool = request_valid && end_chunk == request.document.chunks.len;
     let hash_state: sha256.DigestState = source_digest_advance(request, request_valid, end_chunk);
-    let digest_valid: bool = source_digest_end_valid(complete, request.input_sha256, hash_state);
+    let digest_valid: bool = source_digest_end_valid(
+        complete, request.verify_input_sha256, request.input_sha256, hash_state
+    );
     let supported: bool = request_valid && digest_valid;
     let result: SourceDigestResultV1 = SourceDigestResultV1 {
         schema_version: source_digest_result_schema_v1(),
@@ -1779,6 +1795,7 @@ fn public_result_json_source_digest_app_v1(context: ApplicationContext) -> (resu
         complete: complete,
         next_chunk_index: end_chunk,
         input_sha256: request.input_sha256,
+        sha256: source_digest_output(complete, supported, hash_state),
         hash_state: source_digest_result_state(complete, hash_state)
     };
     let published: u64 = structured_write(context.argv[1], source_digest_result_schema_v1(), result);

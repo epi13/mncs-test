@@ -163,9 +163,11 @@ verifies the compact source once in bounded sixteen-chunk windows after
 tokenization, so changes between tokenizer windows are rejected without
 rehashing the full document in every window or consuming the formatter's
 output budget. Raw scalar spellings, including the host's float
-representation, are validated and copied by MNCS. The adapter rejoins bounded
-native output chunks and computes the public payload digest over those exact
-bytes. Differential tests compare the result with the
+representation, are validated and copied by MNCS. The token-tape formatter
+returns bounded chunks; a native SHA-256 continuation hashes those chunks in
+sixteen-chunk windows and returns the digest. Python validates the continuation
+state and carries the digest into the public result without hashing the output
+in the host. Differential tests compare both with the
 independent Python golden, including numeric forms, Unicode, escaping, nested
 containers, and 33 KB arrays and objects.
 
