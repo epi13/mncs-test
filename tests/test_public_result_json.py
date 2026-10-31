@@ -147,6 +147,24 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
     ]
 
 
+def test_print_result_uses_preformatted_json_without_host_reserialization(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = b'{"native":"bytes"}\n'
+    with mock.patch.object(
+        mncs_test.json,
+        "dumps",
+        side_effect=AssertionError("JSON output must reuse the serialized bytes"),
+    ):
+        mncs_test.print_result(
+            {"native": "tree"},
+            "json",
+            serialized_json=payload,
+        )
+
+    assert capsys.readouterr().out.encode("utf-8") == payload
+
+
 def test_artifact_store_json_uses_native_serializer_and_keeps_golden_digest(
     tmp_path: Path,
 ) -> None:
@@ -586,7 +604,7 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
         mncs_test, "json_bytes", side_effect=observe_compatibility_serializer
     ):
         exit_code = mncs_test.main(argv)
-    capsys.readouterr()
+    captured = capsys.readouterr()
 
     document = json.loads(result_path.read_text(encoding="utf-8"))
     public_calls = [
@@ -599,6 +617,7 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
     assert document["tests"][0]["status"] == "expected_failure"
     assert document["tests"][0]["diagnostics"]
     assert result_path.read_bytes() == _python_result_bytes(document)
+    assert captured.out.encode("utf-8") == result_path.read_bytes()
     assert public_calls
     assert all(call["status"] == "success" for call in public_calls)
     assert all(call.get("document_bytes", 0) > 0 for call in public_calls)

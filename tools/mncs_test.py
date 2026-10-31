@@ -7213,7 +7213,12 @@ def result_paths(args: argparse.Namespace, cwd: Path) -> tuple[Path | None, Path
     return result_path, check_path, artifact_root
 
 
-def print_result(result: dict[str, Any], output_format: str) -> None:
+def print_result(
+    result: dict[str, Any],
+    output_format: str,
+    *,
+    serialized_json: bytes | None = None,
+) -> None:
     if output_format == "text":
         summary = result.get("summary", {})
         print(
@@ -7229,6 +7234,9 @@ def print_result(result: dict[str, Any], output_format: str) -> None:
             print(f"  {item.get('id')}: {item.get('status')} [{item.get('verdict')}]" + suffix)
         if result.get("failure"):
             print(f"failure: {result['failure'].get('message', '')}")
+        return
+    if serialized_json is not None:
+        sys.stdout.write(serialized_json.decode("utf-8"))
         return
     print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
 
@@ -8049,21 +8057,16 @@ def run_manifest(args: argparse.Namespace) -> int:
         "transport": "transport.timing on each native execution result",
         "unattributed": "total minus recorded phase observations",
     }
+    result_payload, result_digest = _public_result_json_payload(
+        result,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
     if result_path:
-        result_digest = write_output(
-            result_path,
-            result,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
-        )
-    else:
-        _, result_digest = _public_result_json_payload(
-            result,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
-        )
+        result_path = result_path.resolve()
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_bytes(result_payload)
     if check_path:
         write_output(
             check_path,
@@ -8078,7 +8081,7 @@ def run_manifest(args: argparse.Namespace) -> int:
             cwd=cwd,
             environment=environment,
         )
-    print_result(result, args.format)
+    print_result(result, args.format, serialized_json=result_payload)
     return int(result["exit_code"])
 
 
