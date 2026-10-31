@@ -7128,36 +7128,36 @@ def run_family_check(args: argparse.Namespace) -> int:
         sys.stdout.write(response_payload.decode("utf-8"))
         return int(result.get("exit_code", completed.returncode))
     except (ManifestError, AdapterError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
-        print(
-            json.dumps(
-                {
-                    "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
-                    **(
-                        {
-                            "check_identity": request["check_identity"],
-                            "contract_identity": request["contract_identity"],
-                            "contract_revision": request["contract_revision"],
-                            "family_binding": {
-                                key: request[key]
-                                for key in (
-                                    "verification_plan_id",
-                                    "family_graph_identity",
-                                    "edge_fingerprint",
-                                    "source_change_sha256",
-                                )
-                                if key in request
-                            },
-                        }
-                        if request
-                        else {}
-                    ),
-                    "runner": "mncs-test",
-                    "verdict": "UNKNOWN",
-                    "failure": {"class": "infrastructure_failure", "message": str(error)},
-                },
-                indent=2,
-                sort_keys=True,
-            )
+        print_cli_json(
+            {
+                "schema_version": FAMILY_CHECK_RESPONSE_SCHEMA,
+                **(
+                    {
+                        "check_identity": request["check_identity"],
+                        "contract_identity": request["contract_identity"],
+                        "contract_revision": request["contract_revision"],
+                        "family_binding": {
+                            key: request[key]
+                            for key in (
+                                "verification_plan_id",
+                                "family_graph_identity",
+                                "edge_fingerprint",
+                                "source_change_sha256",
+                            )
+                            if key in request
+                        },
+                    }
+                    if request
+                    else {}
+                ),
+                "runner": "mncs-test",
+                "verdict": "UNKNOWN",
+                "failure": {"class": "infrastructure_failure", "message": str(error)},
+            },
+            mncs=args.mncs,
+            cwd=cwd,
+            environment=native_application_environment(cwd),
+            ensure_ascii=True,
         )
         return EXIT_INFRASTRUCTURE_FAILURE
 

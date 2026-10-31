@@ -165,6 +165,39 @@ def test_print_result_uses_preformatted_json_without_host_reserialization(
     assert capsys.readouterr().out.encode("utf-8") == payload
 
 
+def test_family_check_error_response_uses_native_json_serializer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = mncs_test.argparse.Namespace(
+        request=str(tmp_path / "missing-request.json"),
+        checks=str(tmp_path / "unused-checks.json"),
+        repository_id="mncs-test",
+        mncs=str(MNCS),
+        library=[],
+        embed_library=None,
+        timeout_seconds=10,
+    )
+    with mock.patch.object(
+        mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+    ) as native_app:
+        exit_code = mncs_test.run_family_check(args)
+
+    output = capsys.readouterr().out
+    document = json.loads(output)
+    assert exit_code == mncs_test.EXIT_INFRASTRUCTURE_FAILURE
+    assert document["schema_version"] == mncs_test.FAMILY_CHECK_RESPONSE_SCHEMA
+    assert document["verdict"] == "UNKNOWN"
+    assert document["failure"]["class"] == "infrastructure_failure"
+    assert output.encode("utf-8") == (
+        json.dumps(document, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    assert [call.args[0] for call in native_app.call_args_list] == [
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-token.json",
+    ]
+
+
 def test_discover_json_uses_native_public_result_serializer(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
