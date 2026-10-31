@@ -30,7 +30,8 @@
     "mncs-test:5908f5a",
     "mncs-test:23679ff",
     "mncs-test:585723c",
-    "mncs-test:f5420a6"
+    "mncs-test:f5420a6",
+    "mncs-test:62b937e"
   ],
   "relevant_files": [
     "tools/mncs_test.py",
