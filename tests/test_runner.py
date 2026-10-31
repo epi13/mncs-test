@@ -228,9 +228,12 @@ class RunnerTests(unittest.TestCase):
                     "command": f"{sys.executable} -c 'from pathlib import Path; Path({str(marker)!r}).touch()'",
                     "run_id": "offline-replay",
                 },
-                "details": {"κλειδί": "Lúna 東京"},
+                "details": {
+                    "κλειδί": "Lúna 東京",
+                    "numbers": [None, True, False, -17, 3.14159, -0.0, 1e20],
+                },
             }
-            result_path.write_text(json.dumps(stored), encoding="utf-8")
+            result_path.write_bytes(mncs_test.json_bytes(stored))
             arguments = mncs_test.parser().parse_args(
                 [
                     "replay",
@@ -268,13 +271,44 @@ class RunnerTests(unittest.TestCase):
                 [
                     "test-public-result-json-key-order.json",
                     "test-public-result-json-token.json",
+                    "test-public-result-json-token.json",
                 ],
             )
             self.assertEqual(
                 [result.get("supported") for _, result in native_results],
-                [True, True],
+                [True, True, True],
             )
             self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(LIVE, "a built sibling mncs compiler is required")
+    def test_replay_json_preserves_duplicate_key_and_float_compatibility(self):
+        with tempfile.TemporaryDirectory(prefix="mncs-test-replay-compatibility-") as directory:
+            result_path = Path(directory) / "result.json"
+            result_path.write_bytes(
+                b'{"number":1e+03,"schema_version":"invalid",'
+                b'"schema_version":"mncs.test-result/1"}'
+            )
+            stored = json.loads(result_path.read_bytes())
+            arguments = mncs_test.parser().parse_args(
+                [
+                    "replay",
+                    "--result",
+                    str(result_path),
+                    "--mncs",
+                    str(MNCS),
+                ]
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = mncs_test.replay_command(arguments)
+
+            replay = {
+                "schema_version": "mncs.test-replay/1",
+                "result": stored,
+                "execute": False,
+            }
+            self.assertEqual(exit_code, mncs_test.EXIT_SUCCESS)
+            self.assertEqual(output.getvalue().encode("utf-8"), mncs_test.json_bytes(replay))
 
     def test_replay_json_keeps_offline_formatter_when_compiler_is_unavailable(self):
         with tempfile.TemporaryDirectory(prefix="mncs-test-replay-offline-") as directory:

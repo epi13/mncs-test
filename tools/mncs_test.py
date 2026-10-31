@@ -452,6 +452,22 @@ def _native_public_result_payload(
             source = compact_json(value, sort_keys=requires_sorted_keys).encode("utf-8")
         except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
             return None
+    return _native_public_result_document_payload(
+        source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+
+
+def _native_public_result_document_payload(
+    source: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Format an already encoded document without rebuilding its value tree."""
     prepared = _native_public_result_document_request(source)
     if prepared is None:
         return None
@@ -618,6 +634,43 @@ def _native_public_result_payload(
         state = result
 
     raise AdapterError("MNCS public-result JSON exceeded its native window count")
+
+
+def _native_replay_json_payload(
+    source: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Wrap a canonical result document using bounded native JSON processing."""
+    ordered = _native_public_result_key_order(
+        source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if ordered is None:
+        return None
+    canonical = _native_public_result_document_payload(
+        ordered,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if canonical is None or canonical[0] != source:
+        return None
+    replay_document = (
+        b'{"execute":false,"result":'
+        + ordered
+        + b',"schema_version":"mncs.test-replay/1"}'
+    )
+    return _native_public_result_document_payload(
+        replay_document,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
 
 
 def _public_result_input_chunks(document: bytes) -> list[bytes]:
@@ -8217,8 +8270,9 @@ def replay_command(args: argparse.Namespace) -> int:
     cwd = Path.cwd()
     path = resolve_path(args.result, cwd)
     try:
-        result = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        source_document = path.read_bytes()
+        result = json.loads(source_document.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         print(f"mncs-test replay: cannot read structured result: {error}", file=sys.stderr)
         return EXIT_INVALID_INVOCATION
     if not isinstance(result, dict) or result.get("schema_version") != RESULT_SCHEMA:
@@ -8233,16 +8287,31 @@ def replay_command(args: argparse.Namespace) -> int:
             executable = Path(selected_mncs)
             if not executable.is_file() or not os.access(executable, os.X_OK):
                 selected_mncs = None
-        print_cli_json(
-            {
-                "schema_version": "mncs.test-replay/1",
-                "result": result,
-                "execute": False,
-            },
-            mncs=selected_mncs,
-            cwd=cwd,
-            environment=native_application_environment(cwd),
-        )
+        environment = native_application_environment(cwd)
+        native_payload = None
+        if selected_mncs is not None:
+            try:
+                native_payload = _native_replay_json_payload(
+                    source_document,
+                    mncs=selected_mncs,
+                    cwd=cwd,
+                    environment=environment,
+                )
+            except AdapterError:
+                native_payload = None
+        if native_payload is not None:
+            sys.stdout.write(native_payload[0].decode("utf-8"))
+        else:
+            print_cli_json(
+                {
+                    "schema_version": "mncs.test-replay/1",
+                    "result": result,
+                    "execute": False,
+                },
+                mncs=selected_mncs,
+                cwd=cwd,
+                environment=environment,
+            )
     return EXIT_SUCCESS
 
 
