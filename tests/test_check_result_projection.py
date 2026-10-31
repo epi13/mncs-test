@@ -37,6 +37,72 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_check_result_family_selection_uses_shared_merge_sort(
+    tmp_path: Path,
+) -> None:
+    expected = [f"test-{index:03d}" for index in range(64)]
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "classification": "pass",
+        "failure_class": "none",
+        "summary": {},
+        "tests": [],
+        "selection": {"selected_test_identities": list(reversed(expected))},
+        "test_inventory": {"inventory_identity": "b" * 64},
+    }
+
+    response = mncs_test._native_check_result_json_response(
+        mncs_test.json_bytes(result),
+        expected_test_identities=expected,
+        expected_inventory_identity="b" * 64,
+        result_digest="d" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:shared-identity-sort",
+        claim="Verify native family selection comparison through the shared identity sorter",
+    )
+
+    assert response is not None
+    family = response["family_metadata"]
+    assert family["supported"] is True
+    assert family["selection_comparison_supported"] is True
+    assert family["selection_matches_expected"] is True
+
+
+def test_check_result_family_selection_keeps_256_item_budget_fallback(
+    tmp_path: Path,
+) -> None:
+    expected = [f"test-{index:03d}" for index in range(256)]
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "classification": "pass",
+        "failure_class": "none",
+        "summary": {},
+        "tests": [],
+        "selection": {"selected_test_identities": expected},
+        "test_inventory": {"inventory_identity": "b" * 64},
+    }
+
+    response = mncs_test._native_check_result_json_response(
+        mncs_test.json_bytes(result),
+        expected_test_identities=expected,
+        expected_inventory_identity="b" * 64,
+        result_digest="d" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:sorted-identity-bound",
+        claim="Verify native family selection comparison at the 256-identity bound",
+    )
+
+    assert response is None
+
+
 def test_native_check_result_projection_matches_family_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

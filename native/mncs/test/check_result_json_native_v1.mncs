@@ -11,6 +11,7 @@ use mncs.std.json.v1 as json;
 use mncs.std.json_cursor.v1 as json_cursor;
 use mncs.test.public_result_json_key_order_v1 as json_order;
 use mncs.test.check_result_projection_v1 as check_result;
+use mncs.test.identity_sort_v1 as identity_sort;
 
 record CheckResultJsonNativeRequestV1 {
     schema_version: [byte; up_to 64],
@@ -83,11 +84,6 @@ record CheckResultPublicDocumentV1 {
     result_ref: check_result.CheckResultReferenceV1,
     classification: [byte; up_to 128],
     failure_class: [byte; up_to 128]
-}
-
-record IdentityMinimumV1 {
-    identities: [[byte; up_to 512]; 256],
-    minimum_index: u64
 }
 
 record TokenValueSpanV1 { found: bool, kind: byte, start: u64, length: u64 }
@@ -1827,71 +1823,12 @@ fn check_result_schema_matches(value: TextValueV1) -> (result: bool) {
     return matches;
 }
 
-fn identity_compare_step(
-    order: byte,
-    left: [byte; up_to 512],
-    right: [byte; up_to 512],
-    common_length: u64,
-    index: u64
-) -> (result: byte) {
-    if order != 0 || index >= common_length { return order; }
-    if left[index] < right[index] { return 1; }
-    if left[index] > right[index] { return 3; }
-    return 0;
-}
-
-fn identity_compare(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: byte) {
-    let common_length: u64 = select(left.len < right.len, left.len, right.len);
-    iterate i up_to 512 carrying order: byte = 0 {
-        next order = identity_compare_step(order, left, right, common_length, i);
-    }
-    if order != 0 { return order; }
-    if left.len < right.len { return 1; }
-    if left.len > right.len { return 3; }
-    return 2;
-}
-
-fn identity_minimum_step(
-    state: IdentityMinimumV1,
-    index: u64,
-    count: u64
-) -> (result: IdentityMinimumV1) {
-    if index >= count || index <= state.minimum_index { return state; }
-    let current: [byte; up_to 512] = state.identities[index];
-    let minimum: [byte; up_to 512] = state.identities[state.minimum_index];
-    if identity_compare(current, minimum) == 1 {
-        return IdentityMinimumV1 { ..state, minimum_index: index };
-    }
-    return state;
-}
-
-fn identity_sort_step(
-    identities: [[byte; up_to 512]; 256],
-    count: u64,
-    index: u64
-) -> (result: [[byte; up_to 512]; 256]) {
-    if index >= count { return identities; }
-    let initial: IdentityMinimumV1 = IdentityMinimumV1 {
-        identities: identities, minimum_index: index
-    };
-    iterate scan_index up_to 256 carrying minimum: IdentityMinimumV1 = initial {
-        next minimum = identity_minimum_step(minimum, scan_index, count);
-    }
-    if minimum.minimum_index == index { return identities; }
-    let selected: [byte; up_to 512] = identities[index];
-    let smallest: [byte; up_to 512] = identities[minimum.minimum_index];
-    let with_smallest: [[byte; up_to 512]; 256] = replace(identities, index, smallest);
-    return replace(with_smallest, minimum.minimum_index, selected);
-}
-
 fn sort_selected_identities(
     identities: [[byte; up_to 512]; 256],
     count: u64
 ) -> (result: [[byte; up_to 512]; 256]) {
-    iterate index up_to 256 carrying sorted: [[byte; up_to 512]; 256] = identities {
-        next sorted = identity_sort_step(sorted, count, index);
-    }
-    return sorted;
+    let sorted: identity_sort.IdentitySortResultV1 = identity_sort.sort(identities, count);
+    return sorted.values;
 }
 
 fn selected_identities_match_expected(
@@ -1900,11 +1837,20 @@ fn selected_identities_match_expected(
     expected: [[byte; up_to 512]; up_to 256]
 ) -> (result: bool) {
     if selected_count != expected.len { return false; }
+    let selected_values: identity_sort.IdentitySortResultV1 = identity_sort.IdentitySortResultV1 {
+        values: selected, count: selected_count, supported: true
+    };
+    if identity_sort.strictly_increasing(selected_values) {
+        iterate i over expected carrying matches: bool = true {
+            next matches = matches && identity_sort.compare(selected_values.values[i], expected[i]) == 0;
+        }
+        return matches;
+    }
     let sorted: [[byte; up_to 512]; 256] = sort_selected_identities(
         selected, selected_count
     );
     iterate i over expected carrying matches: bool = true {
-        next matches = matches && identity_compare(sorted[i], expected[i]) == 2;
+        next matches = matches && identity_sort.compare(sorted[i], expected[i]) == 0;
     }
     return matches;
 }

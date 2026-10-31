@@ -1,0 +1,151 @@
+mncs 0.18;
+
+// Shared bounded lexicographic sorting for Test identity arrays.
+module mncs.test.identity_sort_v1;
+
+record IdentitySortResultV1 {
+    values: [[byte; up_to 512]; 256],
+    count: u64,
+    supported: bool
+}
+
+record IdentityMergeStateV1 {
+    source: [[byte; up_to 512]; 256],
+    target: [[byte; up_to 512]; 256],
+    count: u64,
+    width: u64,
+    middle: u64,
+    end: u64,
+    left: u64,
+    right: u64,
+    output_index: u64
+}
+
+fn compare_step(order: i64, left: [byte; up_to 512], right: [byte; up_to 512], index: u64, common: u64) -> (result: i64) {
+    if order != 0 || index >= common { return order; }
+    if left[index] < right[index] { return -1; }
+    if left[index] > right[index] { return 1; }
+    return order;
+}
+
+fn compare(left: [byte; up_to 512], right: [byte; up_to 512]) -> (result: i64) {
+    let common: u64 = select(left.len < right.len, left.len, right.len);
+    iterate i over left[0..common] carrying order: i64 = 0 {
+        next order = compare_step(order, left, right, i, common);
+    }
+    if order != 0 { return order; }
+    if left.len < right.len { return -1; }
+    if left.len > right.len { return 1; }
+    return 0;
+}
+
+fn merge_min(left: u64, right: u64) -> (result: u64) {
+    return select(left < right, left, right);
+}
+
+fn empty_merge(values: [[byte; up_to 512]; 256], count: u64) -> (result: IdentityMergeStateV1) {
+    let empty: [byte; up_to 512] = [];
+    let middle: u64 = merge_min(1, count);
+    let end: u64 = merge_min(2, count);
+    return IdentityMergeStateV1 {
+        source: values,
+        target: [empty; 256],
+        count: count,
+        width: 1,
+        middle: middle,
+        end: end,
+        left: 0,
+        right: middle,
+        output_index: 0
+    };
+}
+
+fn advance_run(state: IdentityMergeStateV1) -> (result: IdentityMergeStateV1) {
+    if state.output_index < state.end || state.end >= state.count { return state; }
+    let run_start: u64 = state.end;
+    let middle: u64 = merge_min(state.count, run_start +% state.width);
+    let end: u64 = merge_min(state.count, run_start +% (state.width *% 2));
+    return IdentityMergeStateV1 {
+        ..state,
+        middle: middle,
+        end: end,
+        left: run_start,
+        right: middle
+    };
+}
+
+fn take_left(state: IdentityMergeStateV1) -> (result: IdentityMergeStateV1) {
+    return IdentityMergeStateV1 {
+        ..state,
+        target: replace(state.target, state.output_index, state.source[state.left]),
+        left: state.left +% 1,
+        output_index: state.output_index +% 1
+    };
+}
+
+fn take_right(state: IdentityMergeStateV1) -> (result: IdentityMergeStateV1) {
+    return IdentityMergeStateV1 {
+        ..state,
+        target: replace(state.target, state.output_index, state.source[state.right]),
+        right: state.right +% 1,
+        output_index: state.output_index +% 1
+    };
+}
+
+fn merge_output_step(state: IdentityMergeStateV1, index: u64) -> (result: IdentityMergeStateV1) {
+    if index >= state.count { return state; }
+    let run: IdentityMergeStateV1 = advance_run(state);
+    if run.left >= run.middle { return take_right(run); }
+    if run.right >= run.end { return take_left(run); }
+    if compare(run.source[run.left], run.source[run.right]) <= 0 {
+        return take_left(run);
+    }
+    return take_right(run);
+}
+
+fn merge_pass(state: IdentityMergeStateV1) -> (result: IdentityMergeStateV1) {
+    if state.width >= state.count { return state; }
+    iterate i up_to 256 carrying current: IdentityMergeStateV1 = state {
+        next current = merge_output_step(current, i);
+    }
+    let merged: [[byte; up_to 512]; 256] = current.target;
+    let width: u64 = state.width *% 2;
+    let middle: u64 = merge_min(width, state.count);
+    let end: u64 = merge_min(width *% 2, state.count);
+    return IdentityMergeStateV1 {
+        ..state,
+        source: merged,
+        target: state.source,
+        width: width,
+        middle: middle,
+        end: end,
+        left: 0,
+        right: middle,
+        output_index: 0
+    };
+}
+
+fn sort(values: [[byte; up_to 512]; 256], count: u64) -> (result: IdentitySortResultV1) {
+    if count > 256 {
+        return IdentitySortResultV1 { values: values, count: count, supported: false };
+    }
+    let initial: IdentityMergeStateV1 = empty_merge(values, count);
+    iterate pass up_to 8 carrying current: IdentityMergeStateV1 = initial {
+        next current = merge_pass(current);
+    }
+    return IdentitySortResultV1 { values: current.source, count: count, supported: true };
+}
+
+fn ordered_step(valid: bool, values: IdentitySortResultV1, index: u64) -> (result: bool) {
+    if !valid { return false; }
+    if index == 0 || index >= values.count { return true; }
+    return compare(values.values[index -% 1], values.values[index]) < 0;
+}
+
+fn strictly_increasing(values: IdentitySortResultV1) -> (result: bool) {
+    if !values.supported || values.count > 256 { return false; }
+    iterate i up_to 256 carrying valid: bool = true {
+        next valid = ordered_step(valid, values, i);
+    }
+    return valid;
+}

@@ -369,6 +369,18 @@ and the loader preserves its `ManifestError`. The full manifest suite passes
 with the release MNCS toolchain and integrated Stdlib JSON cursor provider, and
 the compiler-backed live family-check consumer passes with the updated app.
 
+P-027 extracts the bounded lexicographic merge sort into the shared Test
+module `mncs.test.identity_sort_v1`. The family-manifest projector uses the
+shared sorter through 256 identities, and the CheckResult projector replaces
+its separate quadratic selection sort with the same implementation. CheckResult
+compares already ordered identities directly, preserving native budget for the
+common case. Differential tests cover reversed 64-item CheckResult identities
+and reversed 256-item manifest identities. CheckResult retains its Python
+compatibility route when a 256-item comparison exceeds the existing 8M-step
+application budget; the native app does not claim support after budget
+exhaustion. The combined manifest and CheckResult suites pass 29 tests, and the
+compiler-backed live family-check consumer passes with both shared-sort users.
+
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed
 fields into the request and formats the final result envelope; out-of-contract
