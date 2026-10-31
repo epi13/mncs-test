@@ -339,8 +339,10 @@ def test_packed_text_keeps_large_public_result_on_native_windows(
     calls = [call.args[0] for call in native_app.call_args_list]
     assert 1 < len(calls) <= 6
     assert calls[0] == "test-public-result-json-token.json"
+    assert "test-public-result-json-key-order.json" not in calls
     assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
-    assert all(call.kwargs.get("sort_keys", True) for call in compact.call_args_list)
+    assert compact.call_args_list
+    assert all(call.kwargs.get("sort_keys", True) is False for call in compact.call_args_list)
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(

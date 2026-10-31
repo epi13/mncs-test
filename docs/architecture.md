@@ -148,9 +148,11 @@ compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_token_v1` consumes one compact JSON document in
 UTF-8-safe chunks and uses `mncs.std.json_cursor.v1` to validate and traverse
 its native token stream. The adapter no longer recursively projects Python
-values into a typed-value node/edge tree. For bounded values with only built-in
+values into a typed-value node/edge tree. For bounded values with built-in
 string object keys, the adapter uses a conservative size preflight and sends
-unsorted compact JSON to `mncs.test.public_result_json_key_order_v1`. That
+unsorted compact JSON to `mncs.test.public_result_json_key_order_v1`. Values
+without objects skip key ordering and go directly to the native token
+formatter, so the host does not sort array-only results. That
 application parses the token stream into a bounded native value, compares
 decoded UTF-8 keys, and emits compact JSON in sorted key order. It accepts at
 most 8,192 input bytes, depth 12, 512 values, 64 object members, 256-byte keys,
