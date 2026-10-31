@@ -40,11 +40,14 @@ def _assert_native_raw_token_route(applications: list[str]) -> None:
     assert applications[-1] == "test-public-result-json-source-digest.json"
     assert applications[0] == "test-public-result-json-native-token-tape.json"
     assert "test-public-result-json-token-tape.json" in applications
-    assert set(applications) == {
+    expected = {
         "test-public-result-json-native-token-tape.json",
         "test-public-result-json-source-digest.json",
         "test-public-result-json-token-tape.json",
     }
+    assert set(applications) in (expected, expected | {
+        "test-public-result-json-native-token-tape-window.json",
+    })
 
 
 def _python_result_bytes(value: object) -> bytes:
@@ -143,21 +146,16 @@ def test_native_raw_tokenizer_rejects_changed_source_between_windows(
     )
     assert prepared is not None
     start_request, _source_length = prepared
-    scan_state, cursor_state = mncs_test._initial_native_json_tokenizer_state()
     request = {
-        "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+        "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
         "document": start_request["document"],
         "input_sha256": start_request["input_sha256"],
-        "chunk_index": 0,
-        "scan_state": scan_state,
-        "cursor_state": cursor_state,
-        "tokens": [],
-        "token_count": 0,
     }
+    assert set(request) == {"schema_version", "document", "input_sha256"}
     first = mncs_test.run_native_app(
         "test-public-result-json-native-token-tape.json",
         request,
-        request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
         result_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA,
         mncs=str(MNCS),
         cwd=tmp_path,
@@ -172,7 +170,7 @@ def test_native_raw_tokenizer_rejects_changed_source_between_windows(
     replacement = "y" if first_chunk[10] != "y" else "z"
     document["chunks"][0]["bytes"] = first_chunk[:10] + replacement + first_chunk[11:]
     continued = mncs_test.run_native_app(
-        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-native-token-tape-window.json",
         {
             "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
             "document": document,
@@ -662,7 +660,7 @@ def test_results_through_expanded_native_window_use_native_json(
     assert 2 < len(calls) <= 13
     assert calls[0] == "test-public-result-json-native-token-tape.json"
     assert set(calls[1:]) == {
-        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-native-token-tape-window.json",
         "test-public-result-json-source-digest.json",
         "test-public-result-json-token-tape.json",
         "test-public-result-json-token.json",

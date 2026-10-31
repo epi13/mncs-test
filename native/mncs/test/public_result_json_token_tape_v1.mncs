@@ -25,6 +25,11 @@ record TapeRequestV1 {
 }
 record JsonInputChunkV1 { bytes: [byte; up_to 1024], length: u64 }
 record JsonInputDocumentV1 { chunks: [JsonInputChunkV1; up_to 64], byte_length: u64 }
+record RawTapeStartRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: JsonInputDocumentV1,
+    input_sha256: [byte; up_to 64]
+}
 record RawTapeRequestV1 {
     schema_version: [byte; up_to 64],
     document: JsonInputDocumentV1,
@@ -176,6 +181,10 @@ fn result_schema_v1() -> (result: [byte; up_to 64]) {
 
 fn raw_request_schema_v1() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn raw_start_request_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 115, 116, 97, 114, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
 }
 
 fn raw_result_schema_v1() -> (result: [byte; up_to 64]) {
@@ -467,21 +476,25 @@ fn restore_token_list(tokens: [TokenMetaV1; up_to 512]) -> (result: TokenMetaLis
     return list;
 }
 
-fn restore_raw_tokenize_state(request: RawTapeRequestV1) -> (result: TokenizeStateV1) {
-    if request.token_count == 0 {
+fn restore_tokenize_state(
+    cursor: json_cursor.Cursor,
+    tokens: [TokenMetaV1; up_to 512],
+    token_count: u64
+) -> (result: TokenizeStateV1) {
+    if token_count == 0 {
         let marker: TokenMetaV1 = TokenMetaV1 { kind: 254, offset: 0, chunk_index: 0, chunk_offset: 0, length: 0 };
         return TokenizeStateV1 {
-            cursor: request.cursor_state,
+            cursor: cursor,
             tokens: TokenMetaListV1.TokenCons { head: marker, tail: TokenMetaListV1.TokenNil },
             token_count: 1,
             valid: true
         };
     }
     return TokenizeStateV1 {
-        cursor: request.cursor_state,
-        tokens: restore_token_list(request.tokens),
-        token_count: request.token_count,
-        valid: request.token_count == request.tokens.len
+        cursor: cursor,
+        tokens: restore_token_list(tokens),
+        token_count: token_count,
+        valid: token_count == tokens.len
     };
 }
 
@@ -550,6 +563,48 @@ fn raw_window(document: JsonInputDocumentV1, scan_state: json.ScanState, token_s
         next current = raw_window_part(current, document, end_chunk);
     }
     return current;
+}
+
+fn raw_tokenize_window_result(
+    schema_valid: bool,
+    document: JsonInputDocumentV1,
+    input_sha256: [byte; up_to 64],
+    chunk_index: u64,
+    scan_state: json.ScanState,
+    cursor_state: json_cursor.Cursor,
+    tokens: [TokenMetaV1; up_to 512],
+    token_count: u64
+) -> (result: RawTokenizeResultV1) {
+    let shape: RawDocumentShapeV1 = raw_document_shape(document);
+    let state: TokenizeStateV1 = restore_tokenize_state(cursor_state, tokens, token_count);
+    let window: RawWindowStateV1 = raw_window(document, scan_state, state, chunk_index);
+    let current_scan: json.ScanState = window.scan_state;
+    let current_tokens: TokenizeStateV1 = window.token_state;
+    let next_chunk_index: u64 = window.next_chunk_index;
+    let complete: bool = next_chunk_index == document.chunks.len;
+    let finalized: TokenizeStateV1 = finish_if_complete(current_tokens, document, complete);
+    let token_array: TokenArrayV1 = raw_token_array(finalized);
+    let valid_request: bool = schema_valid && shape.valid && input_sha256.len == 64
+        && chunk_index < document.chunks.len && token_count <= 512
+        && state.valid && finalized.valid && token_array.count <= 512;
+    let scan_valid: bool = json.is_valid(current_scan);
+    let cursor_valid: bool = json_cursor.is_valid(finalized.cursor);
+    let valid_end: bool = raw_window_end_valid(complete, scan_valid, cursor_valid);
+    let supported: bool = valid_request && valid_end;
+    return RawTokenizeResultV1 {
+        schema_version: raw_result_schema_v1(),
+        supported: supported,
+        request_valid: valid_request,
+        scan_valid: scan_valid,
+        cursor_valid: cursor_valid,
+        complete: complete,
+        next_chunk_index: next_chunk_index,
+        input_sha256: input_sha256,
+        scan_state: current_scan,
+        cursor_state: finalized.cursor,
+        tokens: token_array.tokens[0..token_array.count],
+        token_count: token_array.count
+    };
 }
 
 fn hex_digit(value: u64) -> (result: byte) {
@@ -1662,6 +1717,36 @@ fn public_result_json_token_tape_app_v1(context: ApplicationContext) -> (result:
     return success([]);
 }
 
+fn public_result_json_native_tape_start_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 110, 97, 116, 105, 118, 101, 45, 74, 83, 79, 78, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 115, 116, 97, 114, 116, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: RawTapeStartRequestV1 = structured_read(context.argv[0], raw_start_request_schema_v1());
+    if request.document.chunks.len == 0 {
+        return failure([105, 110, 118, 97, 108, 105, 100, 32, 110, 97, 116, 105, 118, 101, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 105, 122, 101, 114, 32, 99, 104, 117, 110, 107], 4);
+    }
+    let empty_tokens: [TokenMetaV1; up_to 512] = [];
+    let result: RawTokenizeResultV1 = raw_tokenize_window_result(
+        same_bytes(request.schema_version, raw_start_request_schema_v1()),
+        request.document,
+        request.input_sha256,
+        0,
+        json.init(),
+        json_cursor.init(),
+        empty_tokens,
+        0
+    );
+    let published: u64 = structured_write(context.argv[1], raw_result_schema_v1(), result);
+    if published == 0 {
+        return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 110, 97, 116, 105, 118, 101, 32, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 32, 115, 116, 97, 114, 116, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
+
 fn public_result_json_native_tape_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
     capability test_artifact
     effect structured_read authorized_by test_artifact
@@ -1671,7 +1756,6 @@ fn public_result_json_native_tape_app_v1(context: ApplicationContext) -> (result
         return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 110, 97, 116, 105, 118, 101, 45, 74, 83, 79, 78, 45, 116, 97, 112, 101, 32, 112, 97, 116, 104, 115], 2);
     }
     let request: RawTapeRequestV1 = structured_read(context.argv[0], raw_request_schema_v1());
-    let shape: RawDocumentShapeV1 = raw_document_shape(request.document);
     if request.chunk_index >= request.document.chunks.len {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 110, 97, 116, 105, 118, 101, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 105, 122, 101, 114, 32, 99, 104, 117, 110, 107], 4);
     }
@@ -1679,37 +1763,16 @@ fn public_result_json_native_tape_app_v1(context: ApplicationContext) -> (result
     if (request.cursor_state.position as u64) != expected_offset {
         return failure([115, 116, 97, 108, 101, 32, 110, 97, 116, 105, 118, 101, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 105, 122, 101, 114, 32, 115, 116, 97, 116, 101], 4);
     }
-    let state: TokenizeStateV1 = restore_raw_tokenize_state(request);
-    let window: RawWindowStateV1 = raw_window(request.document, request.scan_state, state, request.chunk_index);
-    let current_scan: json.ScanState = window.scan_state;
-    let current_tokens: TokenizeStateV1 = window.token_state;
-    let next_chunk_index: u64 = window.next_chunk_index;
-    let complete: bool = next_chunk_index == request.document.chunks.len;
-    let finalized: TokenizeStateV1 = finish_if_complete(current_tokens, request.document, complete);
-    let token_array: TokenArrayV1 = raw_token_array(finalized);
-    let valid_request: bool = same_bytes(request.schema_version, raw_request_schema_v1())
-        && shape.valid && request.input_sha256.len == 64
-        && request.chunk_index < request.document.chunks.len
-        && request.token_count <= 512 && state.valid && finalized.valid
-        && token_array.count <= 512;
-    let scan_valid: bool = json.is_valid(current_scan);
-    let cursor_valid: bool = json_cursor.is_valid(finalized.cursor);
-    let valid_end: bool = raw_window_end_valid(complete, scan_valid, cursor_valid);
-    let supported: bool = valid_request && valid_end;
-    let result: RawTokenizeResultV1 = RawTokenizeResultV1 {
-        schema_version: raw_result_schema_v1(),
-        supported: supported,
-        request_valid: valid_request,
-        scan_valid: scan_valid,
-        cursor_valid: cursor_valid,
-        complete: complete,
-        next_chunk_index: next_chunk_index,
-        input_sha256: request.input_sha256,
-        scan_state: current_scan,
-        cursor_state: finalized.cursor,
-        tokens: token_array.tokens[0..token_array.count],
-        token_count: token_array.count
-    };
+    let result: RawTokenizeResultV1 = raw_tokenize_window_result(
+        same_bytes(request.schema_version, raw_request_schema_v1()),
+        request.document,
+        request.input_sha256,
+        request.chunk_index,
+        request.scan_state,
+        request.cursor_state,
+        request.tokens,
+        request.token_count
+    );
     let published: u64 = structured_write(context.argv[1], raw_result_schema_v1(), result);
     if published == 0 {
         return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 110, 97, 116, 105, 118, 101, 32, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);

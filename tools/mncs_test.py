@@ -54,6 +54,7 @@ PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
+PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-start-request/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-request/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA = "mncs.test.public-json-native-tokenize-window/2"
 PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA = "mncs.test.public-json-source-digest-request/2"
@@ -280,57 +281,6 @@ def _decode_public_result_chunks(
     if len(document) != byte_length:
         raise AdapterError("MNCS public-result JSON app returned a short document window")
     return bytes(document)
-
-
-def _initial_native_json_tokenizer_state() -> tuple[dict[str, Any], dict[str, Any]]:
-    scan_state = {
-        "stack": [0] * 64,
-        "depth": 0,
-        "expect": 0,
-        "mode": 0,
-        "number": 0,
-        "literal": 0,
-        "position": 0,
-        "escape": False,
-        "unicode": 0,
-        "valid": True,
-        "error": 0,
-        "objects": 0,
-        "arrays": 0,
-        "strings": 0,
-    }
-    cursor_state = {
-        "position": 0,
-        "depth": 0,
-        "stack": [0] * 64,
-        "expect_key": False,
-        "in_string": False,
-        "string_is_key": False,
-        "escaped": False,
-        "unicode_remaining": 0,
-        "unicode_value": 0,
-        "pending_high_surrogate": False,
-        "utf8_remaining": 0,
-        "utf8_lead": 0,
-        "valid": True,
-        "event": 0,
-        "string_start": 0,
-        "string_end": 0,
-        "key": [0] * 32,
-        "key_length": 0,
-        "string_length": 0,
-        "pending_key": False,
-        "root_seen": False,
-        "atom_active": False,
-        "atom_kind": 0,
-        "atom_remaining": 0,
-        "token_event": False,
-        "token_kind": 0,
-        "token_start": 0,
-        "token_end": 0,
-        "token_depth": 0,
-    }
-    return scan_state, cursor_state
 
 
 def _decode_public_result_token_tape_chunks(
@@ -702,28 +652,42 @@ def _native_public_result_token_tape(
     if packed_source != document or source_length != len(document) or input_hash != start_request["input_sha256"]:
         raise AdapterError("MNCS public-result token source changed during transport packing")
 
-    scan_state, cursor_state = _initial_native_json_tokenizer_state()
     tokens: list[dict[str, Any]] = []
     token_count = 0
     next_chunk_index = 0
+    scan_state: dict[str, Any] | None = None
+    cursor_state: dict[str, Any] | None = None
     window_chunks = PUBLIC_RESULT_JSON_NATIVE_TAPE_CHUNKS_PER_WINDOW
     while next_chunk_index < len(source_chunks):
         next_expected = min(next_chunk_index + window_chunks, len(source_chunks))
-        request = {
-            "schema_version": PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
-            "document": start_request["document"],
-            "input_sha256": input_hash,
-            "chunk_index": next_chunk_index,
-            "scan_state": scan_state,
-            "cursor_state": cursor_state,
-            "tokens": tokens,
-            "token_count": token_count,
-        }
+        if next_chunk_index == 0:
+            application = "test-public-result-json-native-token-tape.json"
+            request_schema = PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA
+            request = {
+                "schema_version": request_schema,
+                "document": start_request["document"],
+                "input_sha256": input_hash,
+            }
+        else:
+            if scan_state is None or cursor_state is None:
+                raise AdapterError("MNCS native JSON tokenizer omitted its initialized continuation state")
+            application = "test-public-result-json-native-token-tape-window.json"
+            request_schema = PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA
+            request = {
+                "schema_version": request_schema,
+                "document": start_request["document"],
+                "input_sha256": input_hash,
+                "chunk_index": next_chunk_index,
+                "scan_state": scan_state,
+                "cursor_state": cursor_state,
+                "tokens": tokens,
+                "token_count": token_count,
+            }
         try:
             result = run_native_app(
-                "test-public-result-json-native-token-tape.json",
+                application,
                 request,
-                request_schema=PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
+                request_schema=request_schema,
                 result_schema=PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA,
                 mncs=mncs,
                 cwd=cwd,

@@ -148,9 +148,13 @@ compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_token_tape_v1` receives the compact JSON transport
 chunks and token spans produced by its MNCS cursor application. The Python
 boundary encodes each supported value once so it can cross the structured
-application boundary; a narrow compatibility check preserves Python's key
-ordering for mappings with non-string keys. It does not project the Python
-tree into typed tokens or estimate native token bounds. MNCS scans the bounded
+application boundary; MNCS initializes scanner and cursor state through the
+shared `json.init()` and `json_cursor.init()` functions. The first native
+request carries only the bounded document and its digest; continuation windows
+carry state returned by MNCS. A narrow compatibility check preserves Python's
+key ordering for mappings with non-string keys. Python does not project the
+value tree into typed tokens, initialize native parser state, or estimate
+native token bounds. MNCS scans the bounded
 source in four 1 KiB chunks per window, carries cursor and JSON validation
 state between calls, validates the token spans, constructs a bounded native
 value, sorts object keys by decoded UTF-8, and writes the public indented JSON
