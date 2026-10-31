@@ -17,7 +17,8 @@
     "mncs-actions:95df975",
     "mncs-test:e396217",
     "mncs-language:ea5e594",
-    "mncs-actions:7701127"
+    "mncs-actions:7701127",
+    "mncs-test:d29f132"
   ],
   "relevant_files": [
     "tools/mncs_test.py",
