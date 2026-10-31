@@ -197,8 +197,8 @@ that exhaust the native step budget retain the compatibility serializer.
 
 The successful `mncs.family-check-response/1` envelope now carries its already
 serialized TestResult and CheckResult documents as raw JSON fragments. Python
-still decodes them for policy validation and CheckResult projection, but it no
-longer rebuilds and re-encodes both nested trees for the response. MNCS
+uses the native token result for policy validation and carries the fragments
+into the outer response without decoding them for response assembly. MNCS
 tokenizes, validates, orders, pretty-prints, and hashes the composed document;
 its UTF-8 bytes match the compatibility formatter. Over-bound inputs and
 exhausted native step budgets retain the host formatter. The
@@ -268,6 +268,19 @@ selected-identity multiset comparison, compiler-inventory freshness check, and
 TestResult/CheckResult verdict agreement into that native scan. Python retains
 the previous comparisons only when the native request or artifact falls
 outside the scanner's published bounds.
+P-017 extends the same application to emit the public CheckResult document as
+native bytes. When family metadata is supported and the bounded unresolved
+field fits one native chunk, the app returns an empty projection record
+alongside the complete public document; Python skips `check_result()` and does
+not rebuild the public CheckResult tree. The family adapter carries those bytes
+and the retained TestResult `selection` span (or `null` when selection is absent)
+to MNCS key ordering and public JSON formatting, where MNCS sorts the selection
+member and computes the digest over the final emitted bytes. Unsupported family
+metadata or multiple unresolved chunks retain the full projection and use the
+established compatibility path. The independent public-document golden,
+multichunk bound, field-text key-order case, projection regressions, family
+consumer integration, and live declared family check pass with matching
+CheckResult bytes and digest.
 
 `mncs.test.result_identity_v1` constructs canonical run-identity JSON and
 hashes it with `mncs.std.sha256.v1` for bounded inputs. Python projects typed

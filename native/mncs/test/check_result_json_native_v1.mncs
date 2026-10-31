@@ -23,6 +23,7 @@ record CheckResultJsonNativeRequestV1 {
     expected_test_identities: [[byte; up_to 512]; up_to 256],
     inventory_expectation_present: bool,
     expected_inventory_identity: [byte; up_to 64],
+    projection_document_only: bool,
     check_id: [byte; up_to 1024],
     claim: [byte; up_to 1024],
     result_digest: [byte; up_to 64]
@@ -31,6 +32,7 @@ record CheckResultJsonNativeRequestV1 {
 record CheckResultJsonNativeResultV1 {
     schema_version: [byte; up_to 64],
     supported: bool,
+    projection_document_supported: bool,
     projection: check_result.CheckResultProjectionV1,
     family_metadata: FamilyResultMetadataV1,
     check_artifact: CheckArtifactMetadataV1
@@ -63,6 +65,24 @@ record CheckArtifactMetadataV1 {
     verdict: [byte; up_to 16],
     verdict_comparison_supported: bool,
     verdict_matches_test_result: bool
+}
+
+record CheckResultPublicDocumentV1 {
+    schema_version: [byte; up_to 64],
+    id: [byte; up_to 1024],
+    provider: [byte; up_to 256],
+    verdict: [byte; up_to 16],
+    scope: [byte; up_to 1024],
+    claim: [byte; up_to 1024],
+    summary: [byte; up_to 1024],
+    contract_revision: [byte; up_to 64],
+    producer_revision: [byte; up_to 1024],
+    digest: [byte; up_to 1024],
+    unresolved: [[byte; up_to 1024]; up_to 1],
+    references: [check_result.CheckReferenceV1; up_to 1],
+    result_ref: check_result.CheckResultReferenceV1,
+    classification: [byte; up_to 128],
+    failure_class: [byte; up_to 128]
 }
 
 record IdentityMinimumV1 {
@@ -229,11 +249,11 @@ record StringSkipStateV1 {
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 51];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 52];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 51];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 99, 104, 101, 99, 107, 45, 114, 101, 115, 117, 108, 116, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 47, 53];
 }
 
 fn empty_span() -> (result: TokenValueSpanV1) {
@@ -2054,16 +2074,68 @@ fn inspect_check_artifact(
     };
 }
 
+fn first_public_unresolved(
+    projection: check_result.CheckResultProjectionV1
+) -> (result: [byte; up_to 1024]) {
+    if projection.unresolved_chunks.len > 0 {
+        return projection.unresolved_chunks[0];
+    }
+    return [];
+}
+
+fn public_check_result_document(
+    projection: check_result.CheckResultProjectionV1
+) -> (result: CheckResultPublicDocumentV1) {
+    let empty_unresolved: [[byte; up_to 1024]; up_to 1] = [];
+    let first_unresolved: [byte; up_to 1024] = first_public_unresolved(projection);
+    let one_unresolved: [[byte; up_to 1024]; up_to 1] = select(
+        projection.unresolved_present && projection.unresolved_chunks.len == 1,
+        [first_unresolved],
+        empty_unresolved
+    );
+    return CheckResultPublicDocumentV1 {
+        schema_version: projection.result_schema_version,
+        id: projection.id,
+        provider: projection.provider,
+        verdict: projection.verdict,
+        scope: projection.scope,
+        claim: projection.claim,
+        summary: projection.summary,
+        contract_revision: projection.contract_revision,
+        producer_revision: projection.producer_revision,
+        digest: projection.digest,
+        unresolved: one_unresolved,
+        references: projection.references,
+        result_ref: projection.result_ref,
+        classification: projection.classification,
+        failure_class: projection.failure_class
+    };
+}
+
+fn publish_public_check_result_document(
+    context: ApplicationContext,
+    document: CheckResultPublicDocumentV1,
+    eligible: bool
+) -> (result: u64)
+    capability test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !eligible || context.argv_count < 3 { return 0; }
+    return structured_write(context.argv[2], document.schema_version, document);
+}
+
 fn json_result(
     supported: bool,
-    request: check_result.CheckResultProjectionRequestV1,
+    projection_document_supported: bool,
+    projection: check_result.CheckResultProjectionV1,
     family_metadata: FamilyResultMetadataV1,
     check_artifact: CheckArtifactMetadataV1
 ) -> (result: CheckResultJsonNativeResultV1) {
     return CheckResultJsonNativeResultV1 {
         schema_version: result_schema(),
         supported: supported,
-        projection: check_result.build_result(request),
+        projection_document_supported: projection_document_supported,
+        projection: projection,
         family_metadata: family_metadata,
         check_artifact: check_artifact
     };
@@ -2105,8 +2177,28 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     let selected_request: check_result.CheckResultProjectionRequestV1 = select(
         supported, extracted.request, empty_projection_request(request)
     );
+    let projection: check_result.CheckResultProjectionV1 = check_result.build_result(
+        selected_request
+    );
+    let public_projection: CheckResultPublicDocumentV1 = public_check_result_document(
+        projection
+    );
+    let projection_document_eligible: bool = request.projection_document_only
+        && context.argv_count >= 3 && supported && family_metadata.supported
+        && (!projection.unresolved_present || projection.unresolved_chunks.len == 1);
+    let public_projection_published: u64 = publish_public_check_result_document(
+        context, public_projection, projection_document_eligible
+    );
+    let projection_document_supported: bool = projection_document_eligible
+        && public_projection_published > 0;
+    let response_projection: check_result.CheckResultProjectionV1 = select(
+        request.projection_document_only && projection_document_supported,
+        check_result.build_result(empty_projection_request(request)),
+        projection
+    );
     let output: CheckResultJsonNativeResultV1 = json_result(
-        supported, selected_request, family_metadata, check_artifact
+        supported, projection_document_supported, response_projection,
+        family_metadata, check_artifact
     );
     let published: u64 = structured_write(context.argv[1], result_schema(), output);
     if published == 0 {

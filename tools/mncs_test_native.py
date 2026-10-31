@@ -190,6 +190,7 @@ def run_native_app(
     step_budget: int = 1048576,
     timeout_seconds: float = 120.0,
     result_filename: str = "result.json",
+    extra_result_filenames: tuple[str, ...] = (),
 ) -> dict:
     """Evaluate one native application and return its validated result."""
     if not isinstance(request, dict):
@@ -199,6 +200,11 @@ def run_native_app(
     descriptor = repo_root() / "native-applications" / descriptor_name
     if not descriptor.is_file():
         raise NativeTransportError(f"native application descriptor is unavailable: {descriptor}")
+    if any(
+        not name or Path(name).name != name or name in {".", ".."}
+        for name in extra_result_filenames
+    ):
+        raise NativeTransportError("native application auxiliary result names must be simple filenames")
     cwd = cwd.resolve()
     try:
         with tempfile.TemporaryDirectory(prefix=".mncs-test-app-", dir=cwd) as directory:
@@ -224,6 +230,9 @@ def run_native_app(
             )
             request_path = directory_path / "request.json"
             result_path = directory_path / result_filename
+            extra_result_paths = {
+                name: directory_path / name for name in extra_result_filenames
+            }
             request_path.write_text(json.dumps(request), encoding="utf-8")
             relative_request = request_path.relative_to(cwd).as_posix()
             relative_result = result_path.relative_to(cwd).as_posix()
@@ -239,6 +248,10 @@ def run_native_app(
                     "--",
                     relative_request,
                     relative_result,
+                    *(
+                        path.relative_to(cwd).as_posix()
+                        for path in extra_result_paths.values()
+                    ),
                 ]
             )
             completed = subprocess.run(
@@ -278,6 +291,12 @@ def run_native_app(
                 raise NativeTransportError(
                     f"native application {descriptor_name} returned no valid result: {error}"
                 ) from error
+            extra_result_artifacts: dict[str, bytes] = {}
+            for name, path in extra_result_paths.items():
+                try:
+                    extra_result_artifacts[name] = path.read_bytes()
+                except FileNotFoundError:
+                    continue
     except subprocess.TimeoutExpired as error:
         raise NativeTransportError(
             f"native application {descriptor_name} exceeded {timeout_seconds}s"
@@ -286,6 +305,8 @@ def run_native_app(
         raise NativeTransportError(
             f"native application {descriptor_name} returned an invalid result schema"
         )
+    if extra_result_filenames:
+        result["_native_result_artifacts"] = extra_result_artifacts
     return result
 
 

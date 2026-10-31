@@ -232,6 +232,253 @@ def test_native_check_result_app_reports_invalid_family_check_schema(
     }
 
 
+def test_native_check_result_public_document_matches_independent_golden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_digest = "a" * 64
+    result_digest = "d" * 64
+    claim = "The declared family was executed by mncs-test"
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "id": "source-check-id",
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "scope": {"manifest": "mncs-test-family.toml"},
+        "classification": "pass",
+        "failure_class": "none",
+        "summary": {"passed": 1, "failed": 0, "skipped": 0},
+        "tests": [{"id": "mncs:test-case:public-doc", "verdict": "PASS"}],
+        "provenance": {"runner": {"source_sha256": source_digest}},
+        "run_id": "run-native-public-document",
+        "selection": {"selected_test_identities": ["mncs:test-case:public-doc"]},
+        "test_inventory": {"inventory_identity": "b" * 64},
+        "experiment": {"run_identity": "run-native-public-document"},
+    }
+    app_calls: list[tuple[dict, dict]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            app_calls.append((request, kwargs))
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    response = mncs_test._native_check_result_json_response(
+        mncs_test.json_bytes(result),
+        result_digest=result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:public-document",
+        claim=claim,
+        preserve_public_projection_document=True,
+    )
+
+    assert response is not None
+    assert response["supported"] is True
+    assert response["projection_document_supported"] is True
+    assert response["projection"]["provider"] == ""
+    assert response["projection"]["unresolved_chunks"] == []
+    assert len(app_calls) == 1
+    request, kwargs = app_calls[0]
+    assert request["projection_document_only"] is True
+    assert kwargs["extra_result_filenames"] == ("check-result-public.json",)
+    public_document = response["_public_check_result_document"]
+    assert isinstance(public_document, bytes)
+    assert mncs_test.json.loads(public_document) == {
+        "schema_version": "mncs.check-result/1",
+        "id": "family:public-document",
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "scope": "mncs-test-family.toml",
+        "claim": claim,
+        "summary": "pass: 1 passed, 0 failed, 0 skipped",
+        "contract_revision": "mncs.test-result/1",
+        "producer_revision": f"sha256:{source_digest}",
+        "digest": f"sha256:{result_digest}",
+        "unresolved": [],
+        "references": [
+            {
+                "kind": "mncs-test-result",
+                "uri": "urn:mncs-test:run-native-public-document",
+                "digest": f"sha256:{result_digest}",
+            }
+        ],
+        "result_ref": {
+            "kind": "mncs-test-result",
+            "uri": "urn:mncs-test:run-native-public-document",
+            "digest": f"sha256:{result_digest}",
+            "detail": "retrieve the retained result artifact when per-test detail is required",
+        },
+        "classification": "pass",
+        "failure_class": "none",
+    }
+
+
+def test_raw_native_public_document_fallback_materializes_only_after_native_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native_document = mncs_test.json_bytes(
+        {
+            "schema_version": "mncs.check-result/1",
+            "id": "family:raw-fallback",
+            "verdict": "PASS",
+            "summary": "pass: 1 passed, 0 failed, 0 skipped",
+            "unresolved": [],
+        }
+    )
+    selection_json = b'{"selected_test_identities":["mncs:test-case:one"]}'
+    native_order_sources: list[bytes] = []
+    native_payload_sources: list[bytes] = []
+
+    def reject_native_order(source: bytes, **kwargs: object) -> None:
+        native_order_sources.append(source)
+        return None
+
+    def reject_native_payload(source: bytes, **kwargs: object) -> None:
+        native_payload_sources.append(source)
+        return None
+
+    monkeypatch.setattr(
+        mncs_test, "_native_public_result_key_order", reject_native_order
+    )
+    monkeypatch.setattr(
+        mncs_test, "_native_public_result_document_payload", reject_native_payload
+    )
+    payload, digest = mncs_test._public_result_json_payload_with_raw_selection(
+        None,
+        selection_json,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        native_document=native_document,
+    )
+
+    assert len(native_order_sources) == 1
+    assert selection_json in native_order_sources[0]
+    assert len(native_payload_sources) == 1
+    assert selection_json in native_payload_sources[0]
+    assert payload == mncs_test.json_bytes(
+        {
+            "schema_version": "mncs.check-result/1",
+            "id": "family:raw-fallback",
+            "verdict": "PASS",
+            "summary": "pass: 1 passed, 0 failed, 0 skipped",
+            "unresolved": [],
+            "selection": {"selected_test_identities": ["mncs:test-case:one"]},
+        }
+    )
+    assert digest == mncs_test.sha256_bytes(payload)
+
+
+def test_native_raw_public_document_key_order_does_not_scan_field_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim = 'claim text includes the literal "summary": without changing the member boundary'
+    native_document = mncs_test.json_bytes(
+        {
+            "schema_version": "mncs.check-result/1",
+            "id": "family:key-order-span",
+            "claim": claim,
+            "summary": "pass: 1 passed, 0 failed, 0 skipped",
+            "verdict": "PASS",
+            "unresolved": [],
+        }
+    )
+    selection_json = b'{"selected_test_identities":["mncs:test-case:one"]}'
+    raw_source = (
+        native_document.rstrip()[:-1]
+        + b',"selection":'
+        + selection_json
+        + b"}"
+    )
+    forbidden_documents = {native_document, raw_source, selection_json}
+    original_loads = mncs_test.json.loads
+
+    def reject_projection_tree(value, *args, **kwargs):
+        observed = value if isinstance(value, bytes) else (
+            value.encode("utf-8") if isinstance(value, str) else b""
+        )
+        if observed in forbidden_documents:
+            raise AssertionError("native public CheckResult bytes must not be decoded in Python")
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(mncs_test.json, "loads", reject_projection_tree)
+    payload, digest = mncs_test._public_result_json_payload_with_raw_selection(
+        None,
+        selection_json,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        native_document=native_document,
+    )
+
+    expected = {
+        "schema_version": "mncs.check-result/1",
+        "id": "family:key-order-span",
+        "claim": claim,
+        "summary": "pass: 1 passed, 0 failed, 0 skipped",
+        "verdict": "PASS",
+        "unresolved": [],
+        "selection": {"selected_test_identities": ["mncs:test-case:one"]},
+    }
+    assert original_loads(payload) == expected
+    assert payload == mncs_test.json_bytes(expected)
+    assert digest == mncs_test.sha256_bytes(payload)
+
+    null_payload, null_digest = mncs_test._public_result_json_payload_with_raw_selection(
+        None,
+        b"null",
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        native_document=native_document,
+    )
+    expected_null_selection = {**expected, "selection": None}
+    assert original_loads(null_payload) == expected_null_selection
+    assert null_payload == mncs_test.json_bytes(expected_null_selection)
+    assert null_digest == mncs_test.sha256_bytes(null_payload)
+
+
+def test_native_public_document_bound_keeps_full_multichunk_projection(
+    tmp_path: Path,
+) -> None:
+    message = "x" * 1025
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "id": "source-multichunk",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "scope": {"manifest": "mncs-test-family.toml"},
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        "failure": {"message": message},
+        "tests": [],
+        "run_id": "run-multichunk-public-document",
+        "selection": {"selected_test_identities": ["mncs:test-case:multichunk"]},
+        "test_inventory": {"inventory_identity": "b" * 64},
+        "experiment": {"run_identity": "run-multichunk-public-document"},
+    }
+    response = mncs_test._native_check_result_json_response(
+        mncs_test.json_bytes(result),
+        result_digest="e" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:multichunk-public-document",
+        claim="Exercise the bounded native public CheckResult document",
+        preserve_public_projection_document=True,
+    )
+
+    assert response is not None
+    assert response["supported"] is True
+    assert response["projection_document_supported"] is False
+    assert response["_public_check_result_document"] is None
+    assert "".join(response["projection"]["unresolved_chunks"]) == message
+
+
 def test_raw_selection_public_result_uses_compatible_host_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

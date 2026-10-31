@@ -49,8 +49,8 @@ RESULT_SCHEMA = "mncs.test-result/1"
 CHECK_SCHEMA = "mncs.check-result/1"
 CHECK_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test-check-result-projection-request/1"
 CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
-CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/3"
-CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/3"
+CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/4"
+CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/5"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/2"
@@ -7287,6 +7287,7 @@ def _native_check_result_json_response(
     check_document: bytes | None = None,
     expected_test_identities: list[str] | None = None,
     expected_inventory_identity: str | None = None,
+    preserve_public_projection_document: bool = False,
     result_digest: str,
     mncs: str,
     cwd: Path,
@@ -7348,6 +7349,7 @@ def _native_check_result_json_response(
         "expected_test_identities": native_expected_test_identities,
         "inventory_expectation_present": inventory_expectation_present,
         "expected_inventory_identity": native_expected_inventory_identity,
+        "projection_document_only": preserve_public_projection_document,
         "check_id": check_id or "",
         "claim": claim or "",
         "result_digest": result_digest,
@@ -7362,6 +7364,9 @@ def _native_check_result_json_response(
             cwd=cwd,
             environment=environment,
             step_budget=8_000_000,
+            extra_result_filenames=("check-result-public.json",)
+            if preserve_public_projection_document
+            else (),
         )
     except (NativeInputBoundError, NativeBudgetExhaustedError):
         return None
@@ -7372,6 +7377,21 @@ def _native_check_result_json_response(
         or type(native_response.get("supported")) is not bool
     ):
         raise AdapterError("MNCS CheckResult JSON projection returned malformed support metadata")
+    if preserve_public_projection_document:
+        artifacts = native_response.pop("_native_result_artifacts", {})
+        public_document = artifacts.get("check-result-public.json")
+        document_supported = native_response.get("projection_document_supported")
+        if type(document_supported) is not bool:
+            raise AdapterError(
+                "MNCS CheckResult JSON projection returned malformed public-document support metadata"
+            )
+        if document_supported and not isinstance(public_document, bytes):
+            raise AdapterError(
+                "MNCS CheckResult JSON projection omitted its supported public document"
+            )
+        native_response["_public_check_result_document"] = (
+            public_document if document_supported else None
+        )
     return native_response
 
 
@@ -7959,6 +7979,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             environment=check_result_environment,
             check_id=request["check_identity"],
             claim="The exact repository-owned behavioral family check was executed by mncs-test",
+            preserve_public_projection_document=True,
         )
         family_metadata = _family_check_metadata_from_native(
             native_json_response,
@@ -8053,26 +8074,43 @@ def run_family_check(args: argparse.Namespace) -> int:
                 inventory_matches = inventory_identity == expected_inventory
             if not inventory_matches:
                 raise AdapterError("family check compiler inventory identity is stale")
-        check_result_document = check_result(
-            result,
-            result_digest,
-            mncs=args.mncs,
-            cwd=cwd,
-            environment=check_result_environment,
-            check_id=request["check_identity"],
-            claim="The exact repository-owned behavioral family check was executed by mncs-test",
-            test_result_document=result_document_bytes,
-            native_json_response=native_json_response,
-            native_json_response_prepared=True,
+        native_check_result_document = (
+            native_json_response.get("_public_check_result_document")
+            if native_json_response is not None
+            else None
         )
-        if family_metadata is not None and family_metadata["selection_present"]:
+        if not isinstance(native_check_result_document, bytes):
+            native_check_result_document = None
+        check_result_document = (
+            None
+            if native_check_result_document is not None
+            else check_result(
+                result,
+                result_digest,
+                mncs=args.mncs,
+                cwd=cwd,
+                environment=check_result_environment,
+                check_id=request["check_identity"],
+                claim="The exact repository-owned behavioral family check was executed by mncs-test",
+                test_result_document=result_document_bytes,
+                native_json_response=native_json_response,
+                native_json_response_prepared=True,
+            )
+        )
+        if family_metadata is not None:
+            selection_json = (
+                family_metadata["selection_json"]
+                if family_metadata["selection_present"]
+                else b"null"
+            )
             check_result_payload, check_result_digest = (
                 _public_result_json_payload_with_raw_selection(
                     check_result_document,
-                    family_metadata["selection_json"],
+                    selection_json,
                     mncs=args.mncs,
                     cwd=cwd,
                     environment=check_result_environment,
+                    native_document=native_check_result_document,
                 )
             )
         else:
@@ -8081,6 +8119,7 @@ def run_family_check(args: argparse.Namespace) -> int:
                 mncs=args.mncs,
                 cwd=cwd,
                 environment=check_result_environment,
+                native_document=native_check_result_document,
             )
         check_definition_identity = sha256_bytes(compact_json(check).encode())
         run_identity = result.get("experiment", {}).get("run_identity")
@@ -8119,7 +8158,15 @@ def run_family_check(args: argparse.Namespace) -> int:
                 # bounded native response serializer cannot accept its raw
                 # fragments and the compatibility envelope needs Python values.
                 fallback_result = json.loads(result_document_bytes)
-                fallback_check_result = dict(check_result_document)
+                if check_result_document is None:
+                    try:
+                        fallback_check_result = json.loads(native_check_result_document)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                        raise AdapterError(
+                            "native public CheckResult document is invalid JSON"
+                        ) from error
+                else:
+                    fallback_check_result = dict(check_result_document)
                 if family_metadata["selection_present"]:
                     selection_value = json.loads(family_metadata["selection_json"])
                     fallback_result["selection"] = selection_value
@@ -8193,9 +8240,24 @@ def _public_result_json_payload(
     mncs: str | None = None,
     cwd: Path | None = None,
     environment: dict[str, str] | None = None,
+    native_document: bytes | None = None,
 ) -> tuple[bytes, str]:
     """Prefer the native public-result serializer and preserve legacy fallback."""
     if mncs is not None and cwd is not None and environment is not None:
+        if native_document is not None:
+            native = _native_public_result_document_payload(
+                native_document,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            if native is not None:
+                return native
+        if native_document is not None and not isinstance(value, dict):
+            try:
+                value = json.loads(native_document)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise AdapterError("native public CheckResult document is invalid JSON") from error
         native = _native_public_result_payload(
             value,
             mncs=mncs,
@@ -8209,18 +8271,57 @@ def _public_result_json_payload(
 
 
 def _public_result_json_payload_with_raw_selection(
-    value: dict[str, Any],
+    value: dict[str, Any] | None,
     selection_json: bytes,
     *,
     mncs: str | None = None,
     cwd: Path | None = None,
     environment: dict[str, str] | None = None,
+    native_document: bytes | None = None,
 ) -> tuple[bytes, str]:
     """Serialize CheckResult while carrying its opaque selection as raw JSON."""
+    if not (
+        selection_json == b"null"
+        or selection_json.startswith(b"{") and selection_json.endswith(b"}")
+    ):
+        raise AdapterError("native family selection span is not an object or null")
+
+    if (
+        native_document is not None
+        and mncs is not None
+        and cwd is not None
+        and environment is not None
+    ):
+        document = native_document.rstrip()
+        if document.startswith(b"{") and document.endswith(b"}"):
+            body = document[:-1]
+            separator = bytes([44]) if body != b"{" else bytes()
+            source = body + separator + b'"selection":' + selection_json + b"}"
+            ordered = _native_public_result_key_order(
+                source,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            if ordered is not None:
+                native = _native_public_result_document_payload(
+                    ordered,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                )
+                if native is not None:
+                    return native
+
+    if value is None:
+        if native_document is None:
+            raise AdapterError("CheckResult with a raw selection span must be an object")
+        try:
+            value = json.loads(native_document)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise AdapterError("native public CheckResult document is invalid JSON") from error
     if not isinstance(value, dict):
         raise AdapterError("CheckResult with a raw selection span must be an object")
-    if not selection_json.startswith(b"{") or not selection_json.endswith(b"}"):
-        raise AdapterError("native family selection span is not a JSON object")
 
     fields = dict(value)
     fields.pop("selection", None)
