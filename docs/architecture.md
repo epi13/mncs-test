@@ -211,6 +211,16 @@ documents still use the bounded compatibility parser atomically. No Stdlib
 change was needed: this slice has one Test consumer, and the existing Stdlib
 cursor does not own Test's public-result JSON fragment contract.
 
+P-072 folds diagnostic-array span selection into that same native cursor scan.
+The verdict path now validates the compiler document, selects the public
+diagnostic fragment, and gathers policy codes in one pass; the standalone
+second-pass projection module is retired. Before the change, a valid 16,384-byte
+document exhausted the existing 8,000,000-step cap while the second cursor pass
+ran. The same maximum-sized document now returns the expected verdict and exact
+diagnostic span within that unchanged cap, verified against the independent
+expected bytes. Inputs outside the existing structural bounds still use the
+atomic compatibility path.
+
 The public-result formatter now emits 4,096-byte windows and carries its
 source SHA-256 state between them. The final window checks the digest against
 the original input identity, avoiding a full-source rehash for every

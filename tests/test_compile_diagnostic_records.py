@@ -140,6 +140,24 @@ def test_native_diagnostic_span_matches_independent_json_values() -> None:
     assert _native_records(native, document) == diagnostics
 
 
+def test_maximum_bounded_document_uses_one_native_diagnostic_scan() -> None:
+    prefix = b'{"valid":false,"errors":[{"code":"MNE041"}],"padding":"'
+    suffix = b'"}'
+    document = prefix + b'x' * (16_384 - len(prefix) - len(suffix)) + suffix
+
+    native = _document_result(document)
+
+    assert len(document) == 16_384
+    assert native is not None
+    assert native["supported"] is True
+    assert native["projection_supported"] is True
+    assert native["verdict"] == "expected_failure"
+    assert native["diagnostic_count"] == 1
+    start = native["diagnostics_json_start"]
+    length = native["diagnostics_json_length"]
+    assert document[start:start + length] == b'[{"code":"MNE041"}]'
+
+
 def test_native_projection_accepts_empty_main_related_array() -> None:
     diagnostic = {
         "code": "MNE041",
@@ -284,6 +302,30 @@ def test_native_span_declines_selected_arrays_over_its_item_bound() -> None:
     native = _document_result(document)
 
     assert native is None or native["projection_supported"] is False
+
+
+def test_over_bound_success_diagnostics_keep_native_compile_verdict() -> None:
+    document = json.dumps(
+        {"valid": True, "errors": [{"code": "MNE041"} for _ in range(33)]},
+        separators=(",", ":"),
+    ).encode()
+
+    native = mncs_test.native_compile_diagnostic_document_result(
+        document,
+        [],
+        compiler_exit_code=0,
+        expects_failure=False,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+    assert native is not None
+    assert native["supported"] is True
+    assert native["projection_supported"] is False
+    assert native["verdict"] == "compile_pass"
+    assert native["diagnostic_count"] == 0
+    assert native["diagnostics_json_present"] is False
 
 
 def test_compile_entry_carries_native_diagnostic_span_opaquely(
