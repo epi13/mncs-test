@@ -316,13 +316,20 @@ def test_native_continuation_rejects_a_changed_source_document(tmp_path: Path) -
     assert first["done"] is False
 
     document = json.loads(json.dumps(start_request["document"]))
-    first_chunk = document["chunks"][0]["bytes"]
-    replacement = "X" if first_chunk[0] != "X" else "Y"
-    document["chunks"][0]["bytes"] = replacement + first_chunk[1:]
+    input_chunk_index = first["input_chunk_index"]
+    input_chunk_offset = first["input_chunk_offset"]
+    current_chunk = document["chunks"][input_chunk_index]["bytes"]
+    replacement = "X" if current_chunk[input_chunk_offset] != "X" else "Y"
+    document["chunks"][input_chunk_index]["bytes"] = (
+        current_chunk[:input_chunk_offset]
+        + replacement
+        + current_chunk[input_chunk_offset + 1:]
+    )
     window_request = {
         "schema_version": mncs_test.PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
         "document": document,
         "input_sha256": start_request["input_sha256"],
+        "source_hash": first["source_hash"],
         "output_window_bytes": start_request["output_window_bytes"],
         "scan_state": first["scan_state"],
         "input_offset": first["input_offset"],
@@ -338,17 +345,41 @@ def test_native_continuation_rejects_a_changed_source_document(tmp_path: Path) -
         "hash_buffer": first["hash_buffer"],
         "hash_buffered": first["hash_buffered"],
     }
-    continued = mncs_test.run_native_app(
-        "test-public-result-json-token-window.json",
-        window_request,
-        request_schema=mncs_test.PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
-        result_schema=mncs_test.PUBLIC_RESULT_JSON_RESULT_SCHEMA,
-        mncs=str(MNCS),
-        cwd=tmp_path,
-        environment=_native_environment(),
-        step_budget=8_000_000,
-    )
+    continued = first
+    for _ in range(
+        mncs_test.PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+        // mncs_test.PUBLIC_RESULT_JSON_WINDOW_BYTES + 2
+    ):
+        if not continued["supported"] or continued["done"]:
+            break
+        window_request.update({
+            "scan_state": continued["scan_state"],
+            "input_offset": continued["input_offset"],
+            "input_chunk_index": continued["input_chunk_index"],
+            "input_chunk_offset": continued["input_chunk_offset"],
+            "window_start": continued["next_offset"],
+            "source_hash": continued["source_hash"],
+            "cursor_state": continued["cursor_state"],
+            "pending_open": continued["pending_open"],
+            "value_count": continued["value_count"],
+            "child_counts": continued["child_counts"],
+            "key_counts": continued["key_counts"],
+            "hash_state": continued["hash_state"],
+            "hash_buffer": continued["hash_buffer"],
+            "hash_buffered": continued["hash_buffered"],
+        })
+        continued = mncs_test.run_native_app(
+            "test-public-result-json-token-window.json",
+            window_request,
+            request_schema=mncs_test.PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
+            result_schema=mncs_test.PUBLIC_RESULT_JSON_RESULT_SCHEMA,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+            step_budget=8_000_000,
+        )
     assert continued["supported"] is False
+    assert continued["input_offset"] == start_request["document"]["byte_length"]
 
 
 def test_native_raw_tokenizer_rejects_changed_source_between_windows(
@@ -1681,7 +1712,11 @@ def test_results_through_expanded_native_window_use_native_json(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert calls == ["test-public-result-json-token.json"]
+    assert calls[0] == "test-public-result-json-token.json"
+    assert set(calls[1:]) == {"test-public-result-json-token-window.json"}
+    assert len(calls) >= (
+        len(expected) + mncs_test.PUBLIC_RESULT_JSON_WINDOW_BYTES - 1
+    ) // mncs_test.PUBLIC_RESULT_JSON_WINDOW_BYTES
 
 
 def test_large_array_uses_native_json_without_python_typed_token_projection(

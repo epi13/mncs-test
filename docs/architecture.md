@@ -182,6 +182,28 @@ compatibility parser, preserving arbitrary public diagnostic values. The
 Stdlib cursor remains unchanged because this slice has one Test consumer and
 uses Test's existing token ABI.
 
+P-070 removes that diagnostic-token materialization step from `compile_entry`.
+The native diagnostic verdict application now returns its bounded diagnostic
+code values alongside the selected diagnostic-array source span. The Test
+adapter decodes only those typed code bytes for compile policy and keeps the
+selected array as an opaque raw JSON fragment in the result envelope. The
+existing native public-result key-order and window formatter canonicalize and
+serialize the composed document, preserving sorted keys, UTF-8 text, and the
+established output digest without constructing a Python diagnostic list or
+dictionary. If native span selection declines, the whole document still uses
+the compatibility parser atomically. The `native_compile_diagnostic_records`
+helper remains as a Python API-boundary materializer for callers that
+explicitly request records; the ordinary compile consumer no longer calls it.
+The Test JSON cursor remains shared by public-result formatting and related
+consumers, so this migration did not add a Stdlib parser or remove that cursor.
+
+The public-result formatter now emits 4,096-byte windows and carries its
+source SHA-256 state between them. The final window checks the digest against
+the original input identity, avoiding a full-source rehash for every
+continuation. A 29,188-byte nested array now completes natively in ten bounded
+calls; its 37,377-byte output and digest match the independent golden under
+the existing 8,000,000-step ceiling.
+
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite
 result policy. Retained-session batches are projected into bounded cases and
@@ -258,7 +280,8 @@ into the outer response without decoding them for response assembly. MNCS
 validates, traverses, pretty-prints, and hashes the canonically ordered compact envelope;
 its UTF-8 bytes match the compatibility formatter. The family adapter selects
 4,096-byte native output windows to stay within each app call’s step ceiling;
-other direct document serialization keeps the default 8,192-byte windows.
+direct document serialization uses the same window size and incremental source
+digest state.
 Over-bound inputs and exhausted native step budgets retain the host formatter. The
 infrastructure-failure envelope remains host-formatted so it can still be
 emitted when native setup or execution fails.

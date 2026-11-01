@@ -12,7 +12,7 @@ use mncs.std.json_cursor.v1 as json_cursor;
 record CursorV1 {
     position: u64,
     depth: byte,
-    stack: u64,
+    stack: [byte; 64],
     expect_key: bool,
     in_string: bool,
     string_is_key: bool,
@@ -31,6 +31,9 @@ record CursorV1 {
     key_length: u64,
     pending_key: bool,
     root_seen: bool,
+    atom_active: bool,
+    atom_kind: byte,
+    atom_remaining: byte,
     scan_state: json.ScanState,
     scalar_active: bool,
     scalar_kind: byte,
@@ -43,11 +46,7 @@ record CursorV1 {
 }
 
 fn json_scan_initial_v1() -> (result: json.ScanState) {
-    return json.ScanState {
-        stack: 0, depth: 0, expect: 0, mode: 0, number: 0, literal: 0,
-        position: 0, escape: false, unicode: 0, valid: true, error: 0,
-        objects: 0, arrays: 0, strings: 0
-    };
+    return json.init();
 }
 
 fn json_scan_feed_chunk_v1(state: json.ScanState, input: [byte; up_to 64]) -> (result: json.ScanState) {
@@ -65,8 +64,15 @@ fn json_scan_is_valid_v1(state: json.ScanState) -> (result: bool) {
     return state.valid && state.depth == 0 && state.mode == 0 && state.expect == 7;
 }
 
+fn json_scan_stacks_equal_v1(left: [byte; 64], right: [byte; 64]) -> (result: bool) {
+    iterate i up_to 64 carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
 fn json_scan_states_equal_v1(left: json.ScanState, right: json.ScanState) -> (result: bool) {
-    return left.stack == right.stack && left.depth == right.depth
+    return json_scan_stacks_equal_v1(left.stack, right.stack) && left.depth == right.depth
         && left.expect == right.expect && left.mode == right.mode
         && left.number == right.number && left.literal == right.literal
         && left.position == right.position && left.escape == right.escape
@@ -92,7 +98,7 @@ fn cursor_stack_weight_v1(depth: u64) -> (result: u64) {
 
 fn cursor_array_comma_event_v1(state: CursorV1, value: byte) -> (result: byte) {
     if value != 44 || state.depth == 0 { return 0; }
-    let top: byte = ((state.stack / cursor_stack_weight_v1((state.depth as u64) - 1)) % 4) as byte;
+    let top: byte = state.stack[(state.depth as u64) - 1];
     return select(top == 2, 11, 0);
 }
 
@@ -106,7 +112,12 @@ fn cursor_base_v1(state: CursorV1) -> (result: json_cursor.Cursor) {
         utf8_remaining: state.utf8_remaining, utf8_lead: state.utf8_lead,
         valid: state.valid, event: state.event, string_start: state.string_start,
         string_end: state.string_end, key: state.key, key_length: state.key_length,
-        pending_key: state.pending_key, root_seen: state.root_seen
+        string_length: state.string_length, pending_key: state.pending_key,
+        root_seen: state.root_seen, atom_active: state.atom_active,
+        atom_kind: state.atom_kind, atom_remaining: state.atom_remaining,
+        token_event: state.token_event, token_kind: state.token_kind,
+        token_start: state.token_start, token_end: state.token_end,
+        token_depth: state.token_depth
     };
 }
 
@@ -134,7 +145,9 @@ fn cursor_from_base_v1(
         string_start: base.string_start, string_end: base.string_end,
         string_length: select(base.event == 2 || base.event == 4, base.string_end -% base.string_start, 0),
         key: base.key, key_length: base.key_length, pending_key: base.pending_key,
-        root_seen: base.root_seen, scan_state: scanned,
+        root_seen: base.root_seen, atom_active: base.atom_active,
+        atom_kind: base.atom_kind, atom_remaining: base.atom_remaining,
+        scan_state: scanned,
         scalar_active: scalar_active, scalar_kind: scalar_kind,
         scalar_start: scalar_start, token_event: token_event,
         token_kind: token_kind, token_start: token_start,
@@ -144,12 +157,13 @@ fn cursor_from_base_v1(
 
 fn cursor_init_v1() -> (result: CursorV1) {
     let initial: CursorV1 = CursorV1 {
-        position: 0, depth: 0, stack: 0, expect_key: false, in_string: false,
+        position: 0, depth: 0, stack: [0; 64], expect_key: false, in_string: false,
         string_is_key: false, escaped: false, unicode_remaining: 0,
         unicode_value: 0, pending_high_surrogate: false,
         utf8_remaining: 0, utf8_lead: 0, valid: true, event: 0,
         string_start: 0, string_end: 0, string_length: 0, key: [0; 32],
         key_length: 0, pending_key: false, root_seen: false,
+        atom_active: false, atom_kind: 0, atom_remaining: 0,
         scan_state: json_scan_initial_v1(), scalar_active: false,
         scalar_kind: 0, scalar_start: 0, token_event: false, token_kind: 0,
         token_start: 0, token_end: 0, token_depth: 0
@@ -284,6 +298,6 @@ fn cursor_is_valid_v1(state: CursorV1) -> (result: bool) {
 
 fn cursor_container_kind_v1(state: CursorV1, level: u64) -> (result: byte) {
     if level >= 12 || level >= state.depth as u64 { return 0; }
-    return ((state.stack / cursor_stack_weight_v1(level)) % 4) as byte;
+    return state.stack[level];
 }
 

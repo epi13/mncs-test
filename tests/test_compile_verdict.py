@@ -203,6 +203,23 @@ def test_native_diagnostic_document_verdict_matches_independent_json_expectation
     )
 
 
+def test_native_diagnostic_result_exposes_typed_codes_to_the_test_consumer() -> None:
+    document = b'{"valid":false,"errors":[{"code":"MNE\\u0031"},{"code":"MNE042"}]}'
+    result = mncs_test.native_compile_diagnostic_document_result(
+        document,
+        [],
+        compiler_exit_code=2,
+        expects_failure=True,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+    assert result is not None
+    assert result["diagnostic_codes"] == ["MNE1", "MNE042"]
+    assert result["diagnostic_code_count"] == 2
+
+
 def test_native_diagnostic_document_declines_out_of_bound_or_unsupported_inputs() -> None:
     large = b'{"valid":false,"errors":[],"padding":"' + b"x" * 16_400 + b'"}'
     too_many_diagnostics = json.dumps([

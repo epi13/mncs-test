@@ -1432,22 +1432,7 @@ fn parse_chunk(state: ParseStateV1, document: JsonTokenDocumentV1, chunk_index: 
 }
 
 fn initial_json_scan_state() -> (result: json.ScanState) {
-    return json.ScanState {
-        stack: 0,
-        depth: 0,
-        expect: 0,
-        mode: 0,
-        number: 0,
-        literal: 0,
-        position: 0,
-        escape: false,
-        unicode: 0,
-        valid: true,
-        error: 0,
-        objects: 0,
-        arrays: 0,
-        strings: 0
-    };
+    return json.init();
 }
 
 fn scan_document_part(scanned: json.ScanState, chunk: JsonTokenInputChunkV1, index: u64) -> (result: json.ScanState) {

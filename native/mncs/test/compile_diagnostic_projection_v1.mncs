@@ -53,11 +53,7 @@ fn empty_frame() -> (result: ProjectionFrameV1) {
 }
 
 fn initial_syntax() -> (result: json.ScanState) {
-    return json.ScanState {
-        stack: 0, depth: 0, expect: 0, mode: 0, number: 0, literal: 0,
-        position: 0, escape: false, unicode: 0, valid: true, error: 0,
-        objects: 0, arrays: 0, strings: 0
-    };
+    return json.init();
 }
 
 fn initial_projection_scan() -> (result: ProjectionScanV1) {

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -59,8 +60,8 @@ CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
 CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/5"
 CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/5"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/3"
-PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
-PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/3"
+PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/3"
+PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/4"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA = "mncs.test.public-json-ascii-escape-request/1"
@@ -90,7 +91,7 @@ FAMILY_CHECK_MANIFEST_NATIVE_RESULT_SCHEMA = "mncs.test.family-check-manifest/2"
 FAMILY_CHECK_MANIFEST_NATIVE_MAX_BYTES = 65_536
 PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES = 1024
 PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS = 64
-PUBLIC_RESULT_JSON_WINDOW_BYTES = 8192
+PUBLIC_RESULT_JSON_WINDOW_BYTES = 4096
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 8192
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
 PUBLIC_RESULT_JSON_MAX_VALUES = 1024
@@ -138,7 +139,7 @@ VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
 COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-diagnostic-verdict-request/1"
-COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/4"
+COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/5"
 COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 16_384
 COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES = 16
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
@@ -226,6 +227,15 @@ class AdapterError(RuntimeError):
     """A transport boundary failed before a test could produce a result."""
 
 
+@dataclass(frozen=True)
+class NativeDiagnosticValueSpan:
+    """A native-validated JSON span carried opaquely to the public serializer."""
+
+    json_fragment: bytes
+    diagnostic_codes: tuple[str, ...]
+    json_span_present: bool
+
+
 def json_bytes(value: Any) -> bytes:
     return (
         json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
@@ -254,7 +264,7 @@ def _native_public_result_document_request(
     if (
         not encoded
         or len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
-        or output_window_bytes not in (4096, 8192)
+        or output_window_bytes != PUBLIC_RESULT_JSON_WINDOW_BYTES
     ):
         return None
     chunks = _public_result_input_chunks(encoded)
@@ -1028,6 +1038,7 @@ def _native_public_result_document_payload(
                 "schema_version": PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA,
                 "document": document,
                 "input_sha256": input_hash,
+                "source_hash": state["source_hash"],
                 "output_window_bytes": output_window_bytes,
                 "scan_state": state["scan_state"],
                 "input_offset": state["input_offset"],
@@ -1130,6 +1141,12 @@ def _native_public_result_document_payload(
         hash_total = returned_hash.get("total") if isinstance(returned_hash, dict) else None
         hash_buffered = returned_hash.get("buffered") if isinstance(returned_hash, dict) else None
         buffered = result.get("hash_buffered")
+        source_hash = result.get("source_hash")
+        source_state = source_hash.get("state") if isinstance(source_hash, dict) else None
+        source_h = source_state.get("h") if isinstance(source_state, dict) else None
+        source_total = source_state.get("total") if isinstance(source_state, dict) else None
+        source_state_buffered = source_state.get("buffered") if isinstance(source_state, dict) else None
+        source_buffered = source_hash.get("buffered") if isinstance(source_hash, dict) else None
         if (
             not isinstance(hash_h, list)
             or len(hash_h) != 8
@@ -1142,6 +1159,19 @@ def _native_public_result_document_payload(
             or buffered != next_offset % 64
             or hash_buffered != 0
             or not _native_byte_buffer_shape(result.get("hash_buffer"))
+            or not isinstance(source_h, list)
+            or len(source_h) != 8
+            or any(type(word) is not int or not 0 <= word <= 0xFFFFFFFF for word in source_h)
+            or not isinstance(source_total, int)
+            or type(source_total) is bool
+            or type(source_state_buffered) is not int
+            or source_state_buffered != 0
+            or type(source_buffered) is not int
+            or not 0 <= source_buffered < 64
+            or source_total + source_buffered != input_offset
+            or source_buffered != input_offset % 64
+            or not _native_byte_buffer_shape(source_state.get("buf") if isinstance(source_state, dict) else None)
+            or not _native_byte_buffer_shape(source_hash.get("buffer") if isinstance(source_hash, dict) else None)
         ):
             raise AdapterError("MNCS public-result JSON app returned malformed digest continuation state")
 
@@ -1910,6 +1940,8 @@ def native_compile_diagnostic_document_result(
     valid_field_present = result.get("valid_field_present")
     valid_field_is_true = result.get("valid_field_is_true")
     diagnostic_count = result.get("diagnostic_count")
+    diagnostic_code_count = result.get("diagnostic_code_count")
+    diagnostic_code_records = result.get("diagnostic_codes")
     diagnostics_json_present = result.get("diagnostics_json_present")
     diagnostics_json_start = result.get("diagnostics_json_start")
     diagnostics_json_length = result.get("diagnostics_json_length")
@@ -1944,6 +1976,40 @@ def native_compile_diagnostic_document_result(
         or diagnostics_json_length != 0
     ):
         raise AdapterError("MNCS compiler diagnostic app exposed a partial unsupported span")
+    if (
+        type(diagnostic_code_count) is not int
+        or not 0 <= diagnostic_code_count <= 32
+        or not isinstance(diagnostic_code_records, list)
+        or len(diagnostic_code_records) != diagnostic_code_count
+    ):
+        raise AdapterError("MNCS compiler diagnostic app returned malformed typed codes")
+    diagnostic_codes: list[str] = []
+    for record in diagnostic_code_records:
+        if not isinstance(record, dict):
+            raise AdapterError("MNCS compiler diagnostic app returned a malformed typed code")
+        value = record.get("value")
+        if isinstance(value, str):
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise AdapterError("MNCS compiler diagnostic code is not valid UTF-8") from error
+        elif isinstance(value, list) and all(
+            type(byte) is int and 0 <= byte <= 255 for byte in value
+        ):
+            encoded = bytes(value)
+        else:
+            raise AdapterError("MNCS compiler diagnostic app returned malformed code bytes")
+        if len(encoded) > MAX_DIAGNOSTIC_CODE_BYTES:
+            raise AdapterError("MNCS compiler diagnostic code exceeds its native byte bound")
+        try:
+            diagnostic_codes.append(encoded.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise AdapterError("MNCS compiler diagnostic code is not valid UTF-8") from error
+    if not expects_failure and diagnostic_codes:
+        raise AdapterError("MNCS compiler diagnostic app returned codes for a passing test")
+    if expects_failure and projection_supported and len(diagnostic_codes) != diagnostic_count:
+        raise AdapterError("MNCS compiler diagnostic code count disagrees with its selected span")
+    result["diagnostic_codes"] = diagnostic_codes
     verdict = result.get("verdict")
     if not isinstance(verdict, str) or verdict not in {
         "compile_pass", "expected_failure", "compile_expectation_mismatch",
@@ -1978,157 +2044,13 @@ def native_compile_diagnostic_document_verdict(
     return result["verdict"]
 
 
-def _decode_native_json_scalar(raw: bytes, kind: int) -> Any:
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AdapterError("MNCS emitted a malformed scalar token") from error
-    if kind in (107, 113):
-        if not isinstance(value, str):
-            raise AdapterError("MNCS string token decoded to a non-string value")
-    elif kind == 86:
-        if isinstance(value, (str, list, dict)):
-            raise AdapterError("MNCS scalar token decoded to a compound value")
-    else:
-        raise AdapterError("MNCS emitted an unsupported JSON token kind")
-    return value
-
-
-def _native_json_token_value(tokens: list[tuple[int, Any]], index: int = 0) -> tuple[Any, int]:
-    if index >= len(tokens):
-        raise AdapterError("MNCS JSON token stream ended before the selected value")
-    kind, value = tokens[index]
-    if kind in (113, 86):
-        return value, index + 1
-    if kind == 91:
-        items: list[Any] = []
-        cursor = index + 1
-        if cursor < len(tokens) and tokens[cursor][0] == 93:
-            return items, cursor + 1
-        while cursor < len(tokens):
-            item, cursor = _native_json_token_value(tokens, cursor)
-            items.append(item)
-            if cursor >= len(tokens):
-                break
-            separator = tokens[cursor][0]
-            if separator == 93:
-                return items, cursor + 1
-            if separator != 44:
-                break
-            cursor += 1
-        raise AdapterError("MNCS JSON token stream has an invalid array boundary")
-    if kind == 123:
-        fields: dict[str, Any] = {}
-        cursor = index + 1
-        if cursor < len(tokens) and tokens[cursor][0] == 125:
-            return fields, cursor + 1
-        while cursor < len(tokens):
-            key_kind, key = tokens[cursor]
-            if key_kind != 107 or not isinstance(key, str):
-                break
-            cursor += 1
-            if cursor >= len(tokens) or tokens[cursor][0] != 58:
-                break
-            value, cursor = _native_json_token_value(tokens, cursor + 1)
-            fields[key] = value
-            if cursor >= len(tokens):
-                break
-            separator = tokens[cursor][0]
-            if separator == 125:
-                return fields, cursor + 1
-            if separator != 44:
-                break
-            cursor += 1
-        raise AdapterError("MNCS JSON token stream has an invalid object boundary")
-    raise AdapterError("MNCS JSON token stream starts with an invalid value token")
-
-
-def _decode_native_json_tokens(
-    token_words: list[int],
-    document: bytes,
-    packed_document: dict[str, Any],
-) -> Any:
-    chunks = packed_document.get("chunks")
-    if (
-        not isinstance(chunks, list)
-        or not chunks
-        or len(chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS
-        or not token_words
-        or len(token_words) > 512
-        or type(token_words[0]) is not int
-        or token_words[0] != 254
-    ):
-        raise AdapterError("MNCS JSON token stream has malformed bounds")
-    chunk_lengths: list[int] = []
-    for chunk in chunks:
-        if not isinstance(chunk, dict) or not isinstance(chunk.get("bytes"), str):
-            raise AdapterError("MNCS JSON token stream has malformed source chunks")
-        try:
-            encoded = chunk["bytes"].encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise AdapterError("MNCS JSON token source contains invalid UTF-8") from error
-        if type(chunk.get("length")) is not int or chunk["length"] != len(encoded):
-            raise AdapterError("MNCS JSON token source chunk length is inconsistent")
-        chunk_lengths.append(len(encoded))
-    if sum(chunk_lengths) != len(document):
-        raise AdapterError("MNCS JSON token source length is inconsistent")
-
-    tokens: list[tuple[int, Any]] = []
-    for index, word in enumerate(token_words):
-        if type(word) is not int or not 0 <= word < 2**53:
-            raise AdapterError("MNCS JSON token stream contains an invalid word")
-        kind = word % 256
-        offset = (word // 256) % 131072
-        chunk_index = (word // 33554432) % 64
-        chunk_offset = (word // 2147483648) % 1024
-        length = (word // 2199023255552) % 4096
-        if kind == 254:
-            if index != 0 or offset != 0 or chunk_index != 0 or chunk_offset != 0 or length != 0:
-                raise AdapterError("MNCS JSON token stream contains a misplaced marker")
-            continue
-        if index == 0:
-            raise AdapterError("MNCS JSON token stream omitted its leading marker")
-        if kind not in (44, 58, 86, 91, 93, 107, 113, 123, 125):
-            raise AdapterError("MNCS JSON token stream contains an unknown token kind")
-        chunk_start = sum(chunk_lengths[:chunk_index]) if chunk_index < len(chunk_lengths) else -1
-        if (
-            chunk_start < 0
-            or chunk_offset > chunk_lengths[chunk_index]
-            or chunk_start + chunk_offset != offset
-            or offset > len(document)
-            or length > len(document) - offset
-        ):
-            raise AdapterError("MNCS JSON token stream contains an out-of-bounds span")
-        raw = document[offset:offset + length]
-        if kind in (107, 113, 86):
-            tokens.append((kind, _decode_native_json_scalar(raw, kind)))
-            continue
-        expected = {44: b",", 58: b":", 91: b"[", 93: b"]", 123: b"{", 125: b"}"}[kind]
-        if raw != expected:
-            raise AdapterError("MNCS JSON structural token disagrees with its source span")
-        tokens.append((kind, None))
-
-    value, consumed = _native_json_token_value(tokens)
-    if consumed != len(tokens):
-        raise AdapterError("MNCS JSON token stream contains trailing tokens")
-    return value
-
-
-def native_compile_diagnostic_records(
+def native_compile_diagnostic_values(
     result: dict[str, Any],
     document: bytes,
-    *,
-    mncs: str,
-    cwd: Path,
-    environment: dict[str, str],
-) -> list[dict[str, Any]] | None:
-    """Build public diagnostic values from the MNCS-selected native token stream.
-
-    ``None`` means the native tokenizer could not verify the bounded stream;
-    callers can then use the established compatibility decoder atomically.
-    """
+) -> NativeDiagnosticValueSpan | None:
+    """Carry a native-validated diagnostic span without building a host value tree."""
     if result.get("projection_supported") is not True:
-        raise AdapterError("native compile diagnostic projection is unavailable")
+        return None
     count = result.get("diagnostic_count")
     present = result.get("diagnostics_json_present")
     start = result.get("diagnostics_json_start")
@@ -2148,26 +2070,47 @@ def native_compile_diagnostic_records(
         if length < 2 or start > len(document) or length > len(document) - start:
             raise AdapterError("native compile diagnostic projection returned an invalid JSON span")
         encoded = document[start:start + length]
+        if not encoded.startswith(b"[") or not encoded.endswith(b"]"):
+            raise AdapterError("native compile diagnostic projection did not select an array")
     else:
         if count != 0 or start != 0 or length != 0:
             raise AdapterError("native compile diagnostic projection omitted its JSON span")
         encoded = b"[]"
-    if not present:
-        return []
-    token_stream = _native_public_result_token_stream(
-        encoded, mncs=mncs, cwd=cwd, environment=environment,
+    codes = result.get("diagnostic_codes")
+    if not isinstance(codes, list) or len(codes) > 32 or any(
+        not isinstance(code, str) for code in codes
+    ):
+        raise AdapterError("native compile diagnostic result returned malformed typed codes")
+    return NativeDiagnosticValueSpan(
+        json_fragment=encoded,
+        diagnostic_codes=tuple(codes),
+        json_span_present=present,
     )
-    if token_stream is None:
+
+
+def native_compile_diagnostic_records(
+    result: dict[str, Any],
+    document: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> list[dict[str, Any]] | None:
+    """Materialize native diagnostic values only for the Python API boundary."""
+    del mncs, cwd, environment
+    values = native_compile_diagnostic_values(result, document)
+    if values is None:
         return None
-    token_request, token_words = token_stream
-    diagnostics = _decode_native_json_tokens(
-        token_words, encoded, token_request["document"],
-    )
+    try:
+        diagnostics = json.loads(values.json_fragment)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("native diagnostic span is invalid JSON at the API boundary") from error
     if not isinstance(diagnostics, list) or len(diagnostics) > 32:
-        raise AdapterError("MNCS native token stream returned a malformed diagnostic array")
+        raise AdapterError("native diagnostic span returned a malformed public array")
+    count = result.get("diagnostic_count")
     records = [item for item in diagnostics if isinstance(item, dict)]
-    if len(records) != count:
-        raise AdapterError("MNCS native token stream disagrees with its diagnostic count")
+    if type(count) is not int or len(records) != count:
+        raise AdapterError("native diagnostic span disagrees with its object count")
     return records
 
 
@@ -6743,17 +6686,24 @@ def compile_entry(
         cwd=cwd,
         environment=environment,
     )
+    diagnostics: list[dict[str, Any]] | None = None
+    native_values: NativeDiagnosticValueSpan | None = None
     if native_result is not None and native_result.get("projection_supported") is True:
-        diagnostics = native_compile_diagnostic_records(
-            native_result,
-            process["stdout"],
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
+        native_values = native_compile_diagnostic_values(
+            native_result, process["stdout"],
         )
-        if diagnostics is None:
+        if native_values is None:
             decoded = parse_json_output(process["stdout"])
             diagnostics = diagnostic_list(decoded)
+            test_result["diagnostics"] = diagnostics
+        elif native_values.json_span_present:
+            marker = _native_json_fragment_marker(native_values.json_fragment, 0)
+            test_result["diagnostics"] = marker
+            test_result["_mncs_raw_json_fragments"] = [
+                (marker, native_values.json_fragment)
+            ]
+        else:
+            test_result["diagnostics"] = []
         compiler_result_is_object = native_result["root_is_object"]
         valid_field_present = native_result["valid_field_present"]
         valid_field_is_true = native_result["valid_field_is_true"]
@@ -6761,13 +6711,15 @@ def compile_entry(
     else:
         decoded = parse_json_output(process["stdout"])
         diagnostics = diagnostic_list(decoded)
+        test_result["diagnostics"] = diagnostics
         compiler_result_is_object = isinstance(decoded, dict)
         valid_field_present = compiler_result_is_object and "valid" in decoded
         valid_field_is_true = compiler_result_is_object and decoded.get("valid") is True
         native_verdict = native_result["verdict"] if native_result is not None else None
     test_result["process_exit_code"] = process["returncode"]
-    test_result["diagnostics"] = diagnostics
     if native_verdict is None:
+        if diagnostics is None:
+            raise AdapterError("compile verdict fallback lost its diagnostic values")
         native_verdict = native_compile_verdict(
             diagnostics,
             expected_codes,
@@ -6797,20 +6749,33 @@ def compile_entry(
             message="source compiled but the manifest expected a diagnostic",
         )
     if native_verdict == "diagnostic_mismatch":
+        observed_codes = (
+            list(native_values.diagnostic_codes)
+            if native_values is not None
+            else [str(item.get("code", "")) for item in diagnostics or []]
+        )
         return result_failure(
             test_result,
             failure_class=native_verdict,
             message="compiler diagnostics did not match the manifest",
             expected_codes=expected_codes,
-            observed_codes=[str(item.get("code", "")) for item in diagnostics],
+            observed_codes=observed_codes,
         )
     if native_verdict != "compile_failure":
         raise AdapterError("MNCS compile verdict is not recognized by the Test adapter")
+    if native_values is not None and native_values.json_span_present:
+        failure_marker = _native_json_fragment_marker(native_values.json_fragment, 1)
+        test_result.setdefault("_mncs_raw_json_fragments", []).append(
+            (failure_marker, native_values.json_fragment)
+        )
+        failure_diagnostics: Any = failure_marker
+    else:
+        failure_diagnostics = diagnostics or []
     return result_failure(
         test_result,
         failure_class=native_verdict,
         message="source did not compile",
-        diagnostics=diagnostics,
+        diagnostics=failure_diagnostics,
     )
 
 
@@ -9854,8 +9819,23 @@ def _public_result_json_payload_with_raw_fragments(
 ) -> tuple[bytes, str]:
     """Serialize native returned values as source fragments without host trees."""
     source = _compact_json_with_raw_fragments(value, fragments)
-    native = _native_public_result_document_payload(
+    ordered = _native_public_result_key_order(
         source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if ordered is None:
+        # Keep the established canonical JSON contract when native ordering
+        # declines; this is the bounded compatibility edge for raw fragments.
+        try:
+            materialized = json.loads(source.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterError(f"native public-result JSON fragments are invalid: {error}") from error
+        payload = json_bytes(materialized)
+        return payload, sha256_bytes(payload)
+    native = _native_public_result_document_payload(
+        ordered,
         mncs=mncs,
         cwd=cwd,
         environment=environment,
@@ -9864,7 +9844,7 @@ def _public_result_json_payload_with_raw_fragments(
         return native
     # Only native declines enter the compatibility materialization path.
     try:
-        materialized = json.loads(source.decode("utf-8"))
+        materialized = json.loads(ordered.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AdapterError(f"native public-result JSON fragments are invalid: {error}") from error
     payload = json_bytes(materialized)

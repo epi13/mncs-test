@@ -134,6 +134,9 @@ def test_native_diagnostic_span_matches_independent_json_values() -> None:
     length = native["diagnostics_json_length"]
     assert document[start:start + length].startswith(b"[")
     assert document[start:start + length].endswith(b"]")
+    values = mncs_test.native_compile_diagnostic_values(native, document)
+    assert values is not None
+    assert values.diagnostic_codes == tuple(item["code"] for item in diagnostics)
     assert _native_records(native, document) == diagnostics
 
 
@@ -246,9 +249,7 @@ def test_native_span_filters_non_object_diagnostic_array_entries() -> None:
     assert _native_records(native, document) == [diagnostic]
 
 
-def test_native_token_values_decode_only_scalar_spans(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_native_diagnostic_values_keep_the_selected_json_span_opaque() -> None:
     diagnostic = {
         "message": "λ 東京",
         "span": {"start": 4, "end": 7},
@@ -257,37 +258,15 @@ def test_native_token_values_decode_only_scalar_spans(
     }
     document = json.dumps([diagnostic], ensure_ascii=True, separators=(",", ":")).encode()
     native = _document_result(document)
-    start = native["diagnostics_json_start"]
-    length = native["diagnostics_json_length"]
-    selected = document[start:start + length]
-    stream = mncs_test._native_public_result_token_stream(
-        selected,
-        mncs=str(MNCS),
-        cwd=ROOT,
-        environment=_environment(),
-    )
-    assert stream is not None
-    packed_document, token_words = stream
+    values = mncs_test.native_compile_diagnostic_values(native, document)
 
-    original_loads = json.loads
-    decoded_spans: list[str] = []
-
-    def scalar_only_loads(value: str | bytes | bytearray, *args, **kwargs):
-        text = value.decode("utf-8") if isinstance(value, (bytes, bytearray)) else value
-        decoded_spans.append(text)
-        assert text.lstrip()[:1] not in ("[", "{"), "compound JSON reached host parsing"
-        return original_loads(value, *args, **kwargs)
-
-    monkeypatch.setattr(mncs_test.json, "loads", scalar_only_loads)
-    assert mncs_test._decode_native_json_tokens(
-        token_words, selected, packed_document["document"],
-    ) == [diagnostic]
-    assert decoded_spans
-
-    with pytest.raises(mncs_test.AdapterError, match="malformed bounds"):
-        mncs_test._decode_native_json_tokens(
-            token_words[1:], selected, packed_document["document"],
-        )
+    assert values is not None
+    assert values.json_span_present is True
+    assert values.json_fragment == document[
+        native["diagnostics_json_start"]:
+        native["diagnostics_json_start"] + native["diagnostics_json_length"]
+    ]
+    assert values.diagnostic_codes == ("",)
 
 
 def test_native_span_declines_selected_arrays_over_its_item_bound() -> None:
@@ -307,7 +286,7 @@ def test_native_span_declines_selected_arrays_over_its_item_bound() -> None:
     assert native is None or native["projection_supported"] is False
 
 
-def test_compile_entry_decodes_only_native_diagnostic_span(
+def test_compile_entry_carries_native_diagnostic_span_opaquely(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -328,6 +307,13 @@ def test_compile_entry_decodes_only_native_diagnostic_span(
         raise AssertionError("raw compiler stdout reached the Python JSON tree parser")
 
     monkeypatch.setattr(mncs_test, "parse_json_output", reject_host_tree)
+    monkeypatch.setattr(
+        mncs_test,
+        "native_compile_diagnostic_records",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("native compile consumer materialized a Python diagnostic tree")
+        ),
+    )
     test = {
         "id": "native-projection-compile-fail",
         "entry": "invalid_return",
@@ -355,10 +341,41 @@ def test_compile_entry_decodes_only_native_diagnostic_span(
 
     assert result["status"] == "expected_failure"
     assert result["compile_verdict"] == "expected_failure"
-    assert result["diagnostics"] == expected
+    marker = result["diagnostics"]
+    fragments = result["_mncs_raw_json_fragments"]
+    assert isinstance(marker, str)
+    fragment = next(raw for selected_marker, raw in fragments if selected_marker == marker)
+    assert json.loads(fragment) == expected
 
 
-def test_compile_entry_falls_back_atomically_when_native_tokens_decline(
+def test_raw_native_diagnostic_fragment_keeps_canonical_public_json_bytes() -> None:
+    fragment = b'[{"z":{"b":2,"a":1},"message":"\xce\xbb","a":-0.0}]'
+    marker = mncs_test._native_json_fragment_marker(fragment, 0)
+    value = {
+        "diagnostics": marker,
+        "metadata": {"z": 1, "a": 2},
+        "status": "failed",
+    }
+
+    payload, digest = mncs_test._public_result_json_payload_with_raw_fragments(
+        value,
+        [(marker, fragment)],
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+    expected_value = {
+        "diagnostics": json.loads(fragment),
+        "metadata": {"a": 2, "z": 1},
+        "status": "failed",
+    }
+    expected = mncs_test.json_bytes(expected_value)
+    assert payload == expected
+    assert digest == mncs_test.sha256_bytes(expected)
+
+
+def test_compile_entry_falls_back_atomically_when_native_span_declines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     diagnostic = {
@@ -379,14 +396,14 @@ def test_compile_entry_falls_back_atomically_when_native_tokens_decline(
     }
     projection = {
         "supported": True,
-        "projection_supported": True,
+        "projection_supported": False,
         "root_is_object": False,
         "valid_field_present": False,
         "valid_field_is_true": False,
-        "diagnostics_json_present": True,
+        "diagnostics_json_present": False,
         "diagnostics_json_start": 0,
-        "diagnostics_json_length": len(document),
-        "diagnostic_count": 1,
+        "diagnostics_json_length": 0,
+        "diagnostic_count": 0,
         "verdict": "expected_failure",
     }
     monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
@@ -395,7 +412,6 @@ def test_compile_entry_falls_back_atomically_when_native_tokens_decline(
         "native_compile_diagnostic_document_result",
         lambda *args, **kwargs: projection,
     )
-    monkeypatch.setattr(mncs_test, "_native_public_result_token_stream", lambda *args, **kwargs: None)
 
     result = mncs_test.compile_entry(
         test={

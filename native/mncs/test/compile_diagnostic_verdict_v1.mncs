@@ -29,6 +29,8 @@ record CompileDiagnosticVerdictResultV1 {
     valid_field_present: bool,
     valid_field_is_true: bool,
     diagnostic_count: u64,
+    diagnostic_code_count: u64,
+    diagnostic_codes: [policy.DiagnosticCodeV1; up_to 32],
     diagnostics_json_present: bool,
     diagnostics_json_start: u64,
     diagnostics_json_length: u64,
@@ -83,7 +85,7 @@ fn request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,52];
+    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,53];
 }
 
 fn schema_is(value: [byte; up_to 64], expected: [byte; up_to 64]) -> (result: bool) {
@@ -129,22 +131,7 @@ fn empty_decoded_codes() -> (result: DiagnosticCodesV1) {
 }
 
 fn initial_json_scan() -> (result: json.ScanState) {
-    return json.ScanState {
-        stack: 0,
-        depth: 0,
-        expect: 0,
-        mode: 0,
-        number: 0,
-        literal: 0,
-        position: 0,
-        escape: false,
-        unicode: 0,
-        valid: true,
-        error: 0,
-        objects: 0,
-        arrays: 0,
-        strings: 0
-    };
+    return json.init();
 }
 
 fn initial_diagnostic_scan() -> (result: DiagnosticScanV1) {
@@ -630,6 +617,7 @@ fn result(
     supported: bool,
     verdict: [byte; up_to 64],
     projected: projection.DiagnosticProjectionV1,
+    codes: DiagnosticCodesV1,
     projection_supported: bool,
     root_is_object: bool,
     valid_field_present: bool,
@@ -637,6 +625,9 @@ fn result(
 ) -> (result: CompileDiagnosticVerdictResultV1) {
     let safe_projection: projection.DiagnosticProjectionV1 = select(
         projection_supported, projected, empty_projection()
+    );
+    let safe_codes: DiagnosticCodesV1 = select(
+        supported && codes.valid, codes, empty_decoded_codes()
     );
     return CompileDiagnosticVerdictResultV1 {
         schema_version: result_schema(),
@@ -646,6 +637,8 @@ fn result(
         valid_field_present: valid_field_present,
         valid_field_is_true: valid_field_is_true,
         diagnostic_count: safe_projection.count,
+        diagnostic_code_count: safe_codes.count,
+        diagnostic_codes: safe_codes.actual[0..safe_codes.count],
         diagnostics_json_present: safe_projection.diagnostics_json_present,
         diagnostics_json_start: safe_projection.diagnostics_json_start,
         diagnostics_json_length: safe_projection.diagnostics_json_length,
@@ -674,7 +667,7 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
         && shape.total == request.document.byte_length
         && request.document.byte_length <= 16384;
     let empty: CompileDiagnosticVerdictResultV1 = result(
-        false, [], empty_projection(), false, false, false, false
+        false, [], empty_projection(), empty_decoded_codes(), false, false, false, false
     );
     let scanned: DiagnosticScanV1 = scan_request(
         request_valid, request.document, request.expects_failure
@@ -719,7 +712,7 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
     );
     let projection_supported: bool = projected.supported && projected.count <= 32;
     let ready: CompileDiagnosticVerdictResultV1 = result(
-        true, decision.verdict, projected, projection_supported,
+        true, decision.verdict, projected, codes, projection_supported,
         scanned.root_is_object, scanned.valid_field_present,
         scanned.valid_field_is_true
     );

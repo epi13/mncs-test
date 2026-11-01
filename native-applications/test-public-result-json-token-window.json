@@ -5,11 +5,13 @@
   "module": "mncs.test.public_result_json_token_v1",
   "entry_function": "public_result_json_token_window_app_v1",
   "profile": "0.18",
-  "interface_identity": "94e159f9512cf07311a07b810cf43b4e8e78083a254c6bbff08383331ba54f0f",
+  "interface_identity": "a2bb9a0c0d3e7610b17a0aa6f09c328c20d9fe7a76dbf4ad81bf92ad59997262",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }
