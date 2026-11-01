@@ -149,6 +149,17 @@ diagnostic shape before publishing records. Unsupported shapes decline
 atomically to the Python compatibility parser, and the public result contract
 and diagnostic ordering stay unchanged.
 
+P-067 removes the fixed 32-record value tree from the native result and the
+matching Python reconstruction code. MNCS validates the standard diagnostic
+shape and returns the byte span of the selected `errors`, `diagnostics`, or
+root array in the original compiler document. Python decodes only that bounded
+validated span for the existing public dictionary contract; it no longer
+parses the complete compiler document on supported inputs or copies every field
+through a second fixed record representation. Unsupported shapes and native
+budget declines still use the compatibility parser. Differential checks cover
+Unicode, related diagnostics, empty arrays, no-array objects, and preservation
+of unsupported values through fallback.
+
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite
 result policy. Retained-session batches are projected into bounded cases and

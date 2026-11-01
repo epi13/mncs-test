@@ -52,7 +52,7 @@ def _document_result(document: bytes) -> dict:
     )
 
 
-def test_native_typed_records_match_independent_json_values() -> None:
+def test_native_diagnostic_span_matches_independent_json_values() -> None:
     diagnostics = [
         {
             "code": "MNE041",
@@ -119,7 +119,12 @@ def test_native_typed_records_match_independent_json_values() -> None:
     assert native["valid_field_present"] is True
     assert native["valid_field_is_true"] is False
     assert native["verdict"] == "expected_failure"
-    assert mncs_test.native_compile_diagnostic_records(native) == diagnostics
+    assert native["diagnostics_json_present"] is True
+    start = native["diagnostics_json_start"]
+    length = native["diagnostics_json_length"]
+    assert document[start:start + length].startswith(b"[")
+    assert document[start:start + length].endswith(b"]")
+    assert mncs_test.native_compile_diagnostic_records(native, document) == diagnostics
 
 
 def test_native_projection_accepts_empty_main_related_array() -> None:
@@ -139,7 +144,27 @@ def test_native_projection_accepts_empty_main_related_array() -> None:
 
     assert native is not None
     assert native["projection_supported"] is True
-    assert mncs_test.native_compile_diagnostic_records(native) == [diagnostic]
+    assert mncs_test.native_compile_diagnostic_records(native, document) == [diagnostic]
+
+
+def test_native_projection_without_a_diagnostic_array_returns_empty_list() -> None:
+    document = b'{"valid":true}'
+
+    native = mncs_test.native_compile_diagnostic_document_result(
+        document,
+        [],
+        compiler_exit_code=0,
+        expects_failure=False,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+    assert native is not None
+    assert native["projection_supported"] is True
+    assert native["diagnostics_json_present"] is False
+    assert native["diagnostic_count"] == 0
+    assert mncs_test.native_compile_diagnostic_records(native, document) == []
 
 
 @pytest.mark.parametrize(
@@ -193,7 +218,7 @@ def test_native_projection_declines_shapes_that_need_compatibility_fallback(
     )
 
 
-def test_compile_entry_uses_native_records_without_parsing_raw_compiler_json(
+def test_compile_entry_decodes_only_native_diagnostic_span(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

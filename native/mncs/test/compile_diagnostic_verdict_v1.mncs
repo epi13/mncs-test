@@ -1,8 +1,8 @@
 mncs 0.18;
 
 // Project bounded compiler diagnostics in MNCS. The cursor scan validates the
-// document and derives the compile verdict; a bounded cursor pass then projects
-// standard diagnostic fields directly into typed records for Test output.
+// document and derives the compile verdict; a bounded cursor pass then selects
+// the validated diagnostic-array source span for Test's public result.
 module mncs.test.compile_diagnostic_verdict_v1;
 
 use mncs.std.application.v1;
@@ -29,7 +29,9 @@ record CompileDiagnosticVerdictResultV1 {
     valid_field_present: bool,
     valid_field_is_true: bool,
     diagnostic_count: u64,
-    diagnostics: [projection.DiagnosticRecordV1; 32],
+    diagnostics_json_present: bool,
+    diagnostics_json_start: u64,
+    diagnostics_json_length: u64,
     verdict: [byte; up_to 64]
 }
 
@@ -81,7 +83,7 @@ fn request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,51];
+    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,52];
 }
 
 fn schema_is(value: [byte; up_to 64], expected: [byte; up_to 64]) -> (result: bool) {
@@ -641,7 +643,9 @@ fn result(
         valid_field_present: safe_projection.valid_field_present,
         valid_field_is_true: safe_projection.valid_field_is_true,
         diagnostic_count: safe_projection.count,
-        diagnostics: safe_projection.records,
+        diagnostics_json_present: safe_projection.diagnostics_json_present,
+        diagnostics_json_start: safe_projection.diagnostics_json_start,
+        diagnostics_json_length: safe_projection.diagnostics_json_length,
         verdict: verdict
     };
 }

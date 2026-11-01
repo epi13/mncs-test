@@ -138,7 +138,7 @@ VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
 COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-diagnostic-verdict-request/1"
-COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/3"
+COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/4"
 COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 16_384
 COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES = 16
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
@@ -1803,97 +1803,6 @@ def diagnostic_list(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _validate_native_diagnostic_record(item: Any, *, nested: bool = False) -> None:
-    if not isinstance(item, dict):
-        raise AdapterError("MNCS compiler diagnostic app returned a non-record diagnostic")
-    text_fields = ("code", "stage", "severity", "message")
-    numeric_fields = ("span_start", "span_end", "span_line", "span_column")
-    if any(not isinstance(item.get(field), str) for field in text_fields):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed diagnostic text")
-    if any(type(item.get(field)) is not int for field in numeric_fields):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed diagnostic span")
-    expected_count = item.get("expected_count")
-    expected_values = item.get("expected_values")
-    if (
-        type(expected_count) is not int
-        or not 0 <= expected_count <= 8
-        or not isinstance(expected_values, list)
-        or len(expected_values) != 8
-        or any(not isinstance(value, str) for value in expected_values[:expected_count])
-    ):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed expected values")
-    if (
-        type(item.get("found_kind")) is not int
-        or item["found_kind"] not in {1, 2, 3, 4}
-        or type(item.get("found_negative")) is not bool
-        or type(item.get("found_magnitude")) is not int
-        or type(item.get("found_boolean")) is not bool
-    ):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed found value")
-    if item["found_kind"] == 2 and not isinstance(item.get("found_text"), str):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed found string")
-    related_present = item.get("related_field_present")
-    if type(related_present) is not bool:
-        raise AdapterError("MNCS compiler diagnostic app returned malformed related metadata")
-    if nested:
-        if "related_count" in item or "related" in item:
-            raise AdapterError("MNCS compiler diagnostic app returned malformed nested related records")
-        return
-    related_count = item.get("related_count")
-    related = item.get("related")
-    if (
-        type(related_count) is not int
-        or not 0 <= related_count <= 4
-        or not isinstance(related, list)
-        or len(related) != 4
-        or (related_count > 0 and not related_present)
-        or (not related_present and related_count != 0)
-    ):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed related records")
-    for child in related[:related_count]:
-        _validate_native_diagnostic_record(child, nested=True)
-
-
-def _native_diagnostic_found(item: dict[str, Any]) -> Any:
-    found_kind = item["found_kind"]
-    if found_kind == 1:
-        return None
-    if found_kind == 2:
-        return item["found_text"]
-    if found_kind == 3:
-        return item["found_boolean"]
-    if found_kind == 4:
-        magnitude = item["found_magnitude"]
-        return -magnitude if item["found_negative"] else magnitude
-    raise AdapterError("native compile diagnostic projection returned an unknown value kind")
-
-
-def _native_diagnostic_record(item: dict[str, Any]) -> dict[str, Any]:
-    result = {
-        "code": item["code"],
-        "stage": item["stage"],
-        "severity": item["severity"],
-        "message": item["message"],
-        "span": {
-            "start": item["span_start"],
-            "end": item["span_end"],
-            "line": item["span_line"],
-            "column": item["span_column"],
-        },
-        "expected": item["expected_values"][:item["expected_count"]],
-        "found": _native_diagnostic_found(item),
-    }
-    if "related_count" in item and item["related_field_present"]:
-        related_count = item["related_count"]
-        result["related"] = [
-            _native_diagnostic_record(related)
-            for related in item["related"][:related_count]
-        ]
-    elif item["related_field_present"]:
-        result["related"] = []
-    return result
-
-
 def native_compile_diagnostic_document_result(
     document: bytes,
     expected: list[str],
@@ -1908,8 +1817,9 @@ def native_compile_diagnostic_document_result(
 
     ``None`` selects the established code-list adapter when the source document,
     expected prefix list, or native execution budget is outside this app's
-    bounds. A supported result also carries bounded typed diagnostics so the
-    normal compiler-result path does not build a Python tree from raw stdout.
+    bounds. A supported result carries the bounded diagnostic-array span
+    selected by MNCS, so the normal compiler-result path does not build a
+    Python tree from raw stdout.
     """
     if type(compiler_exit_code) is not int or type(expects_failure) is not bool:
         raise AdapterError("compiler result metadata is malformed")
@@ -1978,20 +1888,40 @@ def native_compile_diagnostic_document_result(
     valid_field_present = result.get("valid_field_present")
     valid_field_is_true = result.get("valid_field_is_true")
     diagnostic_count = result.get("diagnostic_count")
-    diagnostics = result.get("diagnostics")
+    diagnostics_json_present = result.get("diagnostics_json_present")
+    diagnostics_json_start = result.get("diagnostics_json_start")
+    diagnostics_json_length = result.get("diagnostics_json_length")
     if any(type(value) is not bool for value in (
         projection_supported, root_is_object, valid_field_present, valid_field_is_true,
+        diagnostics_json_present,
     )):
         raise AdapterError("MNCS compiler diagnostic app returned malformed projection metadata")
-    if type(diagnostic_count) is not int or not isinstance(diagnostics, list):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed diagnostic records")
-    if not 0 <= diagnostic_count <= 32 or len(diagnostics) != 32:
+    if (
+        type(diagnostic_count) is not int
+        or type(diagnostics_json_start) is not int
+        or type(diagnostics_json_length) is not int
+        or not 0 <= diagnostic_count <= 32
+        or diagnostics_json_start < 0
+        or diagnostics_json_length < 0
+    ):
         raise AdapterError("MNCS compiler diagnostic app returned an invalid diagnostic count")
     if projection_supported:
-        for item in diagnostics[:diagnostic_count]:
-            _validate_native_diagnostic_record(item)
-    elif diagnostic_count != 0:
-        raise AdapterError("MNCS compiler diagnostic app exposed partial unsupported records")
+        if diagnostics_json_present:
+            if (
+                diagnostics_json_length < 2
+                or diagnostics_json_start > len(document)
+                or diagnostics_json_length > len(document) - diagnostics_json_start
+            ):
+                raise AdapterError("MNCS compiler diagnostic app returned an out-of-bounds JSON span")
+        elif diagnostic_count != 0 or diagnostics_json_start != 0 or diagnostics_json_length != 0:
+            raise AdapterError("MNCS compiler diagnostic app omitted its supported JSON span")
+    elif (
+        diagnostic_count != 0
+        or diagnostics_json_present
+        or diagnostics_json_start != 0
+        or diagnostics_json_length != 0
+    ):
+        raise AdapterError("MNCS compiler diagnostic app exposed a partial unsupported span")
     verdict = result.get("verdict")
     if not isinstance(verdict, str) or verdict not in {
         "compile_pass", "expected_failure", "compile_expectation_mismatch",
@@ -2026,19 +1956,46 @@ def native_compile_diagnostic_document_verdict(
     return result["verdict"]
 
 
-def native_compile_diagnostic_records(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Rebuild public diagnostic dictionaries from native typed records."""
+def native_compile_diagnostic_records(
+    result: dict[str, Any], document: bytes,
+) -> list[dict[str, Any]]:
+    """Decode only the diagnostic JSON span selected and validated in MNCS."""
     if result.get("projection_supported") is not True:
         raise AdapterError("native compile diagnostic projection is unavailable")
-    diagnostics = result.get("diagnostics")
     count = result.get("diagnostic_count")
-    if type(count) is not int or not isinstance(diagnostics, list) or not 0 <= count <= 32:
-        raise AdapterError("native compile diagnostic projection returned malformed records")
-    if len(diagnostics) != 32:
-        raise AdapterError("native compile diagnostic projection returned a malformed record array")
-    for item in diagnostics[:count]:
-        _validate_native_diagnostic_record(item)
-    return [_native_diagnostic_record(item) for item in diagnostics[:count]]
+    present = result.get("diagnostics_json_present")
+    start = result.get("diagnostics_json_start")
+    length = result.get("diagnostics_json_length")
+    if (
+        not isinstance(document, bytes)
+        or type(count) is not int
+        or not 0 <= count <= 32
+        or type(present) is not bool
+        or type(start) is not int
+        or type(length) is not int
+        or start < 0
+        or length < 0
+    ):
+        raise AdapterError("native compile diagnostic projection returned malformed span metadata")
+    if present:
+        if length < 2 or start > len(document) or length > len(document) - start:
+            raise AdapterError("native compile diagnostic projection returned an invalid JSON span")
+        encoded = document[start:start + length]
+    else:
+        if count != 0 or start != 0 or length != 0:
+            raise AdapterError("native compile diagnostic projection omitted its JSON span")
+        encoded = b"[]"
+    try:
+        diagnostics = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("MNCS selected a malformed compiler diagnostic JSON span") from error
+    if (
+        not isinstance(diagnostics, list)
+        or len(diagnostics) != count
+        or any(not isinstance(item, dict) for item in diagnostics)
+    ):
+        raise AdapterError("MNCS compiler diagnostic JSON span disagrees with its count")
+    return diagnostics
 
 
 def native_compile_verdict(
@@ -6614,7 +6571,7 @@ def compile_entry(
         environment=environment,
     )
     if native_result is not None and native_result.get("projection_supported") is True:
-        diagnostics = native_compile_diagnostic_records(native_result)
+        diagnostics = native_compile_diagnostic_records(native_result, process["stdout"])
         compiler_result_is_object = native_result["root_is_object"]
         valid_field_present = native_result["valid_field_present"]
         valid_field_is_true = native_result["valid_field_is_true"]

@@ -76,7 +76,9 @@ record DiagnosticProjectionV1 {
     root_is_object: bool,
     valid_field_present: bool,
     valid_field_is_true: bool,
-    records: [DiagnosticRecordV1; 32],
+    diagnostics_json_present: bool,
+    diagnostics_json_start: u64,
+    diagnostics_json_length: u64,
     count: u64
 }
 
@@ -137,7 +139,9 @@ fn empty_projection() -> (result: DiagnosticProjectionV1) {
         root_is_object: false,
         valid_field_present: false,
         valid_field_is_true: false,
-        records: [empty_diagnostic(); 32],
+        diagnostics_json_present: false,
+        diagnostics_json_start: 0,
+        diagnostics_json_length: 0,
         count: 0
     };
 }
@@ -300,7 +304,9 @@ fn select_diagnostic_array(state: ProjectionScanV1, kind: byte) -> (result: Proj
         selected_kind: kind,
         projection: DiagnosticProjectionV1 {
             ..state.projection,
-            records: [empty_diagnostic(); 32],
+            diagnostics_json_present: false,
+            diagnostics_json_start: 0,
+            diagnostics_json_length: 0,
             count: 0
         }
     };
@@ -501,6 +507,22 @@ fn container_related_owner(state: ProjectionScanV1, parent_depth: u64) -> (resul
     return parent.role == 4 || parent.role == 7 || parent.related_owner;
 }
 
+fn begin_diagnostics_span(
+    projection: DiagnosticProjectionV1,
+    role: byte,
+    opening_position: u64
+) -> (result: DiagnosticProjectionV1) {
+    if role == 2 {
+        return DiagnosticProjectionV1 {
+            ..projection,
+            diagnostics_json_present: true,
+            diagnostics_json_start: opening_position,
+            diagnostics_json_length: 0
+        };
+    }
+    return projection;
+}
+
 fn push_container(
     state: ProjectionScanV1,
     parent_depth: u64,
@@ -519,7 +541,12 @@ fn push_container(
     };
     return ProjectionScanV1 {
         ..state,
-        frames: replace(state.frames, parent_depth, frame)
+        frames: replace(state.frames, parent_depth, frame),
+        projection: begin_diagnostics_span(
+            state.projection,
+            frame.role,
+            state.cursor.position -% 1
+        )
     };
 }
 
@@ -897,14 +924,10 @@ fn append_main_diagnostic(
     if !valid || state.projection.count >= 32 {
         return ProjectionScanV1 { ..state, supported: false };
     }
-    let diagnostic: DiagnosticRecordV1 = DiagnosticRecordV1 {
-        ..state.current, valid: true
-    };
     return ProjectionScanV1 {
         ..state,
         projection: DiagnosticProjectionV1 {
             ..state.projection,
-            records: replace(state.projection.records, state.projection.count, diagnostic),
             count: state.projection.count +% 1
         },
         current: empty_diagnostic()
@@ -979,7 +1002,13 @@ fn close_frame(
     }
     if event == 8 && frame.role == 2 {
         return ProjectionScanV1 {
-            ..state, supported: state.supported && frame.member_count <= 64
+            ..state,
+            projection: DiagnosticProjectionV1 {
+                ..state.projection,
+                diagnostics_json_length: state.cursor.position
+                    -% state.projection.diagnostics_json_start
+            },
+            supported: state.supported && frame.member_count <= 64
         };
     }
     return state;
@@ -1068,10 +1097,20 @@ fn projection_is_valid(
     document: json_order.JsonTokenDocumentV1
 ) -> (result: bool) {
     let syntax: json.ScanState = json.scan_finish_end(scanned.syntax);
+    let span_in_bounds: bool = scanned.projection.diagnostics_json_present
+        && scanned.projection.diagnostics_json_length >= 2
+        && scanned.projection.diagnostics_json_start <= document.byte_length
+        && scanned.projection.diagnostics_json_length
+            <= document.byte_length -% scanned.projection.diagnostics_json_start;
+    let span_valid: bool = select(
+        scanned.selected_kind == 0,
+        !scanned.projection.diagnostics_json_present && scanned.projection.count == 0,
+        span_in_bounds
+    );
     return scanned.supported && syntax.valid && syntax.depth == 0
         && syntax.mode == 0 && syntax.expect == 7
         && json_cursor.is_valid(scanned.cursor)
-        && scanned.cursor.position == document.byte_length;
+        && scanned.cursor.position == document.byte_length && span_valid;
 }
 
 fn project(
