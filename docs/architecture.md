@@ -118,16 +118,18 @@ compile-pass, compile-fail, and diagnostic entries. The host adapter carries
 the raw process exit code and bounded structured compiler fields, then maps the
 native verdict into the established result envelope.
 
-P-062 moves the compile-verdict diagnostic-code projection into the native
-`mncs.test.compile_diagnostic_verdict_v1` application. Python sends the raw
-compiler JSON in bounded UTF-8 chunks; MNCS parses it with the existing Test
-JSON document parser, selects root-array, `errors`, or `diagnostics` entries,
-and collects up to 32 object `code` strings before applying the shared compile
-verdict policy. Documents are capped at 16,384 bytes; at most 16 expected
-prefixes of 512 UTF-8 bytes each are admitted. Incomplete object scans, unsupported code values, and over-bound inputs
-return to the established compatibility adapter. Python still decodes detailed
-diagnostics for the public TestResult contract, while it no longer builds a
-second host list of diagnostic codes for ordinary bounded verdicts.
+P-062 moved the compile-verdict diagnostic-code projection into the native
+`mncs.test.compile_diagnostic_verdict_v1` application. P-063 replaces its Test
+JSON value-tree projection with a bounded stream over Stdlib
+`json_cursor.v1` events, validated in parallel by `json.v1`. MNCS selects
+root-array, `errors`, or `diagnostics` entries and retains up to 32 object
+`code` strings before applying the shared compile-verdict policy. It does not
+construct a `JsonValueV1` tree. Documents are capped at 16,384 bytes; at most
+16 expected prefixes of 512 UTF-8 bytes each are admitted. Incomplete scans,
+unsupported code shapes, and over-bound inputs return to the established
+compatibility adapter. Python still decodes detailed diagnostics for the
+public TestResult contract, while it no longer builds a second host list of
+diagnostic codes for ordinary bounded verdicts.
 
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite

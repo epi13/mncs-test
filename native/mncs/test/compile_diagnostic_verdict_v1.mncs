@@ -1,11 +1,13 @@
 mncs 0.18;
 
-// Project the compiler's bounded JSON diagnostic document and apply the
-// existing Test-owned compile verdict policy without a host diagnostic-code
-// tree or a second typed request round trip.
+// Project bounded compiler diagnostics directly from Stdlib JSON cursor events.
+// The full JSON recognizer validates separators and scalar grammar; the cursor
+// validates string escapes/UTF-8 and exposes spans. No JsonValue tree is built.
 module mncs.test.compile_diagnostic_verdict_v1;
 
 use mncs.std.application.v1;
+use mncs.std.json.v1 as json;
+use mncs.std.json_cursor.v1 as json_cursor;
 use mncs.test.compile_verdict_v1 as policy;
 use mncs.test.public_result_json_key_order_v1 as json_order;
 
@@ -24,15 +26,47 @@ record CompileDiagnosticVerdictResultV1 {
     verdict: [byte; up_to 64]
 }
 
-record FieldValueV1 { found: bool, value: json_order.JsonValueV1, complete: bool }
-record FieldSearchStateV1 { remaining: json_order.JsonValueV1, field: FieldValueV1 }
-record CodeReadV1 { value: policy.DiagnosticCodeV1, valid: bool }
+record DiagnosticFrameV1 {
+    kind: byte,
+    role: byte,
+    key: byte,
+    field_count: u64,
+    member_count: u64,
+    code_seen: bool,
+    code_start: u64,
+    code_length: u64
+}
+
+record DiagnosticSpanV1 {
+    start: u64,
+    length: u64
+}
+
 record DiagnosticCodesV1 {
-    remaining: json_order.JsonValueV1,
     actual: [policy.DiagnosticCodeV1; 32],
     count: u64,
-    valid: bool,
-    complete: bool
+    valid: bool
+}
+
+record DiagnosticScanV1 {
+    cursor: json_cursor.Cursor,
+    syntax: json.ScanState,
+    frames: [DiagnosticFrameV1; 12],
+    root_is_object: bool,
+    valid_field_present: bool,
+    valid_field_is_true: bool,
+    valid_seen: bool,
+    errors_seen: bool,
+    diagnostics_seen: bool,
+    selection: byte,
+    actual_spans: [DiagnosticSpanV1; 32],
+    actual_count: u64,
+    codes_valid: bool,
+    value_count: u64,
+    valid_scalar_active: bool,
+    valid_scalar_match: bool,
+    valid_scalar_length: u64,
+    supported: bool
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
@@ -51,367 +85,536 @@ fn schema_is(value: [byte; up_to 64], expected: [byte; up_to 64]) -> (result: bo
     return same;
 }
 
-fn code_key() -> (result: [byte; up_to 256]) { return [99,111,100,101]; }
-fn errors_key() -> (result: [byte; up_to 256]) { return [101,114,114,111,114,115]; }
-fn diagnostics_key() -> (result: [byte; up_to 256]) { return [100,105,97,103,110,111,115,116,105,99,115]; }
-fn valid_key() -> (result: [byte; up_to 256]) { return [118,97,108,105,100]; }
+fn code_key() -> (result: [byte; up_to 32]) { return [99,111,100,101]; }
+fn errors_key() -> (result: [byte; up_to 32]) { return [101,114,114,111,114,115]; }
+fn diagnostics_key() -> (result: [byte; up_to 32]) { return [100,105,97,103,110,111,115,116,105,99,115]; }
+fn valid_key() -> (result: [byte; up_to 32]) { return [118,97,108,105,100]; }
 
-fn selected_diagnostic_value(
-    root: json_order.JsonValueV1,
-    root_fields: json_order.JsonValueV1,
-    errors_value: FieldValueV1
-) -> (result: FieldValueV1) {
-    if is_array(root) { return FieldValueV1 { found: true, value: root, complete: true }; }
-    if errors_value.found && is_array(errors_value.value) { return errors_value; }
-    return find_field(root_fields, diagnostics_key());
+fn empty_code() -> (result: policy.DiagnosticCodeV1) {
+    return policy.DiagnosticCodeV1 { value: [] };
 }
 
-fn empty_code_state() -> (result: DiagnosticCodesV1) {
-    return DiagnosticCodesV1 {
-        remaining: json_order.JsonValueV1.ArrayNil,
-        actual: [empty_code(); 32],
-        count: 0,
-        valid: true,
-        complete: true
+fn empty_frame() -> (result: DiagnosticFrameV1) {
+    return DiagnosticFrameV1 {
+        kind: 0,
+        role: 0,
+        key: 0,
+        field_count: 0,
+        member_count: 0,
+        code_seen: false,
+        code_start: 0,
+        code_length: 0
     };
 }
 
-fn codes_for_selected_value(
-    expects_failure: bool,
-    selected_value: FieldValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: DiagnosticCodesV1) {
-    if !selected_value.complete { return DiagnosticCodesV1 { ..empty_code_state(), valid: false }; }
-    if expects_failure && is_array(selected_value.value) {
-        return collect_codes(array_items(selected_value.value), document);
-    }
-    return empty_code_state();
+fn empty_span() -> (result: DiagnosticSpanV1) {
+    return DiagnosticSpanV1 { start: 0, length: 0 };
 }
 
-fn same_key(key: json_order.KeyV1, expected: [byte; up_to 256]) -> (result: bool) {
-    if key.ordered_length != expected.len { return false; }
+fn empty_decoded_codes() -> (result: DiagnosticCodesV1) {
+    return DiagnosticCodesV1 {
+        actual: [empty_code(); 32],
+        count: 0,
+        valid: true
+    };
+}
+
+fn initial_json_scan() -> (result: json.ScanState) {
+    return json.ScanState {
+        stack: 0,
+        depth: 0,
+        expect: 0,
+        mode: 0,
+        number: 0,
+        literal: 0,
+        position: 0,
+        escape: false,
+        unicode: 0,
+        valid: true,
+        error: 0,
+        objects: 0,
+        arrays: 0,
+        strings: 0
+    };
+}
+
+fn initial_diagnostic_scan() -> (result: DiagnosticScanV1) {
+    return DiagnosticScanV1 {
+        cursor: json_cursor.init(),
+        syntax: initial_json_scan(),
+        frames: [empty_frame(); 12],
+        root_is_object: false,
+        valid_field_present: false,
+        valid_field_is_true: false,
+        valid_seen: false,
+        errors_seen: false,
+        diagnostics_seen: false,
+        selection: 0,
+        actual_spans: [empty_span(); 32],
+        actual_count: 0,
+        codes_valid: true,
+        value_count: 0,
+        valid_scalar_active: false,
+        valid_scalar_match: false,
+        valid_scalar_length: 0,
+        supported: true
+    };
+}
+
+fn same_key(cursor: json_cursor.Cursor, expected: [byte; up_to 32]) -> (result: bool) {
+    if cursor.key_length != expected.len { return false; }
     iterate i over expected carrying same: bool = true {
-        next same = same && key.ordered[i] == expected[i];
+        next same = same && cursor.key[i] == expected[i];
     }
     return same;
 }
 
-fn absent_field() -> (result: FieldValueV1) {
-    return FieldValueV1 { found: false, value: json_order.JsonValueV1.Empty, complete: true };
+fn key_span_is_plain(cursor: json_cursor.Cursor) -> (result: bool) {
+    let raw_length: u64 = cursor.string_end -% cursor.string_start;
+    if cursor.key_length >= 32 { return true; }
+    return raw_length == cursor.key_length;
 }
 
-fn incomplete_field() -> (result: FieldValueV1) {
-    return FieldValueV1 { found: false, value: json_order.JsonValueV1.Empty, complete: false };
+fn root_key_tag(cursor: json_cursor.Cursor) -> (result: byte) {
+    if same_key(cursor, valid_key()) { return 1; }
+    if same_key(cursor, errors_key()) { return 2; }
+    if same_key(cursor, diagnostics_key()) { return 3; }
+    return 0;
 }
 
-fn field_search_cons(
-    key: json_order.KeyV1,
-    value: json_order.JsonValueV1,
-    tail: json_order.JsonValueV1,
-    expected: [byte; up_to 256],
-    prior: FieldValueV1
-) -> (result: FieldSearchStateV1) {
-    if same_key(key, expected) {
-        return FieldSearchStateV1 {
-            remaining: json_order.JsonValueV1.ObjectNil,
-            field: FieldValueV1 { found: true, value: value, complete: true }
+fn diagnostic_key_tag(cursor: json_cursor.Cursor) -> (result: byte) {
+    if same_key(cursor, code_key()) { return 4; }
+    return 0;
+}
+
+fn empty_codes(state: DiagnosticScanV1, selection: byte) -> (result: DiagnosticScanV1) {
+    return DiagnosticScanV1 {
+        ..state,
+        selection: selection,
+        actual_spans: [empty_span(); 32],
+        actual_count: 0,
+        codes_valid: true
+    };
+}
+
+fn is_selected_array(role: byte, selection: byte) -> (result: bool) {
+    return (role == 2 && selection == 1)
+        || (role == 4 && selection == 2)
+        || (role == 3 && selection == 3);
+}
+
+fn true_byte(index: u64) -> (result: byte) {
+    if index == 0 { return 116; }
+    if index == 1 { return 114; }
+    if index == 2 { return 117; }
+    if index == 3 { return 101; }
+    return 0;
+}
+
+fn scalar_boundary(value: byte) -> (result: bool) {
+    return json.is_space(value) || value == 44 || value == 93 || value == 125;
+}
+
+fn finish_valid_scalar(state: DiagnosticScanV1) -> (result: DiagnosticScanV1) {
+    return DiagnosticScanV1 {
+        ..state,
+        valid_scalar_active: false,
+        valid_field_is_true: state.valid_scalar_match && state.valid_scalar_length == 4
+    };
+}
+
+fn valid_scalar_step(state: DiagnosticScanV1, value: byte) -> (result: DiagnosticScanV1) {
+    let expected: byte = true_byte(state.valid_scalar_length);
+    return DiagnosticScanV1 {
+        ..state,
+        valid_scalar_match: state.valid_scalar_match
+            && state.valid_scalar_length < 4
+            && value == expected,
+        valid_scalar_length: state.valid_scalar_length +% 1
+    };
+}
+
+fn begins_value(state: DiagnosticScanV1, value: byte) -> (result: bool) {
+    let expected: bool = state.syntax.expect == 0
+        || state.syntax.expect == 3
+        || state.syntax.expect == 5;
+    return state.syntax.mode == 0 && expected && !json.is_space(value);
+}
+
+fn begin_value(
+    state: DiagnosticScanV1,
+    value: byte,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    if !begins_value(state, value) { return state; }
+    let next_count: u64 = state.value_count +% 1;
+    let root_value: bool = state.syntax.expect == 0;
+    let root_object: bool = root_value && value == 123;
+    let entered_root_array: bool = root_value && value == 91;
+    let counted: DiagnosticScanV1 = DiagnosticScanV1 {
+        ..state,
+        root_is_object: state.root_is_object || root_object,
+        value_count: next_count,
+        supported: state.supported && next_count <= 1024
+    };
+    let selected_root: DiagnosticScanV1 = select(
+        entered_root_array,
+        empty_codes(counted, 1),
+        counted
+    );
+    if selected_root.cursor.depth == 0 { return selected_root; }
+    let parent_index: u64 = (selected_root.cursor.depth as u64) -% 1;
+    let parent: DiagnosticFrameV1 = selected_root.frames[parent_index];
+    if parent.kind == 1 {
+        let next_fields: u64 = parent.field_count +% 1;
+        let fields_valid: bool = parent.role != 1 || next_fields <= 32;
+        let codes_fields_valid: bool = parent.role != 5 || next_fields <= 32;
+        let updated_parent: DiagnosticFrameV1 = DiagnosticFrameV1 {
+            ..parent,
+            field_count: next_fields
+        };
+        let counted_fields: DiagnosticScanV1 = DiagnosticScanV1 {
+            ..selected_root,
+            frames: replace(selected_root.frames, parent_index, updated_parent),
+            supported: selected_root.supported && fields_valid,
+            codes_valid: selected_root.codes_valid && codes_fields_valid
+        };
+        if parent.role == 1 && parent.key == 1 {
+            let base: DiagnosticScanV1 = DiagnosticScanV1 {
+                ..counted_fields,
+                valid_field_present: true,
+                valid_field_is_true: false,
+                valid_scalar_active: false,
+                valid_scalar_match: false,
+                valid_scalar_length: 0
+            };
+            if value == 34 || value == 123 || value == 91 { return base; }
+            let started: DiagnosticScanV1 = DiagnosticScanV1 {
+                ..base,
+                valid_scalar_active: true,
+                valid_scalar_match: true
+            };
+            return valid_scalar_step(started, value);
+        }
+        if parent.role == 1 && value == 91 {
+            if parent.key == 2 { return empty_codes(counted_fields, 3); }
+            if parent.key == 3 && counted_fields.selection == 0 {
+                return empty_codes(counted_fields, 2);
+            }
+        }
+        if parent.role == 5 && expects_failure && parent.key == 4 && value != 34 {
+            return DiagnosticScanV1 { ..counted_fields, codes_valid: false };
+        }
+        return counted_fields;
+    }
+    if parent.kind == 2 && expects_failure
+        && selected_root.syntax.expect == 5
+        && is_selected_array(parent.role, selected_root.selection) {
+        let next_members: u64 = parent.member_count +% 1;
+        let updated_parent: DiagnosticFrameV1 = DiagnosticFrameV1 {
+            ..parent,
+            member_count: next_members
+        };
+        return DiagnosticScanV1 {
+            ..selected_root,
+            frames: replace(selected_root.frames, parent_index, updated_parent),
+            codes_valid: selected_root.codes_valid && next_members <= 32
         };
     }
-    return FieldSearchStateV1 { remaining: tail, field: prior };
+    return selected_root;
 }
 
-fn field_search_step(
-    search: FieldSearchStateV1,
-    expected: [byte; up_to 256]
-) -> (result: FieldSearchStateV1) {
-    if search.field.found || search.field.complete { return search; }
-    return match search.remaining {
-        ObjectCons { key: key, value: value, tail: tail } => field_search_cons(key, value, tail, expected, search.field),
-        ObjectNil => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Empty => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Null => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Raw { start: start, length: length } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        String { start: start, length: length } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Boolean { value: flag } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Integer { negative: negative, magnitude: magnitude } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Utf8String { start: start, length: length } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Array { items: items } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        Object { fields: nested } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        ArrayNil => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() },
-        ArrayCons { head: head, tail: tail } => FieldSearchStateV1 { remaining: json_order.JsonValueV1.ObjectNil, field: absent_field() }
-    };
-}
-
-fn find_field(
-    fields: json_order.JsonValueV1,
-    expected: [byte; up_to 256]
-) -> (result: FieldValueV1) {
-    let initial: FieldSearchStateV1 = FieldSearchStateV1 { remaining: fields, field: incomplete_field() };
-    iterate i up_to 32 carrying search: FieldSearchStateV1 = initial {
-        next search = field_search_step(search, expected);
+fn container_role(
+    state: DiagnosticScanV1,
+    parent_depth: u64,
+    value: byte,
+    expects_failure: bool
+) -> (result: byte) {
+    if parent_depth == 0 {
+        if value == 123 { return 1; }
+        if value == 91 { return 2; }
+        return 0;
     }
-    if search.field.found || search.field.complete { return search.field; }
-    return FieldValueV1 {
-        ..search.field,
-        complete: json_order.is_object_nil(search.remaining)
-    };
-}
-
-fn empty_code() -> (result: policy.DiagnosticCodeV1) {
-    return policy.DiagnosticCodeV1 { value: [0; 0] };
-}
-
-fn read_code_span(
-    document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64
-) -> (result: CodeReadV1) {
-    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(document, start, length);
-    return CodeReadV1 {
-        value: policy.DiagnosticCodeV1 { value: decoded.bytes },
-        valid: decoded.valid
-    };
-}
-
-fn read_code(
-    value: json_order.JsonValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: CodeReadV1) {
-    return match value {
-        String { start: start, length: length } => read_code_span(document, start, length),
-        Empty => CodeReadV1 { value: empty_code(), valid: true },
-        Null => CodeReadV1 { value: empty_code(), valid: false },
-        Raw { start: start, length: length } => CodeReadV1 { value: empty_code(), valid: false },
-        Boolean { value: flag } => CodeReadV1 { value: empty_code(), valid: false },
-        Integer { negative: negative, magnitude: magnitude } => CodeReadV1 { value: empty_code(), valid: false },
-        Utf8String { start: start, length: length } => CodeReadV1 { value: empty_code(), valid: false },
-        Array { items: items } => CodeReadV1 { value: empty_code(), valid: false },
-        Object { fields: fields } => CodeReadV1 { value: empty_code(), valid: false },
-        ArrayNil => CodeReadV1 { value: empty_code(), valid: false },
-        ArrayCons { head: head, tail: tail } => CodeReadV1 { value: empty_code(), valid: false },
-        ObjectNil => CodeReadV1 { value: empty_code(), valid: false },
-        ObjectCons { key: key, value: nested, tail: tail } => CodeReadV1 { value: empty_code(), valid: false }
-    };
-}
-
-fn diagnostic_code(
-    value: json_order.JsonValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: CodeReadV1) {
-    return match value {
-        Object { fields: fields } => diagnostic_code_fields(fields, document),
-        Empty => CodeReadV1 { value: empty_code(), valid: false },
-        Null => CodeReadV1 { value: empty_code(), valid: false },
-        Raw { start: start, length: length } => CodeReadV1 { value: empty_code(), valid: false },
-        String { start: start, length: length } => CodeReadV1 { value: empty_code(), valid: false },
-        Boolean { value: flag } => CodeReadV1 { value: empty_code(), valid: false },
-        Integer { negative: negative, magnitude: magnitude } => CodeReadV1 { value: empty_code(), valid: false },
-        Utf8String { start: start, length: length } => CodeReadV1 { value: empty_code(), valid: false },
-        Array { items: items } => CodeReadV1 { value: empty_code(), valid: false },
-        ArrayNil => CodeReadV1 { value: empty_code(), valid: false },
-        ArrayCons { head: head, tail: tail } => CodeReadV1 { value: empty_code(), valid: false },
-        ObjectNil => CodeReadV1 { value: empty_code(), valid: false },
-        ObjectCons { key: key, value: nested, tail: tail } => CodeReadV1 { value: empty_code(), valid: false }
-    };
-}
-
-fn diagnostic_code_fields(
-    fields: json_order.JsonValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: CodeReadV1) {
-    let code: FieldValueV1 = find_field(fields, code_key());
-    if !code.complete { return CodeReadV1 { value: empty_code(), valid: false }; }
-    if code.found { return read_code(code.value, document); }
-    return CodeReadV1 { value: empty_code(), valid: true };
-}
-
-fn empty_codes(remaining: json_order.JsonValueV1) -> (result: DiagnosticCodesV1) {
-    return DiagnosticCodesV1 {
-        remaining: remaining,
-        actual: [empty_code(); 32],
-        count: 0,
-        valid: true,
-        complete: false
-    };
-}
-
-fn is_object(value: json_order.JsonValueV1) -> (result: bool) {
-    return match value {
-        Object { fields: fields } => true,
-        Empty => false,
-        Null => false,
-        Raw { start: start, length: length } => false,
-        String { start: start, length: length } => false,
-        Boolean { value: flag } => false,
-        Integer { negative: negative, magnitude: magnitude } => false,
-        Utf8String { start: start, length: length } => false,
-        Array { items: items } => false,
-        ArrayNil => false,
-        ArrayCons { head: head, tail: tail } => false,
-        ObjectNil => false,
-        ObjectCons { key: key, value: nested, tail: tail } => false
-    };
-}
-
-fn object_fields(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
-    return match value {
-        Object { fields: fields } => fields,
-        Empty => json_order.JsonValueV1.Empty,
-        Null => json_order.JsonValueV1.Empty,
-        Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
-        String { start: start, length: length } => json_order.JsonValueV1.Empty,
-        Boolean { value: flag } => json_order.JsonValueV1.Empty,
-        Integer { negative: negative, magnitude: magnitude } => json_order.JsonValueV1.Empty,
-        Utf8String { start: start, length: length } => json_order.JsonValueV1.Empty,
-        Array { items: items } => json_order.JsonValueV1.Empty,
-        ArrayNil => json_order.JsonValueV1.Empty,
-        ArrayCons { head: head, tail: tail } => json_order.JsonValueV1.Empty,
-        ObjectNil => json_order.JsonValueV1.Empty,
-        ObjectCons { key: key, value: nested, tail: tail } => json_order.JsonValueV1.Empty
-    };
-}
-
-fn collect_object_code(
-    state: DiagnosticCodesV1,
-    following: DiagnosticCodesV1,
-    head: json_order.JsonValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: DiagnosticCodesV1) {
-    if state.count >= 32 { return DiagnosticCodesV1 { ..following, valid: false }; }
-    let code: CodeReadV1 = diagnostic_code_fields(object_fields(head), document);
-    if !code.valid { return DiagnosticCodesV1 { ..following, valid: false }; }
-    return DiagnosticCodesV1 {
-        ..following,
-        actual: replace(state.actual, state.count, code.value),
-        count: state.count +% 1
-    };
-}
-
-fn collect_array_member(
-    state: DiagnosticCodesV1,
-    head: json_order.JsonValueV1,
-    tail: json_order.JsonValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: DiagnosticCodesV1) {
-    let following: DiagnosticCodesV1 = DiagnosticCodesV1 { ..state, remaining: tail };
-    if !is_object(head) { return following; }
-    return collect_object_code(state, following, head, document);
-}
-
-fn collect_code_step(
-    state: DiagnosticCodesV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: DiagnosticCodesV1) {
-    if !state.valid || state.complete { return state; }
-    return match state.remaining {
-        ArrayCons { head: head, tail: tail } => collect_array_member(state, head, tail, document),
-        ArrayNil => DiagnosticCodesV1 { ..state, complete: true },
-        Empty => DiagnosticCodesV1 { ..state, valid: false },
-        Null => DiagnosticCodesV1 { ..state, valid: false },
-        Raw { start: start, length: length } => DiagnosticCodesV1 { ..state, valid: false },
-        String { start: start, length: length } => DiagnosticCodesV1 { ..state, valid: false },
-        Boolean { value: flag } => DiagnosticCodesV1 { ..state, valid: false },
-        Integer { negative: negative, magnitude: magnitude } => DiagnosticCodesV1 { ..state, valid: false },
-        Utf8String { start: start, length: length } => DiagnosticCodesV1 { ..state, valid: false },
-        Array { items: items } => DiagnosticCodesV1 { ..state, valid: false },
-        Object { fields: fields } => DiagnosticCodesV1 { ..state, valid: false },
-        ObjectNil => DiagnosticCodesV1 { ..state, valid: false },
-        ObjectCons { key: key, value: value, tail: tail } => DiagnosticCodesV1 { ..state, valid: false }
-    };
-}
-
-fn collect_codes(
-    items: json_order.JsonValueV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: DiagnosticCodesV1) {
-    iterate i up_to 33 carrying collected: DiagnosticCodesV1 = empty_codes(items) {
-        next collected = collect_code_step(collected, document);
+    let parent_index: u64 = parent_depth -% 1;
+    let parent: DiagnosticFrameV1 = state.frames[parent_index];
+    if parent.role == 1 && value == 91 {
+        if parent.key == 2 { return 3; }
+        if parent.key == 3 && state.selection == 2 { return 4; }
     }
-    return collected;
+    if parent.kind == 2 && value == 123 && expects_failure
+        && is_selected_array(parent.role, state.selection) {
+        return 5;
+    }
+    return 0;
 }
 
-fn is_array(value: json_order.JsonValueV1) -> (result: bool) {
-    return match value {
-        Array { items: items } => true,
-        ArrayNil => true,
-        ArrayCons { head: head, tail: tail } => true,
-        Empty => false,
-        Null => false,
-        Raw { start: start, length: length } => false,
-        String { start: start, length: length } => false,
-        Boolean { value: flag } => false,
-        Integer { negative: negative, magnitude: magnitude } => false,
-        Utf8String { start: start, length: length } => false,
-        Object { fields: fields } => false,
-        ObjectNil => false,
-        ObjectCons { key: key, value: nested, tail: tail } => false
+fn push_container(
+    state: DiagnosticScanV1,
+    parent_depth: u64,
+    value: byte,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    if parent_depth >= 12 {
+        return DiagnosticScanV1 { ..state, supported: false };
+    }
+    let kind: byte = select(value == 123, 1, 2);
+    let role: byte = container_role(state, parent_depth, value, expects_failure);
+    let frame: DiagnosticFrameV1 = DiagnosticFrameV1 {
+        ..empty_frame(),
+        kind: kind,
+        role: role
+    };
+    return DiagnosticScanV1 {
+        ..state,
+        frames: replace(state.frames, parent_depth, frame)
     };
 }
 
-fn raw_is_true(
+fn key_closed(state: DiagnosticScanV1) -> (result: DiagnosticScanV1) {
+    let depth: u64 = state.cursor.depth as u64;
+    if depth == 0 { return DiagnosticScanV1 { ..state, supported: false }; }
+    let index: u64 = depth -% 1;
+    let frame: DiagnosticFrameV1 = state.frames[index];
+    let plain: bool = key_span_is_plain(state.cursor);
+    if frame.role == 1 {
+        let tag: byte = root_key_tag(state.cursor);
+        let duplicate: bool = (tag == 1 && state.valid_seen)
+            || (tag == 2 && state.errors_seen)
+            || (tag == 3 && state.diagnostics_seen);
+        let updated: DiagnosticFrameV1 = DiagnosticFrameV1 { ..frame, key: tag };
+        return DiagnosticScanV1 {
+            ..state,
+            frames: replace(state.frames, index, updated),
+            valid_seen: state.valid_seen || tag == 1,
+            errors_seen: state.errors_seen || tag == 2,
+            diagnostics_seen: state.diagnostics_seen || tag == 3,
+            valid_field_present: state.valid_field_present || tag == 1,
+            supported: state.supported && plain && !duplicate
+        };
+    }
+    if frame.role == 5 {
+        let tag: byte = diagnostic_key_tag(state.cursor);
+        let duplicate: bool = tag == 4 && frame.code_seen;
+        let updated: DiagnosticFrameV1 = DiagnosticFrameV1 {
+            ..frame,
+            key: tag,
+            code_seen: frame.code_seen || tag == 4
+        };
+        return DiagnosticScanV1 {
+            ..state,
+            frames: replace(state.frames, index, updated),
+            codes_valid: state.codes_valid && !duplicate && plain
+        };
+    }
+    return state;
+}
+
+fn decode_code_string(
+    state: DiagnosticScanV1,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    let depth: u64 = state.cursor.depth as u64;
+    if !expects_failure || depth == 0 { return state; }
+    let index: u64 = depth -% 1;
+    let frame: DiagnosticFrameV1 = state.frames[index];
+    if frame.role != 5 || frame.key != 4 { return state; }
+    let raw_length: u64 = state.cursor.string_end -% state.cursor.string_start;
+    let updated_frame: DiagnosticFrameV1 = DiagnosticFrameV1 {
+        ..frame,
+        code_start: state.cursor.string_start,
+        code_length: raw_length
+    };
+    return DiagnosticScanV1 {
+        ..state,
+        frames: replace(state.frames, index, updated_frame)
+    };
+}
+
+fn append_diagnostic(
+    state: DiagnosticScanV1,
+    index: u64,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    if !expects_failure || index >= 12 { return state; }
+    let frame: DiagnosticFrameV1 = state.frames[index];
+    if frame.role != 5 { return state; }
+    if state.actual_count >= 32 {
+        return DiagnosticScanV1 { ..state, codes_valid: false };
+    }
+    return DiagnosticScanV1 {
+        ..state,
+        actual_spans: replace(
+            state.actual_spans,
+            state.actual_count,
+            DiagnosticSpanV1 { start: frame.code_start, length: frame.code_length }
+        ),
+        actual_count: state.actual_count +% 1
+    };
+}
+
+fn decode_code_span(
+    codes: DiagnosticCodesV1,
+    scan: DiagnosticScanV1,
     document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64
+    index: u64
+) -> (result: DiagnosticCodesV1) {
+    if index >= scan.actual_count { return codes; }
+    let span: DiagnosticSpanV1 = scan.actual_spans[index];
+    if span.length == 0 {
+        return DiagnosticCodesV1 {
+            ..codes,
+            actual: replace(codes.actual, index, empty_code()),
+            count: index +% 1
+        };
+    }
+    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(
+        document, span.start, span.length
+    );
+    if !decoded.valid {
+        return DiagnosticCodesV1 { ..codes, valid: false };
+    }
+    return DiagnosticCodesV1 {
+        ..codes,
+        actual: replace(
+            codes.actual,
+            index,
+            policy.DiagnosticCodeV1 { value: decoded.bytes }
+        ),
+        count: index +% 1
+    };
+}
+
+fn decode_code_spans(
+    scan: DiagnosticScanV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: DiagnosticCodesV1) {
+    iterate i up_to 32 carrying codes: DiagnosticCodesV1 = empty_decoded_codes() {
+        next codes = decode_code_span(codes, scan, document, i);
+    }
+    return codes;
+}
+
+fn selected_codes(
+    scan: DiagnosticScanV1,
+    document: json_order.JsonTokenDocumentV1,
+    expects_failure: bool
+) -> (result: DiagnosticCodesV1) {
+    if !expects_failure { return empty_decoded_codes(); }
+    return decode_code_spans(scan, document);
+}
+
+fn observe_event(
+    state: DiagnosticScanV1,
+    parent_depth: u64,
+    value: byte,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    if state.cursor.event == 2 { return key_closed(state); }
+    if state.cursor.event == 4 {
+        return decode_code_string(state, expects_failure);
+    }
+    if state.cursor.event == 5 || state.cursor.event == 6 {
+        return push_container(state, parent_depth, value, expects_failure);
+    }
+    if state.cursor.event == 7 {
+        return append_diagnostic(state, state.cursor.depth as u64, expects_failure);
+    }
+    return state;
+}
+
+fn scan_byte(
+    state: DiagnosticScanV1,
+    value: byte,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    let finished: DiagnosticScanV1 = select(
+        state.valid_scalar_active && scalar_boundary(value),
+        finish_valid_scalar(state),
+        state
+    );
+    let parent_depth: u64 = finished.cursor.depth as u64;
+    let started: DiagnosticScanV1 = begin_value(finished, value, expects_failure);
+    let cursor: json_cursor.Cursor = json_cursor.feed_byte(started.cursor, value);
+    let syntax: json.ScanState = json.scan_step(started.syntax, value);
+    let advanced: DiagnosticScanV1 = DiagnosticScanV1 {
+        ..started,
+        cursor: cursor,
+        syntax: syntax
+    };
+    if started.valid_scalar_active && !finished.valid_scalar_active {
+        let updated: DiagnosticScanV1 = DiagnosticScanV1 { ..advanced };
+        return observe_event(updated, parent_depth, value, expects_failure);
+    }
+    let scalar_updated: DiagnosticScanV1 = select(
+        started.valid_scalar_active && !scalar_boundary(value)
+            && finished.valid_scalar_active,
+        valid_scalar_step(advanced, value),
+        advanced
+    );
+    return observe_event(scalar_updated, parent_depth, value, expects_failure);
+}
+
+fn scan_chunk_part(
+    state: DiagnosticScanV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    part: u64,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    let start: u64 = part *% 64;
+    if start >= chunk.length { return state; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    let source: [byte; up_to 64] = chunk.bytes[start..start +% size];
+    iterate i over source carrying scanned: DiagnosticScanV1 = state {
+        next scanned = scan_byte(scanned, source[i], expects_failure);
+    }
+    return scanned;
+}
+
+fn scan_chunk(
+    state: DiagnosticScanV1,
+    chunk: json_order.JsonTokenInputChunkV1,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    iterate i up_to 16 carrying scanned: DiagnosticScanV1 = state {
+        next scanned = scan_chunk_part(scanned, chunk, i, expects_failure);
+    }
+    return scanned;
+}
+
+fn scan_document(
+    document: json_order.JsonTokenDocumentV1,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    iterate i over document.chunks carrying scanned: DiagnosticScanV1 = initial_diagnostic_scan() {
+        next scanned = scan_chunk(scanned, document.chunks[i], expects_failure);
+    }
+    return select(
+        scanned.valid_scalar_active,
+        finish_valid_scalar(scanned),
+        scanned
+    );
+}
+
+fn scan_request(
+    request_valid: bool,
+    document: json_order.JsonTokenDocumentV1,
+    expects_failure: bool
+) -> (result: DiagnosticScanV1) {
+    if !request_valid { return initial_diagnostic_scan(); }
+    return scan_document(document, expects_failure);
+}
+
+fn scan_is_valid(
+    scanned: DiagnosticScanV1,
+    expects_failure: bool
 ) -> (result: bool) {
-    if length != 4 { return false; }
-    return json_order.located_byte(document, start) == 116
-        && json_order.located_byte(document, start +% 1) == 114
-        && json_order.located_byte(document, start +% 2) == 117
-        && json_order.located_byte(document, start +% 3) == 101;
-}
-
-fn is_true(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: bool) {
-    return match value {
-        Boolean { value: flag } => flag,
-        Empty => false,
-        Null => false,
-        Raw { start: start, length: length } => raw_is_true(document, start, length),
-        String { start: start, length: length } => false,
-        Integer { negative: negative, magnitude: magnitude } => false,
-        Utf8String { start: start, length: length } => false,
-        Array { items: items } => false,
-        Object { fields: fields } => false,
-        ArrayNil => false,
-        ArrayCons { head: head, tail: tail } => false,
-        ObjectNil => false,
-        ObjectCons { key: key, value: nested, tail: tail } => false
-    };
-}
-
-fn array_items(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
-    return match value {
-        Array { items: items } => items,
-        ArrayNil => json_order.JsonValueV1.ArrayNil,
-        ArrayCons { head: head, tail: tail } => value,
-        Empty => json_order.JsonValueV1.Empty,
-        Null => json_order.JsonValueV1.Empty,
-        Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
-        String { start: start, length: length } => json_order.JsonValueV1.Empty,
-        Boolean { value: flag } => json_order.JsonValueV1.Empty,
-        Integer { negative: negative, magnitude: magnitude } => json_order.JsonValueV1.Empty,
-        Utf8String { start: start, length: length } => json_order.JsonValueV1.Empty,
-        Object { fields: fields } => json_order.JsonValueV1.Empty,
-        ObjectNil => json_order.JsonValueV1.Empty,
-        ObjectCons { key: key, value: nested, tail: tail } => json_order.JsonValueV1.Empty
-    };
-}
-
-fn empty_policy_request() -> (result: policy.CompileVerdictRequestV1) {
-    return policy.CompileVerdictRequestV1 {
-        schema_version: [0; 0],
-        compiler_exit_code: 0,
-        compiler_result_is_object: false,
-        valid_field_present: false,
-        valid_field_is_true: false,
-        expects_failure: false,
-        expected_count: 0,
-        expected: [],
-        actual_count: 0,
-        actual: [],
-        matched_before: [false; 16],
-        all_expected_before: true,
-        diagnostics_seen_before: false
-    };
+    let syntax: json.ScanState = json.scan_finish_end(scanned.syntax);
+    let syntax_valid: bool = syntax.valid && syntax.depth == 0
+        && syntax.mode == 0 && syntax.expect == 7;
+    let cursor_valid: bool = json_cursor.is_valid(scanned.cursor);
+    return scanned.supported && syntax_valid && cursor_valid
+        && (!expects_failure || scanned.codes_valid);
 }
 
 fn result(
@@ -439,30 +642,22 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
         && request.expected_count == request.expected.len
         && request.expected_count <= 16
         && shape.valid
-        && request.document.byte_length <= 16384
-        && shape.total == request.document.byte_length;
-    let parsed: json_order.ParseStateV1 = json_order.parse_checked(request.document, request_valid);
+        && shape.total == request.document.byte_length
+        && request.document.byte_length <= 16384;
     let empty: CompileDiagnosticVerdictResultV1 = result(false, []);
-    if !request_valid || !parsed.valid {
+    let scanned: DiagnosticScanV1 = scan_request(
+        request_valid, request.document, request.expects_failure
+    );
+    if !request_valid || !scan_is_valid(scanned, request.expects_failure) {
         let published: u64 = structured_write(context.argv[1], result_schema(), empty);
         if published == 0 { return failure([112,117,98,108,105,115,104,32,99,111,109,112,105,108,101,32,100,105,97,103,110,111,115,116,105,99,32,114,101,115,117,108,116,32,102,97,105,108,101,100], 3); }
         return success([]);
     }
 
-    let root: json_order.JsonValueV1 = parsed.root;
-    let compiler_is_object: bool = is_object(root);
-    let root_fields: json_order.JsonValueV1 = object_fields(root);
-    let valid_value: FieldValueV1 = find_field(root_fields, valid_key());
-    let valid_is_true: bool = is_true(valid_value.value, request.document);
-    let diagnostic_value: FieldValueV1 = find_field(root_fields, errors_key());
-    let selected_value: FieldValueV1 = selected_diagnostic_value(root, root_fields, diagnostic_value);
-    let codes: DiagnosticCodesV1 = codes_for_selected_value(
-        request.expects_failure, selected_value, request.document
+    let codes: DiagnosticCodesV1 = selected_codes(
+        scanned, request.document, request.expects_failure
     );
-    let root_fields_complete: bool = valid_value.complete && diagnostic_value.complete
-        && selected_value.complete;
-    let codes_valid: bool = codes.valid && codes.complete && root_fields_complete;
-    if !codes_valid {
+    if !codes.valid {
         let published: u64 = structured_write(context.argv[1], result_schema(), empty);
         if published == 0 { return failure([112,117,98,108,105,115,104,32,99,111,109,112,105,108,101,32,100,105,97,103,110,111,115,116,105,99,32,114,101,115,117,108,116,32,102,97,105,108,101,100], 3); }
         return success([]);
@@ -470,14 +665,14 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
 
     let actual_count: u64 = select(request.expects_failure, codes.count, 0);
     let actual: [policy.DiagnosticCodeV1; up_to 32] = select(
-        request.expects_failure, codes.actual[0..codes.count], []
+        request.expects_failure, codes.actual[0..actual_count], []
     );
     let policy_request: policy.CompileVerdictRequestV1 = policy.CompileVerdictRequestV1 {
         schema_version: [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,118,101,114,100,105,99,116,45,114,101,113,117,101,115,116,47,49],
         compiler_exit_code: request.compiler_exit_code,
-        compiler_result_is_object: compiler_is_object,
-        valid_field_present: valid_value.found,
-        valid_field_is_true: valid_is_true,
+        compiler_result_is_object: scanned.root_is_object,
+        valid_field_present: scanned.valid_field_present,
+        valid_field_is_true: scanned.valid_field_is_true,
         expects_failure: request.expects_failure,
         expected_count: request.expected_count,
         expected: request.expected,

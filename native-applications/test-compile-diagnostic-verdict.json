@@ -5,7 +5,7 @@
   "module": "mncs.test.compile_diagnostic_verdict_v1",
   "entry_function": "compile_diagnostic_verdict_app_v1",
   "profile": "0.18",
-  "interface_identity": "1a624d35b40ce7a6dd2f3a1df6c4fb4ff4019e1540d1c1eb5bd96fba2a4f4934",
+  "interface_identity": "9e8dffa89afca6ace5008170e3a65938cde6ae398643eec4ea28d8ac06001497",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
