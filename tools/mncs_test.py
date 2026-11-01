@@ -56,6 +56,8 @@ PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/2"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/3"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
+PUBLIC_RESULT_JSON_VALUE_INPUT_REQUEST_SCHEMA = "mncs.test.public-json-value-input-request/1"
+PUBLIC_RESULT_JSON_VALUE_INPUT_RESULT_SCHEMA = "mncs.test.public-json-value-input/2"
 PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA = "mncs.test.public-json-ascii-escape-request/1"
 PUBLIC_RESULT_JSON_ASCII_RESULT_SCHEMA = "mncs.test.public-json-ascii-escape/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-start-request/1"
@@ -896,6 +898,248 @@ def _native_public_result_token_tape(
     return payload, digest
 
 
+def _native_public_result_value_request(value: Any) -> dict[str, Any] | None:
+    """Encode exact built-in JSON values as a bounded preorder node tape."""
+    rows: list[str] = []
+    text = bytearray()
+    active_containers: set[int] = set()
+    pending: list[tuple[str, Any, str | None, int]] = [("value", value, None, 0)]
+
+    def append_node(
+        *,
+        kind: int,
+        has_key: bool,
+        key_start: int,
+        key_length: int,
+        text_start: int,
+        text_length: int,
+        magnitude: int = 0,
+        negative: bool = False,
+        child_count: int = 0,
+    ) -> None:
+        flags = int(has_key) | (2 if negative else 0)
+        row = f"{kind:01x}{flags:01x}"
+        if has_key:
+            row += f"{key_start:x},{key_length:x},"
+        if kind == 3:
+            row += f"{magnitude:x};"
+        elif kind == 4:
+            row += f"{text_start:x},{text_length:x};"
+        elif kind == 5 or kind == 6:
+            row += f"{child_count:x};"
+        else:
+            row += ";"
+        rows.append(row)
+
+    while pending:
+        action, current, key, depth = pending.pop()
+        if action == "leave":
+            active_containers.remove(current)
+            continue
+        if len(rows) >= PUBLIC_RESULT_JSON_MAX_VALUES:
+            return None
+
+        key_bytes: bytes | None = None
+        if key is not None:
+            try:
+                key_bytes = key.encode("utf-8")
+            except UnicodeEncodeError:
+                return None
+            if len(key_bytes) > 256:
+                return None
+        key_start = len(text) if key_bytes is not None else 0
+        if key_bytes is not None:
+            if len(text) + len(key_bytes) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+                return None
+            text.extend(key_bytes)
+        key_length = 0 if key_bytes is None else len(key_bytes)
+
+        if current is None:
+            append_node(
+                kind=0, has_key=key_bytes is not None, key_start=key_start,
+                key_length=key_length, text_start=0, text_length=0,
+            )
+            continue
+        if type(current) is bool:
+            append_node(
+                kind=2 if current else 1, has_key=key_bytes is not None,
+                key_start=key_start, key_length=key_length,
+                text_start=0, text_length=0,
+            )
+            continue
+        if type(current) is int:
+            magnitude = current if current >= 0 else -current
+            if magnitude > 0xFFFFFFFFFFFFFFFF:
+                return None
+            append_node(
+                kind=3, has_key=key_bytes is not None, key_start=key_start,
+                key_length=key_length, text_start=0, text_length=0,
+                magnitude=magnitude, negative=current < 0,
+            )
+            continue
+        if type(current) is str:
+            try:
+                encoded = current.encode("utf-8")
+            except UnicodeEncodeError:
+                return None
+            if len(text) + len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+                return None
+            text_start = len(text)
+            append_node(
+                kind=4, has_key=key_bytes is not None, key_start=key_start,
+                key_length=key_length, text_start=text_start,
+                text_length=len(encoded),
+            )
+            text.extend(encoded)
+            continue
+
+        if type(current) is list or type(current) is tuple:
+            if depth >= 12 or len(current) > PUBLIC_RESULT_JSON_MAX_VALUES - 1:
+                return None
+            identity = id(current)
+            if identity in active_containers:
+                return None
+            append_node(
+                kind=5, has_key=key_bytes is not None, key_start=key_start,
+                key_length=key_length, text_start=0, text_length=0,
+                child_count=len(current),
+            )
+            active_containers.add(identity)
+            pending.append(("leave", identity, None, depth))
+            for child in reversed(current):
+                pending.append(("value", child, None, depth + 1))
+            continue
+
+        if type(current) is dict:
+            if depth >= 12 or len(current) > 640:
+                return None
+            identity = id(current)
+            if identity in active_containers:
+                return None
+            children = list(current.items())
+            if any(type(child_key) is not str for child_key, _ in children):
+                return None
+            for child_key, _ in children:
+                try:
+                    if len(child_key.encode("utf-8")) > 256:
+                        return None
+                except UnicodeEncodeError:
+                    return None
+            append_node(
+                kind=6, has_key=key_bytes is not None, key_start=key_start,
+                key_length=key_length, text_start=0, text_length=0,
+                child_count=len(children),
+            )
+            active_containers.add(identity)
+            pending.append(("leave", identity, None, depth))
+            for child_key, child_value in reversed(children):
+                pending.append(("value", child_value, child_key, depth + 1))
+            continue
+
+        return None
+
+    raw_text = bytes(text)
+    try:
+        chunks = _public_result_input_chunks(raw_text)
+    except AdapterError:
+        return None
+    if len(chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS:
+        return None
+    tape_chunks: list[str] = []
+    current_rows: list[str] = []
+    current_length = 0
+    for row in rows:
+        if len(row) > PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES:
+            return None
+        if current_rows and (
+            len(current_rows) >= 64
+            or current_length + len(row) > PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES
+        ):
+            tape_chunks.append("".join(current_rows))
+            current_rows = []
+            current_length = 0
+        current_rows.append(row)
+        current_length += len(row)
+    if current_rows:
+        tape_chunks.append("".join(current_rows))
+    if len(tape_chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS:
+        return None
+    return {
+        "schema_version": PUBLIC_RESULT_JSON_VALUE_INPUT_REQUEST_SCHEMA,
+        "text": {
+            "chunks": [
+                {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+                for chunk in chunks
+            ],
+            "byte_length": len(raw_text),
+        },
+        "node_tape": [
+            {"bytes": chunk, "length": len(chunk)}
+            for chunk in tape_chunks
+        ],
+        "node_count": len(rows),
+    }
+
+
+def _native_public_result_value_payload(
+    value: Any,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Build and hash final bounded public JSON from a native typed-value tape."""
+    request = _native_public_result_value_request(value)
+    if request is None:
+        return None
+    try:
+        result = run_native_app(
+            "test-public-result-json-value-input.json",
+            request,
+            request_schema=PUBLIC_RESULT_JSON_VALUE_INPUT_REQUEST_SCHEMA,
+            result_schema=PUBLIC_RESULT_JSON_VALUE_INPUT_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeBudgetExhaustedError, NativeInputBoundError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"MNCS native public-result value encoding failed: {error}") from error
+    if result.get("schema_version") != PUBLIC_RESULT_JSON_VALUE_INPUT_RESULT_SCHEMA:
+        raise AdapterError("MNCS native value encoder returned an unsupported result schema")
+    if type(result.get("supported")) is not bool:
+        raise AdapterError("MNCS native value encoder returned malformed support metadata")
+    if not result["supported"]:
+        return None
+    node_count = result.get("node_count")
+    byte_length = result.get("document_length")
+    if (
+        type(node_count) is not int
+        or node_count != request["node_count"]
+        or type(byte_length) is not int
+        or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+    ):
+        raise AdapterError("MNCS native value encoder returned malformed document metadata")
+    payload = _decode_public_result_chunks(
+        result,
+        byte_length=byte_length,
+        maximum_chunks=PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS,
+    )
+    output_digest = _native_public_result_output_digest(
+        payload,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if not isinstance(output_digest, str) or not SHA256_HEX.fullmatch(output_digest):
+        return None
+    if hashlib.sha256(payload).hexdigest() != output_digest:
+        raise AdapterError("MNCS native value encoder returned a mismatched output digest")
+    return payload, output_digest
+
+
 def _native_public_result_payload(
     value: Any,
     *,
@@ -904,6 +1148,15 @@ def _native_public_result_payload(
     environment: dict[str, str],
 ) -> tuple[bytes, str] | None:
     """Render bounded values through native tokenization, ordering, and emission."""
+    native_value = _native_public_result_value_payload(
+        value,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if native_value is not None:
+        return native_value
+
     requires_python_key_order, has_object = _public_result_ordering_requirements(value)
     try:
         source = compact_json(value, sort_keys=requires_python_key_order).encode("utf-8")

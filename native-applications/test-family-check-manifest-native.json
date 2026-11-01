@@ -5,7 +5,7 @@
   "module": "mncs.test.family_check_manifest_native_v1",
   "entry_function": "family_check_manifest_native_app_v1",
   "profile": "0.18",
-  "interface_identity": "a4c12a5e93171d619e539cf7e09ad7f8d04b236a9f60fafca05a9f8a2e89bd01",
+  "interface_identity": "34c7674f66ff6dd5f103ddea333f593a4703983cb0266964ee1ed92d59c6f291",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

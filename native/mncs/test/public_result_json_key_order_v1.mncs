@@ -15,6 +15,8 @@ record JsonTokenInputChunkV1 {
     length: u64
 }
 
+record JsonEscapedSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
+
 record JsonTokenDocumentV1 {
     chunks: [JsonTokenInputChunkV1; up_to 64],
     byte_length: u64
@@ -27,20 +29,92 @@ record KeyV1 {
     raw_length: u64,
     ordered: [byte; up_to 256],
     ordered_length: u64,
+    json_escaped: bool,
     valid: bool
 }
 
 enum JsonValueV1 {
     Empty,
     Null,
+    Boolean { value: bool },
+    Integer { negative: bool, magnitude: u64 },
     Raw { start: u64, length: u64 },
     String { start: u64, length: u64 },
+    Utf8String { start: u64, length: u64 },
     Array { items: JsonValueV1 },
     Object { fields: JsonValueV1 },
     ArrayNil,
     ArrayCons { head: JsonValueV1, tail: JsonValueV1 },
     ObjectNil,
     ObjectCons { key: KeyV1, value: JsonValueV1, tail: JsonValueV1 }
+}
+
+// Python transports the public result as a bounded typed value tape. String
+// bytes are packed once into a UTF-8 document; nodes carry spans instead of
+// rebuilding compact JSON in the host and asking MNCS to parse it again.
+record PublicValueNodeV1 {
+    kind: byte,
+    has_key: bool,
+    key_start: u64,
+    key_length: u64,
+    text_start: u64,
+    text_length: u64,
+    magnitude: u64,
+    negative: bool,
+    child_count: u64,
+    valid: bool
+}
+
+record PublicValueRequestV1 {
+    schema_version: [byte; up_to 64],
+    text: JsonTokenDocumentV1,
+    node_tape: [JsonTokenInputChunkV1; up_to 64],
+    node_count: u64
+}
+
+record PublicValueHexResultV1 { value: u64, next_offset: u64, valid: bool }
+record PublicValueHexScanStateV1 {
+    value: u64,
+    position: u64,
+    digits: u64,
+    done: bool,
+    valid: bool
+}
+record PublicValueKeySpanResultV1 {
+    start: u64,
+    length: u64,
+    next_offset: u64,
+    valid: bool
+}
+record PublicValuePayloadResultV1 {
+    text_start: u64,
+    text_length: u64,
+    magnitude: u64,
+    child_count: u64,
+    next_offset: u64,
+    valid: bool
+}
+record PublicValueNodeReadResultV1 {
+    node: PublicValueNodeV1,
+    next_offset: u64
+}
+record PublicValueKeyCopyV1 { bytes: [byte; 256], valid: bool }
+record PublicValueTapeShapeStateV1 { total: u64, valid: bool }
+
+record PublicValueBuildResultV1 {
+    value: JsonValueV1,
+    next_node: u64,
+    writer_steps: u64,
+    valid: bool
+}
+
+record PublicValueInputResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    node_count: u64,
+    document_length: u64,
+    chunk_count: u64,
+    chunks: [JsonOrderChunkV1; up_to 64]
 }
 
 record FrameV1 {
@@ -57,6 +131,30 @@ record FrameV1 {
     source_order: byte,
     writer_steps: u64,
     expect: byte
+}
+
+record PublicValueBuildFrameV1 {
+    node_kind: byte,
+    remaining: u64,
+    child_key: KeyV1,
+    items: JsonValueV1,
+    child_count: u64,
+    writer_steps: u64
+}
+
+record PublicValueBuildStateV1 {
+    frames: [PublicValueBuildFrameV1; 12],
+    depth: u64,
+    root: JsonValueV1,
+    root_writer_steps: u64,
+    has_root: bool,
+    valid: bool
+}
+
+record PublicValueTapeCursorV1 {
+    build: PublicValueBuildStateV1,
+    offset: u64,
+    remaining_nodes: u64
 }
 
 record ContainerValueV1 { value: JsonValueV1, writer_steps: u64, valid: bool }
@@ -151,6 +249,12 @@ record JsonDigestWriterV1 {
     ok: bool
 }
 
+record IntegerDigitBufferV1 {
+    bytes: [byte; 20],
+    length: u64,
+    remaining: u64
+}
+
 record WriterSourceStateV1 { writer: JsonOrderWriterV1, base: u64 }
 
 record ArrayReverseStateV1 { remaining: JsonValueV1, reversed: JsonValueV1 }
@@ -162,8 +266,21 @@ enum JsonWriteTaskV1 {
     ObjectNext { remaining: JsonValueV1, first: bool }
 }
 
+enum JsonPrettyWriteTaskV1 {
+    Empty,
+    Value { value: JsonValueV1, indent: u64 },
+    ArrayNext { remaining: JsonValueV1, first: bool, indent: u64 },
+    ObjectNext { remaining: JsonValueV1, first: bool, indent: u64 }
+}
+
 record JsonWriteStateV1 {
     tasks: [JsonWriteTaskV1; 16],
+    depth: u64,
+    writer: JsonOrderWriterV1
+}
+
+record JsonPrettyWriteStateV1 {
+    tasks: [JsonPrettyWriteTaskV1; 16],
     depth: u64,
     writer: JsonOrderWriterV1
 }
@@ -188,6 +305,14 @@ fn request_schema_v1() -> (result: [byte; up_to 64]) {
 
 fn result_schema_v1() -> (result: [byte; up_to 64]) {
     return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 107, 101, 121, 45, 111, 114, 100, 101, 114, 47, 49];
+}
+
+fn public_value_request_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 118, 97, 108, 117, 101, 45, 105, 110, 112, 117, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn public_value_result_schema_v1() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 118, 97, 108, 117, 101, 45, 105, 110, 112, 117, 116, 47, 50];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -386,6 +511,7 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
             raw_length: raw_length,
             ordered: key_bytes_short.bytes[0..key_bytes_short.length],
             ordered_length: decoded_short.length,
+            json_escaped: true,
             valid: decoded_short.valid && !decoded_short.escaped
                 && decoded_short.skip == 0 && key_bytes_short.length == decoded_short.length
         };
@@ -405,6 +531,7 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
         raw_length: raw_length,
         ordered: key_bytes.bytes[0..key_bytes.length],
         ordered_length: decoded.length,
+        json_escaped: true,
         valid: raw_length <= 256 && decoded.valid && !decoded.escaped
             && decoded.skip == 0 && key_bytes.length == decoded.length
     };
@@ -454,6 +581,9 @@ fn insert_field(fields: JsonValueV1, key: KeyV1, value: JsonValueV1) -> (result:
         Null => JsonValueV1.Empty,
         Raw { start: raw_start, length: raw_length } => JsonValueV1.Empty,
         String { start: raw_start, length: raw_length } => JsonValueV1.Empty,
+        Boolean { value: flag } => JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => JsonValueV1.Empty,
         Array { items: items } => JsonValueV1.Empty,
         Object { fields: nested } => JsonValueV1.Empty,
         ArrayNil => JsonValueV1.Empty,
@@ -486,6 +616,9 @@ fn object_field_tail(fields: JsonValueV1) -> (result: JsonValueV1) {
         Null => JsonValueV1.Empty,
         Raw { start: start, length: length } => JsonValueV1.Empty,
         String { start: start, length: length } => JsonValueV1.Empty,
+        Boolean { value: flag } => JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => JsonValueV1.Empty,
         Array { items: items } => JsonValueV1.Empty,
         Object { fields: nested } => JsonValueV1.Empty,
         ArrayNil => JsonValueV1.Empty,
@@ -560,6 +693,9 @@ fn reverse_object_field_step(state: ObjectReverseStateV1) -> (result: ObjectReve
         Null => ObjectReverseStateV1 { ..state, valid: false },
         Raw { start: start, length: length } => ObjectReverseStateV1 { ..state, valid: false },
         String { start: start, length: length } => ObjectReverseStateV1 { ..state, valid: false },
+        Boolean { value: flag } => ObjectReverseStateV1 { ..state, valid: false },
+        Integer { negative: negative, magnitude: magnitude } => ObjectReverseStateV1 { ..state, valid: false },
+        Utf8String { start: start, length: length } => ObjectReverseStateV1 { ..state, valid: false },
         Array { items: items } => ObjectReverseStateV1 { ..state, valid: false },
         Object { fields: fields } => ObjectReverseStateV1 { ..state, valid: false },
         ArrayNil => ObjectReverseStateV1 { ..state, valid: false },
@@ -643,6 +779,9 @@ fn take_object_merge_left(state: ObjectMergeStateV1) -> (result: ObjectMergeStat
         Null => ObjectMergeStateV1 { ..state, valid: false },
         Raw { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
         String { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
+        Boolean { value: flag } => ObjectMergeStateV1 { ..state, valid: false },
+        Integer { negative: negative, magnitude: magnitude } => ObjectMergeStateV1 { ..state, valid: false },
+        Utf8String { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
         Array { items: items } => ObjectMergeStateV1 { ..state, valid: false },
         Object { fields: fields } => ObjectMergeStateV1 { ..state, valid: false },
         ArrayNil => ObjectMergeStateV1 { ..state, valid: false },
@@ -665,6 +804,9 @@ fn take_object_merge_right(state: ObjectMergeStateV1) -> (result: ObjectMergeSta
         Null => ObjectMergeStateV1 { ..state, valid: false },
         Raw { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
         String { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
+        Boolean { value: flag } => ObjectMergeStateV1 { ..state, valid: false },
+        Integer { negative: negative, magnitude: magnitude } => ObjectMergeStateV1 { ..state, valid: false },
+        Utf8String { start: start, length: length } => ObjectMergeStateV1 { ..state, valid: false },
         Array { items: items } => ObjectMergeStateV1 { ..state, valid: false },
         Object { fields: fields } => ObjectMergeStateV1 { ..state, valid: false },
         ArrayNil => ObjectMergeStateV1 { ..state, valid: false },
@@ -695,6 +837,9 @@ fn object_merge_item_active(active: ObjectMergeStateV1) -> (result: ObjectMergeS
             Null => ObjectMergeStateV1 { ..active, valid: false },
             Raw { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
             String { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
+            Boolean { value: flag } => ObjectMergeStateV1 { ..active, valid: false },
+            Integer { negative: negative, magnitude: magnitude } => ObjectMergeStateV1 { ..active, valid: false },
+            Utf8String { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
             Array { items: items } => ObjectMergeStateV1 { ..active, valid: false },
             Object { fields: fields } => ObjectMergeStateV1 { ..active, valid: false },
             ArrayNil => ObjectMergeStateV1 { ..active, valid: false },
@@ -705,6 +850,9 @@ fn object_merge_item_active(active: ObjectMergeStateV1) -> (result: ObjectMergeS
         Null => ObjectMergeStateV1 { ..active, valid: false },
         Raw { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
         String { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
+        Boolean { value: flag } => ObjectMergeStateV1 { ..active, valid: false },
+        Integer { negative: negative, magnitude: magnitude } => ObjectMergeStateV1 { ..active, valid: false },
+        Utf8String { start: start, length: length } => ObjectMergeStateV1 { ..active, valid: false },
         Array { items: items } => ObjectMergeStateV1 { ..active, valid: false },
         Object { fields: fields } => ObjectMergeStateV1 { ..active, valid: false },
         ArrayNil => ObjectMergeStateV1 { ..active, valid: false },
@@ -808,6 +956,9 @@ fn prepend_array(items: JsonValueV1, value: JsonValueV1) -> (result: JsonValueV1
         Null => JsonValueV1.Empty,
         Raw { start: raw_start, length: raw_length } => JsonValueV1.Empty,
         String { start: raw_start, length: raw_length } => JsonValueV1.Empty,
+        Boolean { value: flag } => JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => JsonValueV1.Empty,
         Array { items: nested } => JsonValueV1.Empty,
         Object { fields: nested } => JsonValueV1.Empty,
         ObjectNil => JsonValueV1.Empty,
@@ -826,6 +977,9 @@ fn reverse_array_step(state: ArrayReverseStateV1) -> (result: ArrayReverseStateV
         Null => state,
         Raw { start: raw_start, length: raw_length } => state,
         String { start: raw_start, length: raw_length } => state,
+        Boolean { value: flag } => state,
+        Integer { negative: negative, magnitude: magnitude } => state,
+        Utf8String { start: start, length: length } => state,
         Array { items: nested } => state,
         Object { fields: nested } => state,
         ObjectNil => state,
@@ -850,6 +1004,7 @@ fn empty_key() -> (result: KeyV1) {
         raw_length: 0,
         ordered: [0; 0],
         ordered_length: 0,
+        json_escaped: false,
         valid: true
     };
 }
@@ -860,6 +1015,9 @@ fn is_empty_value(value: JsonValueV1) -> (result: bool) {
         Null => false,
         Raw { start: raw_start, length: raw_length } => false,
         String { start: raw_start, length: raw_length } => false,
+        Boolean { value: flag } => false,
+        Integer { negative: negative, magnitude: magnitude } => false,
+        Utf8String { start: start, length: length } => false,
         Array { items: items } => false,
         Object { fields: fields } => false,
         ArrayNil => false,
@@ -1497,6 +1655,9 @@ fn is_array_nil(value: JsonValueV1) -> (result: bool) {
         Null => false,
         Raw { start: raw_start, length: raw_length } => false,
         String { start: raw_start, length: raw_length } => false,
+        Boolean { value: flag } => false,
+        Integer { negative: negative, magnitude: magnitude } => false,
+        Utf8String { start: start, length: length } => false,
         Array { items: items } => false,
         Object { fields: fields } => false,
         ArrayCons { head: head, tail: tail } => false,
@@ -1512,6 +1673,9 @@ fn is_object_nil(value: JsonValueV1) -> (result: bool) {
         Null => false,
         Raw { start: raw_start, length: raw_length } => false,
         String { start: raw_start, length: raw_length } => false,
+        Boolean { value: flag } => false,
+        Integer { negative: negative, magnitude: magnitude } => false,
+        Utf8String { start: start, length: length } => false,
         Array { items: items } => false,
         Object { fields: fields } => false,
         ArrayNil => false,
@@ -1561,14 +1725,157 @@ fn writer_source_range(
     return output.writer;
 }
 
+fn json_hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (value +% 48) as byte; }
+    return (value -% 10 +% 97) as byte;
+}
+
+fn writer_escape_byte(writer: JsonOrderWriterV1, value: byte) -> (result: JsonOrderWriterV1) {
+    if value == 34 || value == 92 {
+        return writer_byte(writer_byte(writer, 92), value);
+    }
+    if value == 8 { return writer_bytes(writer, [92, 98]); }
+    if value == 9 { return writer_bytes(writer, [92, 116]); }
+    if value == 10 { return writer_bytes(writer, [92, 110]); }
+    if value == 12 { return writer_bytes(writer, [92, 102]); }
+    if value == 13 { return writer_bytes(writer, [92, 114]); }
+    if value < 32 {
+        let high: byte = json_hex_digit((value as u64) / 16);
+        let low: byte = json_hex_digit((value as u64) % 16);
+        return writer_bytes(writer, [92, 117, 48, 48, high, low]);
+    }
+    return writer_byte(writer, value);
+}
+
+fn writer_escape_bytes(writer: JsonOrderWriterV1, bytes: [byte; up_to 1024]) -> (result: JsonOrderWriterV1) {
+    iterate i over bytes carrying output: JsonOrderWriterV1 = writer {
+        next output = writer_escape_byte(output, bytes[i]);
+    }
+    return output;
+}
+
+fn writer_escape_key_bytes(writer: JsonOrderWriterV1, bytes: [byte; up_to 256]) -> (result: JsonOrderWriterV1) {
+    iterate i over bytes carrying output: JsonOrderWriterV1 = writer {
+        next output = writer_escape_byte(output, bytes[i]);
+    }
+    return output;
+}
+
+fn writer_escape_source_chunk(
+    state: JsonEscapedSourceStateV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: JsonEscapedSourceStateV1) {
+    let chunk: JsonTokenInputChunkV1 = document.chunks[index];
+    let chunk_start: u64 = state.base;
+    let chunk_end: u64 = chunk_start +% chunk.length;
+    let range_end: u64 = start +% length;
+    let copy_start: u64 = select(start > chunk_start, start, chunk_start);
+    let copy_end: u64 = select(range_end < chunk_end, range_end, chunk_end);
+    if copy_start < copy_end {
+        let source_start: u64 = copy_start -% chunk_start;
+        let source_end: u64 = copy_end -% chunk_start;
+        let source: [byte; up_to 1024] = chunk.bytes[source_start..source_end];
+        return JsonEscapedSourceStateV1 {
+            writer: writer_escape_bytes(state.writer, source),
+            base: chunk_end
+        };
+    }
+    return JsonEscapedSourceStateV1 { ..state, base: chunk_end };
+}
+
+fn writer_escape_source_range(
+    writer: JsonOrderWriterV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: JsonOrderWriterV1) {
+    if length > 65536 || start > document.byte_length || length > document.byte_length -% start {
+        return JsonOrderWriterV1 { ..writer, ok: false };
+    }
+    let initial: JsonEscapedSourceStateV1 = JsonEscapedSourceStateV1 { writer: writer, base: 0 };
+    iterate i over document.chunks carrying output: JsonEscapedSourceStateV1 = initial {
+        next output = writer_escape_source_chunk(output, document, start, length, i);
+    }
+    return output.writer;
+}
+
+fn writer_quoted_source_range(
+    writer: JsonOrderWriterV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: JsonOrderWriterV1) {
+    let opened: JsonOrderWriterV1 = writer_byte(writer, 34);
+    let escaped: JsonOrderWriterV1 = writer_escape_source_range(opened, document, start, length);
+    return writer_byte(escaped, 34);
+}
+
+fn writer_quoted_key_bytes(writer: JsonOrderWriterV1, key: KeyV1) -> (result: JsonOrderWriterV1) {
+    let opened: JsonOrderWriterV1 = writer_byte(writer, 34);
+    let escaped: JsonOrderWriterV1 = writer_escape_key_bytes(opened, key.ordered[0..key.ordered_length]);
+    return writer_byte(escaped, 34);
+}
+
+fn integer_digits_step(state: IntegerDigitBufferV1) -> (result: IntegerDigitBufferV1) {
+    if state.remaining == 0 || state.length >= 20 { return state; }
+    let digit: byte = ((state.remaining % 10) +% 48) as byte;
+    return IntegerDigitBufferV1 {
+        bytes: replace(state.bytes, state.length, digit),
+        length: state.length +% 1,
+        remaining: state.remaining / 10
+    };
+}
+
+fn write_integer_digit_step(
+    writer: JsonOrderWriterV1,
+    digits: IntegerDigitBufferV1,
+    length: u64,
+    index: u64
+) -> (result: JsonOrderWriterV1) {
+    if index >= length { return writer; }
+    return writer_byte(writer, digits.bytes[length -% index -% 1]);
+}
+
+fn integer_digit_buffer(magnitude: u64) -> (result: IntegerDigitBufferV1) {
+    let initial: IntegerDigitBufferV1 = IntegerDigitBufferV1 {
+        bytes: [0; 20], length: 0, remaining: magnitude
+    };
+    iterate i up_to 20 carrying digits: IntegerDigitBufferV1 = initial {
+        next digits = integer_digits_step(digits);
+    }
+    return digits;
+}
+
+fn integer_digit_length(magnitude: u64) -> (result: u64) {
+    if magnitude == 0 { return 1; }
+    return integer_digit_buffer(magnitude).length;
+}
+
+fn writer_integer(writer: JsonOrderWriterV1, negative: bool, magnitude: u64) -> (result: JsonOrderWriterV1) {
+    let sign: JsonOrderWriterV1 = select(negative, writer_byte(writer, 45), writer);
+    if magnitude == 0 { return writer_byte(sign, 48); }
+    let digits: IntegerDigitBufferV1 = integer_digit_buffer(magnitude);
+    let length: u64 = digits.length;
+    iterate i up_to 20 carrying output: JsonOrderWriterV1 = sign {
+        next output = write_integer_digit_step(output, digits, length, i);
+    }
+    return output;
+}
+
 fn writer_key(
     writer: JsonOrderWriterV1,
     key: KeyV1,
     document: JsonTokenDocumentV1
 ) -> (result: JsonOrderWriterV1) {
-    let open: JsonOrderWriterV1 = writer_byte(writer, 34);
-    let raw: JsonOrderWriterV1 = writer_source_range(open, document, key.raw_start, key.raw_length);
-    return writer_byte(raw, 34);
+    if key.json_escaped {
+        let open: JsonOrderWriterV1 = writer_byte(writer, 34);
+        let raw: JsonOrderWriterV1 = writer_source_range(open, document, key.raw_start, key.raw_length);
+        return writer_byte(raw, 34);
+    }
+    return writer_quoted_key_bytes(writer, key);
 }
 
 fn write_json_recursive(
@@ -1579,11 +1886,20 @@ fn write_json_recursive(
     return match value {
         Empty => JsonOrderWriterV1 { ..writer, ok: false },
         Null => writer_bytes(writer, [110, 117, 108, 108]),
+        Boolean { value: value } => select(
+            value,
+            writer_bytes(writer, [116, 114, 117, 101]),
+            writer_bytes(writer, [102, 97, 108, 115, 101])
+        ),
+        Integer { negative: negative, magnitude: magnitude } =>
+            writer_integer(writer, negative, magnitude),
         Raw { start: start, length: length } => writer_source_range(writer, document, start, length),
         String { start: start, length: length } => writer_byte(
             writer_source_range(writer_byte(writer, 34), document, start, length),
             34
         ),
+        Utf8String { start: start, length: length } =>
+            writer_quoted_source_range(writer, document, start, length),
         Array { items: items } => writer_byte(
             write_json_recursive(items, writer_byte(writer, 91), document), 93
         ),
@@ -1597,6 +1913,9 @@ fn write_json_recursive(
             Null => JsonOrderWriterV1 { ..writer, ok: false },
             Raw { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
             String { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
+            Boolean { value: flag } => JsonOrderWriterV1 { ..writer, ok: false },
+            Integer { negative: negative, magnitude: magnitude } => JsonOrderWriterV1 { ..writer, ok: false },
+            Utf8String { start: start, length: length } => JsonOrderWriterV1 { ..writer, ok: false },
             Array { items: items } => JsonOrderWriterV1 { ..writer, ok: false },
             Object { fields: fields } => JsonOrderWriterV1 { ..writer, ok: false },
             ArrayCons { head: next_head, tail: next_tail } => write_json_recursive(
@@ -1616,6 +1935,9 @@ fn write_json_recursive(
             Null => JsonOrderWriterV1 { ..writer, ok: false },
             Raw { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
             String { start: raw_start, length: raw_length } => JsonOrderWriterV1 { ..writer, ok: false },
+            Boolean { value: flag } => JsonOrderWriterV1 { ..writer, ok: false },
+            Integer { negative: negative, magnitude: magnitude } => JsonOrderWriterV1 { ..writer, ok: false },
+            Utf8String { start: start, length: length } => JsonOrderWriterV1 { ..writer, ok: false },
             Array { items: items } => JsonOrderWriterV1 { ..writer, ok: false },
             Object { fields: fields } => JsonOrderWriterV1 { ..writer, ok: false },
             ArrayNil => JsonOrderWriterV1 { ..writer, ok: false },
@@ -1715,6 +2037,18 @@ fn write_json_task_step(
                 ..popped,
                 writer: writer_bytes(popped.writer, [110, 117, 108, 108])
             },
+            Boolean { value: value } => JsonWriteStateV1 {
+                ..popped,
+                writer: select(
+                    value,
+                    writer_bytes(popped.writer, [116, 114, 117, 101]),
+                    writer_bytes(popped.writer, [102, 97, 108, 115, 101])
+                )
+            },
+            Integer { negative: negative, magnitude: magnitude } => JsonWriteStateV1 {
+                ..popped,
+                writer: writer_integer(popped.writer, negative, magnitude)
+            },
             Raw { start: start, length: length } => JsonWriteStateV1 {
                 ..popped,
                 writer: writer_source_range(popped.writer, document, start, length)
@@ -1725,6 +2059,10 @@ fn write_json_task_step(
                     writer_source_range(writer_byte(popped.writer, 34), document, start, length),
                     34
                 )
+            },
+            Utf8String { start: start, length: length } => JsonWriteStateV1 {
+                ..popped,
+                writer: writer_quoted_source_range(popped.writer, document, start, length)
             },
             Array { items: items } => write_json_task_push(
                 JsonWriteStateV1 { ..popped, writer: writer_byte(popped.writer, 91) },
@@ -1748,6 +2086,9 @@ fn write_json_task_step(
             Null => write_json_task_failure(popped),
             Raw { start: start, length: length } => write_json_task_failure(popped),
             String { start: start, length: length } => write_json_task_failure(popped),
+            Boolean { value: value } => write_json_task_failure(popped),
+            Integer { negative: negative, magnitude: magnitude } => write_json_task_failure(popped),
+            Utf8String { start: start, length: length } => write_json_task_failure(popped),
             Array { items: items } => write_json_task_failure(popped),
             Object { fields: fields } => write_json_task_failure(popped),
             ObjectNil => write_json_task_failure(popped),
@@ -1762,6 +2103,9 @@ fn write_json_task_step(
             Null => write_json_task_failure(popped),
             Raw { start: start, length: length } => write_json_task_failure(popped),
             String { start: start, length: length } => write_json_task_failure(popped),
+            Boolean { value: value } => write_json_task_failure(popped),
+            Integer { negative: negative, magnitude: magnitude } => write_json_task_failure(popped),
+            Utf8String { start: start, length: length } => write_json_task_failure(popped),
             Array { items: items } => write_json_task_failure(popped),
             Object { fields: fields } => write_json_task_failure(popped),
             ArrayNil => write_json_task_failure(popped),
@@ -1818,6 +2162,319 @@ fn write_json(
     );
     if task_bound <= 1536 { return write_json_finish(write_json_run_512(initial, document)); }
     return write_json_finish(write_json_run_1024(initial, document));
+}
+
+fn pretty_indent_step(
+    writer: JsonOrderWriterV1,
+    indent: u64,
+    index: u64
+) -> (result: JsonOrderWriterV1) {
+    if index < indent *% 2 { return writer_byte(writer, 32); }
+    return writer;
+}
+
+fn pretty_newline_indent(writer: JsonOrderWriterV1, indent: u64) -> (result: JsonOrderWriterV1) {
+    if indent > 12 { return JsonOrderWriterV1 { ..writer, ok: false }; }
+    let newline: JsonOrderWriterV1 = writer_byte(writer, 10);
+    iterate i up_to 24 carrying output: JsonOrderWriterV1 = newline {
+        next output = pretty_indent_step(output, indent, i);
+    }
+    return output;
+}
+
+fn pretty_write_push(
+    state: JsonPrettyWriteStateV1,
+    task: JsonPrettyWriteTaskV1
+) -> (result: JsonPrettyWriteStateV1) {
+    if state.depth >= 16 { return JsonPrettyWriteStateV1 {
+        ..state,
+        tasks: [JsonPrettyWriteTaskV1.Empty; 16],
+        depth: 0,
+        writer: JsonOrderWriterV1 { ..state.writer, ok: false }
+    }; }
+    return JsonPrettyWriteStateV1 {
+        ..state,
+        tasks: replace(state.tasks, state.depth, task),
+        depth: state.depth +% 1
+    };
+}
+
+fn pretty_write_failure(state: JsonPrettyWriteStateV1) -> (result: JsonPrettyWriteStateV1) {
+    return JsonPrettyWriteStateV1 {
+        ..state,
+        tasks: [JsonPrettyWriteTaskV1.Empty; 16],
+        depth: 0,
+        writer: JsonOrderWriterV1 { ..state.writer, ok: false }
+    };
+}
+
+fn pretty_array_next_step(
+    state: JsonPrettyWriteStateV1,
+    head: JsonValueV1,
+    next_items: JsonValueV1,
+    first: bool,
+    indent: u64
+) -> (result: JsonPrettyWriteStateV1) {
+    let separated: JsonOrderWriterV1 = select(
+        first, state.writer, writer_byte(state.writer, 44)
+    );
+    let member: JsonOrderWriterV1 = pretty_newline_indent(separated, indent +% 1);
+    let queued: JsonPrettyWriteStateV1 = pretty_write_push(
+        JsonPrettyWriteStateV1 { ..state, writer: member },
+        JsonPrettyWriteTaskV1.ArrayNext {
+            remaining: next_items, first: false, indent: indent
+        }
+    );
+    return pretty_write_push(
+        queued,
+        JsonPrettyWriteTaskV1.Value { value: head, indent: indent +% 1 }
+    );
+}
+
+fn pretty_object_next_step(
+    state: JsonPrettyWriteStateV1,
+    next_fields: JsonValueV1,
+    key: KeyV1,
+    value: JsonValueV1,
+    first: bool,
+    indent: u64,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    let separated: JsonOrderWriterV1 = select(
+        first, state.writer, writer_byte(state.writer, 44)
+    );
+    let line: JsonOrderWriterV1 = pretty_newline_indent(separated, indent +% 1);
+    let key_written: JsonOrderWriterV1 = writer_byte(writer_key(line, key, document), 58);
+    let member: JsonOrderWriterV1 = writer_byte(key_written, 32);
+    let queued: JsonPrettyWriteStateV1 = pretty_write_push(
+        JsonPrettyWriteStateV1 { ..state, writer: member },
+        JsonPrettyWriteTaskV1.ObjectNext {
+            remaining: next_fields, first: false, indent: indent
+        }
+    );
+    return pretty_write_push(
+        queued,
+        JsonPrettyWriteTaskV1.Value { value: value, indent: indent +% 1 }
+    );
+}
+
+fn pretty_write_array_value(
+    state: JsonPrettyWriteStateV1,
+    items: JsonValueV1,
+    indent: u64
+) -> (result: JsonPrettyWriteStateV1) {
+    if is_array_nil(items) {
+        return JsonPrettyWriteStateV1 {
+            ..state, writer: writer_bytes(state.writer, [91, 93])
+        };
+    }
+    return pretty_write_push(
+        JsonPrettyWriteStateV1 { ..state, writer: writer_byte(state.writer, 91) },
+        JsonPrettyWriteTaskV1.ArrayNext {
+            remaining: items, first: true, indent: indent
+        }
+    );
+}
+
+fn pretty_write_object_value(
+    state: JsonPrettyWriteStateV1,
+    fields: JsonValueV1,
+    indent: u64
+) -> (result: JsonPrettyWriteStateV1) {
+    if is_object_nil(fields) {
+        return JsonPrettyWriteStateV1 {
+            ..state, writer: writer_bytes(state.writer, [123, 125])
+        };
+    }
+    return pretty_write_push(
+        JsonPrettyWriteStateV1 { ..state, writer: writer_byte(state.writer, 123) },
+        JsonPrettyWriteTaskV1.ObjectNext {
+            remaining: fields, first: true, indent: indent
+        }
+    );
+}
+
+fn pretty_write_task_step(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    if state.depth == 0 || !state.writer.ok { return state; }
+    let task_index: u64 = state.depth -% 1;
+    let task: JsonPrettyWriteTaskV1 = state.tasks[task_index];
+    let popped: JsonPrettyWriteStateV1 = JsonPrettyWriteStateV1 {
+        ..state,
+        tasks: replace(state.tasks, task_index, JsonPrettyWriteTaskV1.Empty),
+        depth: task_index
+    };
+    return match task {
+        Empty => pretty_write_failure(popped),
+        Value { value: value, indent: indent } => match value {
+            Empty => pretty_write_failure(popped),
+            Null => JsonPrettyWriteStateV1 {
+                ..popped, writer: writer_bytes(popped.writer, [110, 117, 108, 108])
+            },
+            Boolean { value: flag } => JsonPrettyWriteStateV1 {
+                ..popped,
+                writer: select(
+                    flag,
+                    writer_bytes(popped.writer, [116, 114, 117, 101]),
+                    writer_bytes(popped.writer, [102, 97, 108, 115, 101])
+                )
+            },
+            Integer { negative: negative, magnitude: magnitude } => JsonPrettyWriteStateV1 {
+                ..popped, writer: writer_integer(popped.writer, negative, magnitude)
+            },
+            Raw { start: start, length: length } => JsonPrettyWriteStateV1 {
+                ..popped, writer: writer_source_range(popped.writer, document, start, length)
+            },
+            String { start: start, length: length } => JsonPrettyWriteStateV1 {
+                ..popped,
+                writer: writer_byte(
+                    writer_source_range(writer_byte(popped.writer, 34), document, start, length),
+                    34
+                )
+            },
+            Utf8String { start: start, length: length } => JsonPrettyWriteStateV1 {
+                ..popped, writer: writer_quoted_source_range(popped.writer, document, start, length)
+            },
+            Array { items: items } => pretty_write_array_value(popped, items, indent),
+            Object { fields: fields } => pretty_write_object_value(popped, fields, indent),
+            ArrayNil => pretty_write_failure(popped),
+            ArrayCons { head: head, tail: tail } => pretty_write_failure(popped),
+            ObjectNil => pretty_write_failure(popped),
+            ObjectCons { key: key, value: inner, tail: tail } => pretty_write_failure(popped)
+        },
+        ArrayNext { remaining: remaining, first: first, indent: indent } => match remaining {
+            ArrayNil => JsonPrettyWriteStateV1 {
+                ..popped,
+                writer: writer_byte(pretty_newline_indent(popped.writer, indent), 93)
+            },
+            ArrayCons { head: head, tail: tail } => pretty_array_next_step(
+                popped, head, tail, first, indent
+            ),
+            Empty => pretty_write_failure(popped),
+            Null => pretty_write_failure(popped),
+            Raw { start: start, length: length } => pretty_write_failure(popped),
+            String { start: start, length: length } => pretty_write_failure(popped),
+            Boolean { value: flag } => pretty_write_failure(popped),
+            Integer { negative: negative, magnitude: magnitude } => pretty_write_failure(popped),
+            Utf8String { start: start, length: length } => pretty_write_failure(popped),
+            Array { items: items } => pretty_write_failure(popped),
+            Object { fields: fields } => pretty_write_failure(popped),
+            ObjectNil => pretty_write_failure(popped),
+            ObjectCons { key: key, value: value, tail: tail } => pretty_write_failure(popped)
+        },
+        ObjectNext { remaining: remaining, first: first, indent: indent } => match remaining {
+            ObjectNil => JsonPrettyWriteStateV1 {
+                ..popped,
+                writer: writer_byte(pretty_newline_indent(popped.writer, indent), 125)
+            },
+            ObjectCons { key: key, value: value, tail: tail } => pretty_object_next_step(
+                popped, tail, key, value, first, indent, document
+            ),
+            Empty => pretty_write_failure(popped),
+            Null => pretty_write_failure(popped),
+            Raw { start: start, length: length } => pretty_write_failure(popped),
+            String { start: start, length: length } => pretty_write_failure(popped),
+            Boolean { value: flag } => pretty_write_failure(popped),
+            Integer { negative: negative, magnitude: magnitude } => pretty_write_failure(popped),
+            Utf8String { start: start, length: length } => pretty_write_failure(popped),
+            Array { items: items } => pretty_write_failure(popped),
+            Object { fields: fields } => pretty_write_failure(popped),
+            ArrayNil => pretty_write_failure(popped),
+            ArrayCons { head: head, tail: tail } => pretty_write_failure(popped)
+        }
+    };
+}
+
+fn pretty_write_advance_three(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    let first: JsonPrettyWriteStateV1 = pretty_write_task_step(state, document);
+    let second: JsonPrettyWriteStateV1 = pretty_write_task_step(first, document);
+    return pretty_write_task_step(second, document);
+}
+
+fn pretty_write_run_16(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    iterate i up_to 16 carrying current: JsonPrettyWriteStateV1 = state {
+        next current = pretty_write_advance_three(current, document);
+    }
+    return current;
+}
+
+fn pretty_write_run_64(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    iterate i up_to 64 carrying current: JsonPrettyWriteStateV1 = state {
+        next current = pretty_write_advance_three(current, document);
+    }
+    return current;
+}
+
+fn pretty_write_run_256(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    iterate i up_to 256 carrying current: JsonPrettyWriteStateV1 = state {
+        next current = pretty_write_advance_three(current, document);
+    }
+    return current;
+}
+
+fn pretty_write_run_512(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    iterate i up_to 512 carrying current: JsonPrettyWriteStateV1 = state {
+        next current = pretty_write_advance_three(current, document);
+    }
+    return current;
+}
+
+fn pretty_write_run_1024(
+    state: JsonPrettyWriteStateV1,
+    document: JsonTokenDocumentV1
+) -> (result: JsonPrettyWriteStateV1) {
+    iterate i up_to 1024 carrying current: JsonPrettyWriteStateV1 = state {
+        next current = pretty_write_advance_three(current, document);
+    }
+    return current;
+}
+
+fn pretty_write_finish(state: JsonPrettyWriteStateV1) -> (result: JsonOrderWriterV1) {
+    if state.depth == 0 { return writer_byte(state.writer, 10); }
+    return JsonOrderWriterV1 { ..state.writer, ok: false };
+}
+
+fn write_pretty_json(
+    value: JsonValueV1,
+    writer: JsonOrderWriterV1,
+    document: JsonTokenDocumentV1,
+    node_count: u64
+) -> (result: JsonOrderWriterV1) {
+    let empty: [JsonPrettyWriteTaskV1; 16] = [JsonPrettyWriteTaskV1.Empty; 16];
+    let initial: JsonPrettyWriteStateV1 = pretty_write_push(
+        JsonPrettyWriteStateV1 { tasks: empty, depth: 0, writer: writer },
+        JsonPrettyWriteTaskV1.Value { value: value, indent: 0 }
+    );
+    if node_count <= 16 {
+        return pretty_write_finish(pretty_write_run_16(initial, document));
+    }
+    if node_count <= 64 {
+        return pretty_write_finish(pretty_write_run_64(initial, document));
+    }
+    if node_count <= 256 {
+        return pretty_write_finish(pretty_write_run_256(initial, document));
+    }
+    if node_count <= 512 {
+        return pretty_write_finish(pretty_write_run_512(initial, document));
+    }
+    return pretty_write_finish(pretty_write_run_1024(initial, document));
 }
 
 fn empty_output_chunk() -> (result: JsonOrderChunkV1) {
@@ -1970,6 +2627,632 @@ fn writer_for_parse(parsed: ParseStateV1, document: JsonTokenDocumentV1) -> (res
         return write_json(parsed.root, writer_empty(), document, parsed.root_writer_steps);
     }
     return JsonOrderWriterV1 { ..writer_empty(), ok: false };
+}
+
+fn public_value_text_shape(document: JsonTokenDocumentV1) -> (result: DocumentShapeV1) {
+    if document.byte_length == 0 && document.chunks.len == 0 {
+        return DocumentShapeV1 { total: 0, valid: true };
+    }
+    return document_shape(document);
+}
+
+fn public_value_tape_digit(value: byte) -> (result: u64) {
+    let number: u64 = value as u64;
+    if number >= 48 && number <= 57 { return number -% 48; }
+    if number >= 97 && number <= 102 { return number -% 87; }
+    return 16;
+}
+
+fn invalid_public_value_node() -> (result: PublicValueNodeV1) {
+    return PublicValueNodeV1 {
+        kind: 255,
+        has_key: false,
+        key_start: 0,
+        key_length: 0,
+        text_start: 0,
+        text_length: 0,
+        magnitude: 0,
+        negative: false,
+        child_count: 0,
+        valid: false
+    };
+}
+
+fn public_value_tape_hex_step(
+    state: PublicValueHexScanStateV1,
+    chunk: JsonTokenInputChunkV1,
+    terminator: byte,
+    index: u64
+) -> (result: PublicValueHexScanStateV1) {
+    if !state.valid || state.done { return state; }
+    if state.position >= chunk.length {
+        return PublicValueHexScanStateV1 { ..state, valid: false };
+    }
+    let current: byte = chunk.bytes[state.position];
+    if current == terminator {
+        return PublicValueHexScanStateV1 {
+            ..state,
+            position: state.position +% 1,
+            done: state.digits > 0,
+            valid: state.digits > 0
+        };
+    }
+    if index >= 16 || state.digits >= 16 {
+        return PublicValueHexScanStateV1 { ..state, valid: false };
+    }
+    let digit: u64 = public_value_tape_digit(current);
+    if digit > 15 { return PublicValueHexScanStateV1 { ..state, valid: false }; }
+    return PublicValueHexScanStateV1 {
+        ..state,
+        value: state.value *% 16 +% digit,
+        position: state.position +% 1,
+        digits: state.digits +% 1
+    };
+}
+
+fn public_value_tape_hex(
+    chunk: JsonTokenInputChunkV1,
+    start: u64,
+    terminator: byte
+) -> (result: PublicValueHexResultV1) {
+    let initial: PublicValueHexScanStateV1 = PublicValueHexScanStateV1 {
+        value: 0,
+        position: start,
+        digits: 0,
+        done: false,
+        valid: start < chunk.length
+    };
+    iterate i up_to 17 carrying scanned: PublicValueHexScanStateV1 = initial {
+        next scanned = public_value_tape_hex_step(scanned, chunk, terminator, i);
+    }
+    return PublicValueHexResultV1 {
+        value: scanned.value,
+        next_offset: scanned.position,
+        valid: scanned.valid && scanned.done
+    };
+}
+
+fn public_value_key_span(
+    chunk: JsonTokenInputChunkV1,
+    start: u64,
+    has_key: bool
+) -> (result: PublicValueKeySpanResultV1) {
+    if !has_key {
+        return PublicValueKeySpanResultV1 {
+            start: 0, length: 0, next_offset: start, valid: true
+        };
+    }
+    let key_start: PublicValueHexResultV1 = public_value_tape_hex(chunk, start, 44);
+    let key_length: PublicValueHexResultV1 = public_value_tape_hex(
+        chunk, key_start.next_offset, 44
+    );
+    return PublicValueKeySpanResultV1 {
+        start: key_start.value,
+        length: key_length.value,
+        next_offset: key_length.next_offset,
+        valid: key_start.valid && key_length.valid
+    };
+}
+
+fn public_value_payload(
+    chunk: JsonTokenInputChunkV1,
+    kind: byte,
+    start: u64
+) -> (result: PublicValuePayloadResultV1) {
+    if kind <= 2 {
+        let terminator_ok: bool = start < chunk.length && chunk.bytes[start] == 59;
+        return PublicValuePayloadResultV1 {
+            text_start: 0, text_length: 0, magnitude: 0, child_count: 0,
+            next_offset: start +% 1, valid: terminator_ok
+        };
+    }
+    if kind == 3 {
+        let magnitude: PublicValueHexResultV1 = public_value_tape_hex(chunk, start, 59);
+        return PublicValuePayloadResultV1 {
+            text_start: 0, text_length: 0, magnitude: magnitude.value, child_count: 0,
+            next_offset: magnitude.next_offset, valid: magnitude.valid
+        };
+    }
+    if kind == 4 {
+        let text_start: PublicValueHexResultV1 = public_value_tape_hex(chunk, start, 44);
+        let text_length: PublicValueHexResultV1 = public_value_tape_hex(
+            chunk, text_start.next_offset, 59
+        );
+        return PublicValuePayloadResultV1 {
+            text_start: text_start.value, text_length: text_length.value,
+            magnitude: 0, child_count: 0, next_offset: text_length.next_offset,
+            valid: text_start.valid && text_length.valid
+        };
+    }
+    if kind == 5 || kind == 6 {
+        let child_count: PublicValueHexResultV1 = public_value_tape_hex(chunk, start, 59);
+        return PublicValuePayloadResultV1 {
+            text_start: 0, text_length: 0, magnitude: 0,
+            child_count: child_count.value, next_offset: child_count.next_offset,
+            valid: child_count.valid
+        };
+    }
+    return PublicValuePayloadResultV1 {
+        text_start: 0, text_length: 0, magnitude: 0, child_count: 0,
+        next_offset: start, valid: false
+    };
+}
+
+fn public_value_node(chunk: JsonTokenInputChunkV1, start: u64) -> (result: PublicValueNodeReadResultV1) {
+    if start > chunk.length || 2 as u64 > chunk.length -% start {
+        return PublicValueNodeReadResultV1 { node: invalid_public_value_node(), next_offset: start };
+    }
+    let raw_kind: u64 = public_value_tape_digit(chunk.bytes[start]);
+    let flags: u64 = public_value_tape_digit(chunk.bytes[start +% 1]);
+    let kind_valid: bool = raw_kind <= 6;
+    let kind: byte = select(kind_valid, raw_kind as byte, 255);
+    let has_key: bool = flags == 1 || flags == 3;
+    let negative: bool = flags == 2 || flags == 3;
+    let key: PublicValueKeySpanResultV1 = public_value_key_span(
+        chunk, start +% 2, has_key
+    );
+    let payload: PublicValuePayloadResultV1 = public_value_payload(
+        chunk, kind, key.next_offset
+    );
+    let node: PublicValueNodeV1 = PublicValueNodeV1 {
+        kind: kind,
+        has_key: has_key,
+        key_start: key.start,
+        key_length: key.length,
+        text_start: payload.text_start,
+        text_length: payload.text_length,
+        magnitude: payload.magnitude,
+        negative: negative,
+        child_count: payload.child_count,
+        valid: kind_valid && flags <= 3 && key.valid && payload.valid
+    };
+    return PublicValueNodeReadResultV1 { node: node, next_offset: payload.next_offset };
+}
+
+fn public_value_tape_shape_step(
+    state: PublicValueTapeShapeStateV1,
+    chunk: JsonTokenInputChunkV1
+) -> (result: PublicValueTapeShapeStateV1) {
+    let valid_chunk: bool = chunk.length > 0 && chunk.length <= 1024
+        && chunk.length == chunk.bytes.len;
+    return PublicValueTapeShapeStateV1 {
+        total: state.total +% chunk.length,
+        valid: state.valid && valid_chunk
+    };
+}
+
+fn public_value_tape_shape(request: PublicValueRequestV1) -> (result: DocumentShapeV1) {
+    if request.node_count == 0 || request.node_count > 1024
+        || request.node_tape.len == 0 || request.node_tape.len > 64 {
+        return DocumentShapeV1 { total: 0, valid: false };
+    }
+    let initial: PublicValueTapeShapeStateV1 = PublicValueTapeShapeStateV1 {
+        total: 0, valid: true
+    };
+    iterate i over request.node_tape carrying shape: PublicValueTapeShapeStateV1 = initial {
+        next shape = public_value_tape_shape_step(shape, request.node_tape[i]);
+    }
+    return DocumentShapeV1 {
+        total: shape.total,
+        valid: shape.valid && shape.total > 0 && shape.total <= 65536
+    };
+}
+
+fn valid_public_value_request(request: PublicValueRequestV1) -> (result: bool) {
+    let text_shape: DocumentShapeV1 = public_value_text_shape(request.text);
+    let tape_shape: DocumentShapeV1 = public_value_tape_shape(request);
+    return same_bytes(request.schema_version, public_value_request_schema_v1())
+        && request.node_count > 0 && request.node_count <= 1024
+        && request.text.byte_length <= 65536 && text_shape.valid && tape_shape.valid;
+}
+
+fn valid_public_value_node(
+    text_length: u64,
+    node: PublicValueNodeV1,
+    expects_key: bool
+) -> (result: bool) {
+    if !node.valid || node.has_key != expects_key { return false; }
+    if expects_key {
+        if node.key_length > 256 || node.key_start > text_length
+            || node.key_length > text_length -% node.key_start { return false; }
+    }
+    if !expects_key && (node.key_start != 0 || node.key_length != 0) { return false; }
+    if node.kind == 4 {
+        return node.text_start <= text_length
+            && node.text_length <= text_length -% node.text_start
+            && node.child_count == 0 && node.magnitude == 0 && !node.negative;
+    }
+    if node.text_start != 0 || node.text_length != 0 { return false; }
+    if node.kind <= 2 {
+        return node.child_count == 0 && node.magnitude == 0 && !node.negative;
+    }
+    if node.kind == 3 { return node.child_count == 0; }
+    if node.kind == 5 {
+        return node.child_count <= 1024 && node.magnitude == 0 && !node.negative;
+    }
+    if node.kind == 6 {
+        return node.child_count <= 640 && node.magnitude == 0 && !node.negative;
+    }
+    return false;
+}
+
+fn public_value_key_byte_step(
+    state: PublicValueKeyCopyV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: PublicValueKeyCopyV1) {
+    if !state.valid || index >= length { return state; }
+    return PublicValueKeyCopyV1 {
+        bytes: replace(state.bytes, index, located_byte(document, start +% index)),
+        valid: true
+    };
+}
+
+fn public_value_key(document: JsonTokenDocumentV1, node: PublicValueNodeV1) -> (result: KeyV1) {
+    if !node.has_key || node.key_length > 256 || node.key_start > document.byte_length
+        || node.key_length > document.byte_length -% node.key_start {
+        return KeyV1 { ..empty_key(), valid: false };
+    }
+    let initial: PublicValueKeyCopyV1 = PublicValueKeyCopyV1 {
+        bytes: [0; 256],
+        valid: true
+    };
+    iterate i up_to 256 carrying copied: PublicValueKeyCopyV1 = initial {
+        next copied = public_value_key_byte_step(
+            copied, document, node.key_start, node.key_length, i
+        );
+    }
+    return KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: copied.bytes[0..node.key_length],
+        ordered_length: node.key_length,
+        json_escaped: false,
+        valid: copied.valid
+    };
+}
+
+fn empty_public_build_frame() -> (result: PublicValueBuildFrameV1) {
+    return PublicValueBuildFrameV1 {
+        node_kind: 0,
+        remaining: 0,
+        child_key: empty_key(),
+        items: JsonValueV1.Empty,
+        child_count: 0,
+        writer_steps: 0
+    };
+}
+
+fn empty_public_build_state() -> (result: PublicValueBuildStateV1) {
+    return PublicValueBuildStateV1 {
+        frames: [empty_public_build_frame(); 12],
+        depth: 0,
+        root: JsonValueV1.Empty,
+        root_writer_steps: 0,
+        has_root: false,
+        valid: true
+    };
+}
+
+fn public_value_can_accept(state: PublicValueBuildStateV1) -> (result: bool) {
+    if !state.valid { return false; }
+    if state.depth == 0 { return !state.has_root; }
+    return state.frames[state.depth -% 1].remaining > 0;
+}
+
+fn public_value_expects_key(state: PublicValueBuildStateV1) -> (result: bool) {
+    if state.depth == 0 { return false; }
+    return state.frames[state.depth -% 1].node_kind == 6;
+}
+
+fn public_value_append_child(
+    state: PublicValueBuildStateV1,
+    value: JsonValueV1,
+    value_writer_steps: u64,
+    key: KeyV1
+) -> (result: PublicValueBuildStateV1) {
+    if !public_value_can_accept(state) || is_empty_value(value) {
+        return PublicValueBuildStateV1 { ..state, valid: false };
+    }
+    if state.depth == 0 {
+        return PublicValueBuildStateV1 {
+            ..state,
+            root: value,
+            root_writer_steps: value_writer_steps,
+            has_root: true
+        };
+    }
+    let frame_index: u64 = state.depth -% 1;
+    let build_frame: PublicValueBuildFrameV1 = state.frames[frame_index];
+    if build_frame.node_kind == 5 {
+        let updated_build_frame: PublicValueBuildFrameV1 = PublicValueBuildFrameV1 {
+            ..build_frame,
+            remaining: build_frame.remaining -% 1,
+            items: prepend_array(build_frame.items, value),
+            child_count: build_frame.child_count +% 1,
+            writer_steps: build_frame.writer_steps +% value_writer_steps +% 1
+        };
+        return PublicValueBuildStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, updated_build_frame),
+            valid: !is_empty_value(updated_build_frame.items)
+        };
+    }
+    if build_frame.node_kind == 6 && key.valid {
+        let updated_build_frame: PublicValueBuildFrameV1 = PublicValueBuildFrameV1 {
+            ..build_frame,
+            remaining: build_frame.remaining -% 1,
+            items: append_object_field(build_frame.items, key, value),
+            child_count: build_frame.child_count +% 1,
+            writer_steps: build_frame.writer_steps +% value_writer_steps +% key.ordered_length +% 1
+        };
+        return PublicValueBuildStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, updated_build_frame),
+            valid: !is_empty_value(updated_build_frame.items)
+        };
+    }
+    return PublicValueBuildStateV1 { ..state, valid: false };
+}
+
+fn public_value_close_one(state: PublicValueBuildStateV1) -> (result: PublicValueBuildStateV1) {
+    let frame_index: u64 = state.depth -% 1;
+    let build_frame: PublicValueBuildFrameV1 = state.frames[frame_index];
+    if build_frame.remaining != 0 {
+        return state;
+    }
+    if build_frame.node_kind == 5 {
+        let value: JsonValueV1 = JsonValueV1.Array {
+            items: reverse_array(build_frame.items, JsonValueV1.ArrayNil)
+        };
+        let popped: PublicValueBuildStateV1 = PublicValueBuildStateV1 {
+            ..state,
+            frames: replace(state.frames, frame_index, empty_public_build_frame()),
+            depth: frame_index
+        };
+        return public_value_append_child(
+            popped, value, build_frame.writer_steps, build_frame.child_key
+        );
+    }
+    let sorted: ObjectSortResultV1 = sort_object_fields_merge(
+        build_frame.items, build_frame.child_count
+    );
+    if !sorted.valid { return PublicValueBuildStateV1 { ..state, valid: false }; }
+    let object: JsonValueV1 = JsonValueV1.Object { fields: sorted.fields };
+    let popped: PublicValueBuildStateV1 = PublicValueBuildStateV1 {
+        ..state,
+        frames: replace(state.frames, frame_index, empty_public_build_frame()),
+        depth: frame_index
+    };
+    return public_value_append_child(
+        popped, object, build_frame.writer_steps, build_frame.child_key
+    );
+}
+
+fn public_value_settle_step(
+    state: PublicValueBuildStateV1,
+    index: u64
+) -> (result: PublicValueBuildStateV1) {
+    if !state.valid || state.depth == 0 { return state; }
+    let frame: PublicValueBuildFrameV1 = state.frames[state.depth -% 1];
+    if frame.remaining == 0 { return public_value_close_one(state); }
+    return state;
+}
+
+fn public_value_settle(state: PublicValueBuildStateV1) -> (result: PublicValueBuildStateV1) {
+    if !state.valid || state.depth == 0 { return state; }
+    let top: PublicValueBuildFrameV1 = state.frames[state.depth -% 1];
+    if top.remaining != 0 { return state; }
+    iterate i up_to 12 carrying settled: PublicValueBuildStateV1 = state {
+        next settled = public_value_settle_step(settled, i);
+    }
+    return settled;
+}
+
+fn public_value_open_container(
+    state: PublicValueBuildStateV1,
+    node: PublicValueNodeV1,
+    key: KeyV1
+) -> (result: PublicValueBuildStateV1) {
+    if !public_value_can_accept(state) || state.depth >= 12 {
+        return PublicValueBuildStateV1 { ..state, valid: false };
+    }
+    let is_array: bool = node.kind == 5;
+    let items: JsonValueV1 = select(
+        is_array,
+        JsonValueV1.ArrayNil,
+        JsonValueV1.ObjectNil
+    );
+    let build_frame: PublicValueBuildFrameV1 = PublicValueBuildFrameV1 {
+        node_kind: node.kind,
+        remaining: node.child_count,
+        child_key: key,
+        items: items,
+        child_count: 0,
+        writer_steps: 2
+    };
+    let opened: PublicValueBuildStateV1 = PublicValueBuildStateV1 {
+        ..state,
+        frames: replace(state.frames, state.depth, build_frame),
+        depth: state.depth +% 1
+    };
+    return public_value_settle(opened);
+}
+
+fn public_value_process_node(
+    state: PublicValueBuildStateV1,
+    text_length: u64,
+    node: PublicValueNodeV1,
+    key: KeyV1
+) -> (result: PublicValueBuildStateV1) {
+    let expects_key: bool = public_value_expects_key(state);
+    if !public_value_can_accept(state)
+        || !valid_public_value_node(text_length, node, expects_key) {
+        return PublicValueBuildStateV1 { ..state, valid: false };
+    }
+    if node.kind == 5 || node.kind == 6 {
+        return public_value_open_container(state, node, key);
+    }
+    let value: JsonValueV1 = select(
+        node.kind == 0,
+        JsonValueV1.Null,
+        select(
+            node.kind == 1 || node.kind == 2,
+            JsonValueV1.Boolean { value: node.kind == 2 },
+            select(
+                node.kind == 3,
+                JsonValueV1.Integer { negative: node.negative, magnitude: node.magnitude },
+                JsonValueV1.Utf8String { start: node.text_start, length: node.text_length }
+            )
+        )
+    );
+    let writer_steps: u64 = select(
+        node.kind == 3,
+        integer_digit_length(node.magnitude) +% select(node.negative, 1, 0),
+        select(node.kind == 4, node.text_length +% 2, 1)
+    );
+    let leaf_key: KeyV1 = select(expects_key, key, empty_key());
+    return public_value_settle(
+        public_value_append_child(state, value, writer_steps, leaf_key)
+    );
+}
+
+fn public_value_tape_node_step(
+    cursor: PublicValueTapeCursorV1,
+    chunk: JsonTokenInputChunkV1,
+    document: JsonTokenDocumentV1,
+    text_length: u64
+) -> (result: PublicValueTapeCursorV1) {
+    if !cursor.build.valid || cursor.remaining_nodes == 0
+        || cursor.offset >= chunk.length {
+        return cursor;
+    }
+    let read: PublicValueNodeReadResultV1 = public_value_node(chunk, cursor.offset);
+    let key: KeyV1 = public_value_node_key(cursor.build, document, read.node);
+    let built: PublicValueBuildStateV1 = public_value_process_node(
+        cursor.build, text_length, read.node, key
+    );
+    return PublicValueTapeCursorV1 {
+        build: built,
+        offset: read.next_offset,
+        remaining_nodes: cursor.remaining_nodes -% 1
+    };
+}
+
+fn public_value_node_key(
+    state: PublicValueBuildStateV1,
+    document: JsonTokenDocumentV1,
+    node: PublicValueNodeV1
+) -> (result: KeyV1) {
+    if public_value_expects_key(state) { return public_value_key(document, node); }
+    return empty_key();
+}
+
+fn public_value_tape_chunk_step(
+    cursor: PublicValueTapeCursorV1,
+    chunk: JsonTokenInputChunkV1,
+    document: JsonTokenDocumentV1,
+    text_length: u64
+) -> (result: PublicValueTapeCursorV1) {
+    iterate i up_to 64 carrying parsed: PublicValueTapeCursorV1 = cursor {
+        next parsed = public_value_tape_node_step(
+            parsed, chunk, document, text_length
+        );
+    }
+    if parsed.offset != chunk.length {
+        return PublicValueTapeCursorV1 {
+            ..parsed,
+            build: PublicValueBuildStateV1 { ..parsed.build, valid: false },
+            offset: 0
+        };
+    }
+    return PublicValueTapeCursorV1 { ..parsed, offset: 0 };
+}
+
+fn empty_public_value_build() -> (result: PublicValueBuildResultV1) {
+    return PublicValueBuildResultV1 {
+        value: JsonValueV1.Empty,
+        next_node: 0,
+        writer_steps: 0,
+        valid: false
+    };
+}
+
+fn build_public_value(request: PublicValueRequestV1) -> (result: PublicValueBuildResultV1) {
+    let initial: PublicValueTapeCursorV1 = PublicValueTapeCursorV1 {
+        build: empty_public_build_state(),
+        offset: 0,
+        remaining_nodes: request.node_count
+    };
+    iterate i over request.node_tape carrying cursor: PublicValueTapeCursorV1 = initial {
+        next cursor = public_value_tape_chunk_step(
+            cursor, request.node_tape[i], request.text, request.text.byte_length
+        );
+    }
+    let built: PublicValueBuildStateV1 = public_value_settle(cursor.build);
+    let valid: bool = built.valid && built.depth == 0 && built.has_root
+        && cursor.remaining_nodes == 0;
+    return PublicValueBuildResultV1 {
+        value: built.root,
+        next_node: request.node_count,
+        writer_steps: built.root_writer_steps,
+        valid: valid
+    };
+}
+
+fn public_value_input_result(
+    supported: bool,
+    node_count: u64,
+    writer: JsonOrderWriterV1
+) -> (result: PublicValueInputResultV1) {
+    let built: JsonOrderChunkBuilderV1 = output_chunks(writer);
+    let ready: bool = supported && writer.ok && writer.length > 0
+        && writer.length <= 65536 && built.count > 0 && built.count <= 64;
+    return PublicValueInputResultV1 {
+        schema_version: public_value_result_schema_v1(),
+        supported: ready,
+        node_count: select(ready, node_count, 0),
+        document_length: select(ready, writer.length, 0),
+        chunk_count: select(ready, built.count, 0),
+        chunks: select(ready, built.chunks[0..built.count], built.chunks[0..0])
+    };
+}
+
+fn public_result_json_value_input_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 118, 97, 108, 117, 101, 45, 105, 110, 112, 117, 116, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: PublicValueRequestV1 = structured_read(
+        context.argv[0], public_value_request_schema_v1()
+    );
+    let request_valid: bool = valid_public_value_request(request);
+    let built: PublicValueBuildResultV1 = select(
+        request_valid,
+        build_public_value(request),
+        empty_public_value_build()
+    );
+    let complete: bool = request_valid && built.valid && built.next_node == request.node_count;
+    let writer: JsonOrderWriterV1 = select(
+        complete,
+        write_pretty_json(built.value, writer_empty(), request.text, request.node_count),
+        JsonOrderWriterV1 { ..writer_empty(), ok: false }
+    );
+    let result: PublicValueInputResultV1 = public_value_input_result(
+        complete && writer.ok, request.node_count, writer
+    );
+    let published: u64 = structured_write(
+        context.argv[1], public_value_result_schema_v1(), result
+    );
+    if published == 0 {
+        return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 118, 97, 108, 117, 101, 32, 105, 110, 112, 117, 116, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
 }
 
 fn valid_order_request(request: JsonOrderRequestV1, shape: DocumentShapeV1) -> (result: bool) {
