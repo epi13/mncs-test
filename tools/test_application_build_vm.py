@@ -132,6 +132,22 @@ def run() -> dict[str, object]:
         ("python/mncs_vm_client/__init__.py", "target/debug/mncs-vm"),
     )
     vm_executable = Path(os.environ.get("MNCS_VM_BIN", vm_root / "target/debug/mncs-vm")).resolve()
+    language_root = _selected_toolchain_root(
+        "MNCS_LANGUAGE_CHECKOUT",
+        "mncs-language",
+        ("target/release/mncs",),
+    )
+    selected_mncs = (language_root / "target/release/mncs").resolve()
+    configured_mncs = os.environ.get("MNCS") or os.environ.get("MNCS_BINARY")
+    if configured_mncs:
+        candidate = Path(mncs_test.resolve_mncs(configured_mncs, ROOT)).resolve()
+        try:
+            candidate.relative_to(language_root.resolve())
+        except ValueError:
+            pass
+        else:
+            if candidate.is_file():
+                selected_mncs = candidate
     probe = (compiler_root / ".bootstrap/target/release/mncs-compiler-stage0-probe").resolve()
     for path in (compiler_root / "tools/application_build_provider.py", probe,
                  vm_root / "python/mncs_vm_client/__init__.py", vm_executable):
@@ -270,8 +286,7 @@ def run() -> dict[str, object]:
                     module=APP_MODULE,
                     session=session,
                     mncs=mncs_test.resolve_run_mncs(
-                        os.environ.get("MNCS") or os.environ.get("MNCS_BINARY"),
-                        "stage0-reference", ROOT,
+                        str(selected_mncs), "stage0-reference", ROOT,
                     ),
                     cwd=ROOT,
                     environment=selected_environment,

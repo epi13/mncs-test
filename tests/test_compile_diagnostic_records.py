@@ -52,6 +52,16 @@ def _document_result(document: bytes) -> dict:
     )
 
 
+def _native_records(native: dict, document: bytes) -> list[dict] | None:
+    return mncs_test.native_compile_diagnostic_records(
+        native,
+        document,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+
 def test_native_diagnostic_span_matches_independent_json_values() -> None:
     diagnostics = [
         {
@@ -124,7 +134,7 @@ def test_native_diagnostic_span_matches_independent_json_values() -> None:
     length = native["diagnostics_json_length"]
     assert document[start:start + length].startswith(b"[")
     assert document[start:start + length].endswith(b"]")
-    assert mncs_test.native_compile_diagnostic_records(native, document) == diagnostics
+    assert _native_records(native, document) == diagnostics
 
 
 def test_native_projection_accepts_empty_main_related_array() -> None:
@@ -144,7 +154,7 @@ def test_native_projection_accepts_empty_main_related_array() -> None:
 
     assert native is not None
     assert native["projection_supported"] is True
-    assert mncs_test.native_compile_diagnostic_records(native, document) == [diagnostic]
+    assert _native_records(native, document) == [diagnostic]
 
 
 def test_native_projection_without_a_diagnostic_array_returns_empty_list() -> None:
@@ -164,7 +174,7 @@ def test_native_projection_without_a_diagnostic_array_returns_empty_list() -> No
     assert native["projection_supported"] is True
     assert native["diagnostics_json_present"] is False
     assert native["diagnostic_count"] == 0
-    assert mncs_test.native_compile_diagnostic_records(native, document) == []
+    assert _native_records(native, document) == []
 
 
 @pytest.mark.parametrize(
@@ -211,7 +221,7 @@ def test_native_span_preserves_extended_json_diagnostic_values(
 
     assert native is not None
     assert native["projection_supported"] is True
-    assert mncs_test.native_compile_diagnostic_records(native, document) == [diagnostic]
+    assert _native_records(native, document) == [diagnostic]
 
 
 def test_native_span_filters_non_object_diagnostic_array_entries() -> None:
@@ -233,7 +243,51 @@ def test_native_span_filters_non_object_diagnostic_array_entries() -> None:
     assert native is not None
     assert native["projection_supported"] is True
     assert native["diagnostic_count"] == 1
-    assert mncs_test.native_compile_diagnostic_records(native, document) == [diagnostic]
+    assert _native_records(native, document) == [diagnostic]
+
+
+def test_native_token_values_decode_only_scalar_spans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostic = {
+        "message": "λ 東京",
+        "span": {"start": 4, "end": 7},
+        "expected": ["integer", "identifier"],
+        "found": {"kind": "literal", "value": 3.5},
+    }
+    document = json.dumps([diagnostic], ensure_ascii=True, separators=(",", ":")).encode()
+    native = _document_result(document)
+    start = native["diagnostics_json_start"]
+    length = native["diagnostics_json_length"]
+    selected = document[start:start + length]
+    stream = mncs_test._native_public_result_token_stream(
+        selected,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+    assert stream is not None
+    packed_document, token_words = stream
+
+    original_loads = json.loads
+    decoded_spans: list[str] = []
+
+    def scalar_only_loads(value: str | bytes | bytearray, *args, **kwargs):
+        text = value.decode("utf-8") if isinstance(value, (bytes, bytearray)) else value
+        decoded_spans.append(text)
+        assert text.lstrip()[:1] not in ("[", "{"), "compound JSON reached host parsing"
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(mncs_test.json, "loads", scalar_only_loads)
+    assert mncs_test._decode_native_json_tokens(
+        token_words, selected, packed_document["document"],
+    ) == [diagnostic]
+    assert decoded_spans
+
+    with pytest.raises(mncs_test.AdapterError, match="malformed bounds"):
+        mncs_test._decode_native_json_tokens(
+            token_words[1:], selected, packed_document["document"],
+        )
 
 
 def test_native_span_declines_selected_arrays_over_its_item_bound() -> None:
@@ -302,6 +356,66 @@ def test_compile_entry_decodes_only_native_diagnostic_span(
     assert result["status"] == "expected_failure"
     assert result["compile_verdict"] == "expected_failure"
     assert result["diagnostics"] == expected
+
+
+def test_compile_entry_falls_back_atomically_when_native_tokens_decline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostic = {
+        "message": "bounded compatibility value",
+        "span": {"start": 2},
+        "expected": ["integer", "float"],
+    }
+    document = json.dumps([diagnostic], separators=(",", ":")).encode()
+    process = {
+        "stdout": document,
+        "stderr": b"",
+        "returncode": 2,
+        "timed_out": False,
+        "transport_error": None,
+        "stdout_artifact": {"name": "stdout"},
+        "stderr_artifact": {"name": "stderr"},
+        "command_artifact": {"name": "command"},
+    }
+    projection = {
+        "supported": True,
+        "projection_supported": True,
+        "root_is_object": False,
+        "valid_field_present": False,
+        "valid_field_is_true": False,
+        "diagnostics_json_present": True,
+        "diagnostics_json_start": 0,
+        "diagnostics_json_length": len(document),
+        "diagnostic_count": 1,
+        "verdict": "expected_failure",
+    }
+    monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        mncs_test,
+        "native_compile_diagnostic_document_result",
+        lambda *args, **kwargs: projection,
+    )
+    monkeypatch.setattr(mncs_test, "_native_public_result_token_stream", lambda *args, **kwargs: None)
+
+    result = mncs_test.compile_entry(
+        test={
+            "id": "native-token-bound-compatibility",
+            "entry": "invalid_return",
+            "kind": "compile-fail",
+            "diagnostic_codes": ["MNE"],
+        },
+        source_path=ROOT / "tests/fixtures/compile_fail.mncs",
+        source_text="",
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+        default_timeout=30,
+        artifacts=object(),
+        artifact_key="native-token-bound-compatibility",
+    )
+
+    assert result["status"] == "expected_failure"
+    assert result["diagnostics"] == [diagnostic]
 
 
 def test_compile_entry_fallback_preserves_unsupported_diagnostic_values(

@@ -170,6 +170,18 @@ scanner no longer stores decoded diagnostic strings, span fields, expected
 tokens, or related-record arrays. Invalid documents, excessive nesting, and
 over-bound arrays still decline atomically to the compatibility parser.
 
+P-069 tokenizes the selected diagnostic span through the existing Test-owned
+MNCS JSON token tape. The native scanner validates the document and emits
+bounded source spans for structural and scalar tokens; Python checks token
+coordinates and delimiters against the selected bytes, then builds the public
+list and dictionaries from those events. Only individual scalar spans reach
+Python's JSON scalar decoder, so supported arrays and objects are no longer
+parsed into a host JSON tree. The path is capped at 512 tokens and the existing
+65,536-byte input bound. Token-bound declines fall back atomically to the
+compatibility parser, preserving arbitrary public diagnostic values. The
+Stdlib cursor remains unchanged because this slice has one Test consumer and
+uses Test's existing token ABI.
+
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite
 result policy. Retained-session batches are projected into bounded cases and
