@@ -120,6 +120,12 @@ fn observe_many(
     return current;
 }
 
+// Start a retained-session fold from the canonical empty summary without a
+// separate host-visible initialization call.
+fn fold_many(tests: [TestResult; up_to 16]) -> (result: SuiteSummary) {
+    return observe_many(empty(), tests);
+}
+
 fn observe_failure(summary: SuiteSummary, kind: FailureKind, test: TestResult) -> (result: SuiteSummary) {
     let failed: SuiteSummary = SuiteSummary { ..summary, failed: summary.failed +% 1 };
     return match kind {

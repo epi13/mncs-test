@@ -253,7 +253,7 @@ def test_raw_result_json_fragment_splice_preserves_nested_value() -> None:
     }
 
 
-def test_suite_observe_many_sends_raw_returned_values_in_one_request() -> None:
+def test_suite_fold_many_sends_raw_returned_values_in_one_request() -> None:
     class RawDocumentSession:
         timings: list[dict[str, object]] = []
         request_document: bytes | None = None
@@ -271,10 +271,45 @@ def test_suite_observe_many_sends_raw_returned_values_in_one_request() -> None:
         json.dumps(_returned_pass_result(), separators=(",", ":")).encode(),
     ]
     session = RawDocumentSession()
-    output = mncs_test._suite_observe_many_with_values(
+    output = mncs_test._suite_many_with_values(
         session=session,  # type: ignore[arg-type]
-        summary_value={"summary": "before"},
+        function="fold_many",
+        summary_value=None,
         values=values,
+        step_budget=4096,
+        index=0,
+    )
+
+    assert session.request_count == 1
+    assert output == {"status": "returned", "returned": [{"summary": "next"}]}
+    request = json.loads(session.request_document or b"")[0]
+    assert request["function"] == "fold_many"
+    assert request["args"] == [{
+        "sequence": {"values": [_returned_pass_result(), _returned_pass_result()]}
+    }]
+    for value in values:
+        assert value in (session.request_document or b"")
+
+
+def test_suite_observe_many_retains_incremental_summary_argument() -> None:
+    class RawDocumentSession:
+        timings: list[dict[str, object]] = []
+        request_document: bytes | None = None
+        request_count = 0
+
+        def call_batch_request_document(
+            self, request_document: bytes, *, request_count: int = 1
+        ) -> bytes:
+            self.request_document = request_document
+            self.request_count = request_count
+            return b'[{"status":"returned","returned":[{"summary":"next"}]}]'
+
+    session = RawDocumentSession()
+    output = mncs_test._suite_many_with_values(
+        session=session,  # type: ignore[arg-type]
+        function="observe_many",
+        summary_value={"summary": "before"},
+        values=[json.dumps(_returned_pass_result(), separators=(",", ":")).encode()],
         step_budget=4096,
         index=0,
     )
@@ -285,10 +320,60 @@ def test_suite_observe_many_sends_raw_returned_values_in_one_request() -> None:
     assert request["function"] == "observe_many"
     assert request["args"][0] == {"summary": "before"}
     assert request["args"][1] == {
-        "sequence": {"values": [_returned_pass_result(), _returned_pass_result()]}
+        "sequence": {"values": [_returned_pass_result()]}
     }
-    for value in values:
-        assert value in (session.request_document or b"")
+
+
+def test_native_suite_fold_uses_fold_many_then_incremental_observers(monkeypatch) -> None:
+    class RetainedSession:
+        timings: list[dict[str, object]] = []
+
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def call_batch_request_document(
+            self, request_document: bytes, *, request_count: int = 1
+        ) -> bytes:
+            assert request_count == 1
+            request = json.loads(request_document)[0]
+            self.requests.append(request)
+            summary = {"summary_call": len(self.requests)}
+            return json.dumps([{"status": "returned", "returned": [summary]}]).encode()
+
+    expected_summary = {"total": 17, "verdict": "PASS"}
+    monkeypatch.setattr(
+        mncs_test,
+        "native_result_projection_batch",
+        lambda outputs, **kwargs: ([expected_summary], {"calls": 1}),
+    )
+    session = RetainedSession()
+    results = [
+        {"execution_status": "returned", "execution": {"returned": [{"item": i}]}}
+        for i in range(17)
+    ]
+
+    summary, aggregation = mncs_test.native_suite_fold(
+        test_results=results,
+        session=session,  # type: ignore[arg-type]
+        step_budget=8192,
+        mncs="mncs",
+        cwd=Path(mncs_test.__file__).resolve().parents[1],
+        environment={},
+    )
+
+    assert summary == expected_summary
+    assert [request["function"] for request in session.requests] == [
+        "fold_many", "observe_many"
+    ]
+    assert session.requests[0]["args"] == [{
+        "sequence": {"values": [{"item": i} for i in range(16)]}
+    }]
+    assert session.requests[1]["args"] == [
+        {"summary_call": 1},
+        {"sequence": {"values": [{"item": 16}]}}
+    ]
+    assert aggregation["calls"] == 2
+    assert aggregation["batch_functions"] == ["fold_many", "observe_many"]
 
 
 @pytest.mark.parametrize(

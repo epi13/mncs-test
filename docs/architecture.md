@@ -1040,3 +1040,17 @@ fragment preservation, while live self-suite and first-class assertion-failure
 regressions verify native counters and summary authority. The changed suite
 interface identity is reflected in the dependent result-summary application
 descriptor.
+
+P-051 adds the Test-owned `mncs.test.suite::fold_many` entry point. It builds
+the canonical empty `SuiteSummary` and observes the first group of at most 16
+`TestResult` values in one MNCS call. Python continues later groups with
+`observe_many`, preserving the existing 65,536-byte request bound and raw JSON
+fragment transport. The seven-result self-suite now uses one aggregation call
+instead of an empty-summary call followed by an observation call. A separate
+17-result adapter regression verifies that the first group uses `fold_many`
+and the remaining value uses `observe_many`; a direct release-toolchain call
+with an empty sequence returns the zero-count PASS summary. Live self-suite,
+first-class failure, and result-summary application regressions pass after
+refreshing both dependent result-summary application interface identities.
+The sequence ABI and reducer remain Test-owned, so this slice required no
+Stdlib change.

@@ -665,7 +665,15 @@ class RunnerTests(unittest.TestCase):
                 document["execution"]["native_aggregation"]["authority"],
                 "mncs.test.suite",
             )
-            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 2)
+            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 1)
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["initializer"],
+                "fold_many",
+            )
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["batch_functions"],
+                ["fold_many"],
+            )
             self.assertEqual(
                 document["execution"]["native_aggregation"]["observer"],
                 "observe_many",
@@ -1388,8 +1396,9 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["summary"]["authority"], "native_suite")
             self.assertEqual(document["native_suite_summary"]["failed"], 1)
             self.assertEqual(document["native_suite_summary"]["assertion_failures"], 1)
-            self.assertEqual(document["execution"]["native_aggregation"]["observer"], "observe_many")
-            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 2)
+            self.assertEqual(document["execution"]["native_aggregation"]["initializer"], "fold_many")
+            self.assertEqual(document["execution"]["native_aggregation"]["batch_functions"], ["fold_many"])
+            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 1)
             self.assertEqual(
                 document["execution"]["native_aggregation"]["status"],
                 "returned",
