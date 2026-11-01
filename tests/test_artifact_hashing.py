@@ -172,11 +172,16 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             store.write(f"stdout/{index}.bin", small_payload, "stdout")
         hasher = store._retained_identity_hasher()
         assert hasher is not None and hasher.session is not None
-        with mock.patch.object(
-            hasher.session,
-            "call_batch",
-            wraps=hasher.session.call_batch,
-        ) as embedded_call_batch:
+        with (
+            mock.patch.object(
+                hasher.session,
+                "call_batch",
+                wraps=hasher.session.call_batch,
+            ) as embedded_call_batch,
+            mock.patch.object(
+                hasher, "digest", wraps=hasher.digest
+            ) as retained_payload_digest,
+        ):
             empty_stream_digest = hasher.digest_chunks([])
             exact_window = bytes(range(256)) * 56
             exact_window_digest = hasher.digest_chunks([exact_window])
@@ -238,6 +243,8 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
         assert sum(finalize_values) == 4
         assert empty_stream_digest == hashlib.sha256(b"").hexdigest()
         assert exact_window_digest == hashlib.sha256(exact_window).hexdigest()
+        assert retained_payload_digest.call_count == 1
+        assert retained_payload_digest.call_args.args == (payload,)
 
         assert store._identity_hasher is not None
         assert store._identity_hasher.session is not None
@@ -406,7 +413,7 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
         assert len(tree_calls) == 1
         assert native_file_hash.call_count == 4
         assert native_payload_hash.call_count == 2
-        assert native_digest.call_count == 5
+        assert native_digest.call_count == 4
         assert host_file_digest.call_count == 0
         assert host_payload_digest.call_count == 0
 
@@ -610,6 +617,9 @@ def test_library_tree_identity_hashes_real_test_and_stdlib_roots_natively(
         with (
             mock.patch.object(hasher, "digest", wraps=hasher.digest) as native_leaf_hash,
             mock.patch.object(
+                hasher, "digest_chunks", wraps=hasher.digest_chunks
+            ) as native_leaf_stream,
+            mock.patch.object(
                 mncs_test, "run_native_app", wraps=mncs_test.run_native_app
             ) as native_app,
             mock.patch.object(
@@ -628,8 +638,16 @@ def test_library_tree_identity_hashes_real_test_and_stdlib_roots_natively(
             ]
 
     expected = [host_tree_digest(path) for path in library_roots]
+    streamed_files = sum(
+        1
+        for root in library_roots
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.stat().st_size > mncs_test.TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES
+    )
     assert [digest for digest, _hashing in results] == [item[0] for item in expected]
-    assert native_leaf_hash.call_count == sum(item[1] for item in expected)
+    assert native_leaf_hash.call_count == sum(item[1] for item in expected) - streamed_files
+    assert native_leaf_stream.call_count >= streamed_files
     assert native_app.call_count == len(library_roots)
     assert host_leaf_hash.call_count == 0
     for (_digest, hashing), (_expected_digest, entries, total_bytes) in zip(results, expected):

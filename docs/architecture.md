@@ -508,9 +508,11 @@ over host `hashlib` is claimed.
 `manifest_provenance` sends compiler, source, and manifest files up to
 14,336 bytes through `ArtifactStore`, keeping each small provenance hash
 within a single bounded MNCS request. Files above 14,336 bytes use the
-bounded file adapter. After the
-retained session is warm, it hashes files through 1 MiB in 14,336-byte windows
-without buffering the whole file.
+bounded file adapter. After the retained session is warm, it hashes files
+through 1 MiB in 14,336-byte windows without buffering the whole file. Every
+file above the 65,536-byte native-application request bound uses this streaming
+path after warm-up, including files that still fit within the 512 KiB payload
+bound.
 Files above 1 MiB retain host fallback. Before retained-session warm-up, the
 existing native application handles files through 65,536 bytes; larger files
 fall back to the host until warm-up. If embedding fails, bounded files use the
@@ -520,9 +522,9 @@ Library directory enumeration and per-file reads stay on the host. For a
 directory with at most 128 entries, a request within 65,536 bytes, and at most
 1 MiB of leaf bytes, `ArtifactStore` hashes eligible leaf files through
 `mncs.test.result_identity_v1`: files through 65,536 bytes use a native
-application or the retained session; larger files through 1 MiB use the
-retained session after warm-up. Oversized files, a retained session that is
-not warm or unavailable, and native failures retain the exact host digest and
+application or the retained session; files above 65,536 bytes through 1 MiB
+stream through the retained session after warm-up. Oversized files, cold or
+unavailable sessions, and native failures retain the exact host digest and
 report its fallback reason. `mncs.test.library_tree_identity_v1` owns the
 final ordered `path NUL leaf-digest LF` fold. The adapter reports leaf and
 tree implementations separately and retains an explicit host fold when the

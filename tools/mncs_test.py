@@ -4444,26 +4444,12 @@ class ArtifactStore:
         file_size = path.stat().st_size
         if file_size > TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES:
             return sha256_file(path)
-        if file_size > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
-            return self._digest_retained_file(path)
         if file_size > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
-            with path.open("rb") as handle:
-                payload = handle.read(TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
-            if len(payload) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
-                return sha256_file(path)
-            return self._digest_retained_payload(
-                payload,
-                fallback=lambda: sha256_file(path),
-            )
+            return self._digest_retained_file(path)
         with path.open("rb") as handle:
-            payload = handle.read(TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
-            if len(payload) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
-                return sha256_file(path)
+            payload = handle.read(TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES + 1)
         if len(payload) > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
-            return self._digest_retained_payload(
-                payload,
-                fallback=lambda: sha256_file(path),
-            )
+            return self._digest_retained_file(path)
         return self._digest_bounded_payload(payload)
 
     def digest_file_with_method(self, path: Path) -> tuple[str, dict[str, str]]:
