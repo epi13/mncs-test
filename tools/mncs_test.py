@@ -4807,6 +4807,37 @@ def _host_sequence(values: list[dict[str, Any]]) -> dict[str, Any]:
     return {"sequence": {"values": values}}
 
 
+def _host_u64_execution_value(value: int) -> dict[str, Any]:
+    return {
+        "integer": {
+            "value": int(value),
+            "type": {"bits": 64, "signed": False},
+        }
+    }
+
+
+def _host_packed_identity_stream_chunks(
+    payload: bytes,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Pack bounded byte chunks into little-endian eight-byte u64 values."""
+    if len(payload) > TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES:
+        raise AdapterError("MNCS result identity stream window exceeds 14,336 bytes")
+    byte_chunks = [payload[offset : offset + 1024] for offset in range(0, len(payload), 1024)]
+    packed_chunks = [
+        _host_sequence([
+            _host_u64_execution_value(
+                int.from_bytes(chunk[offset : offset + 8], "little")
+            )
+            for offset in range(0, len(chunk), 8)
+        ])
+        for chunk in byte_chunks
+    ]
+    chunk_lengths = [
+        _host_u64_execution_value(len(chunk)) for chunk in byte_chunks
+    ]
+    return _host_sequence(packed_chunks), _host_sequence(chunk_lengths)
+
+
 def _host_record(name: str, fields: dict[str, Any]) -> dict[str, Any]:
     record: dict[str, Any] = {"fields": fields}
     if name:
@@ -5011,12 +5042,9 @@ class ResultIdentityEmbedHasher:
     ) -> tuple[dict[str, Any], str | None]:
         if self.session is None:
             raise AdapterError("MNCS result identity session is closed")
-        chunks = [
-            _host_sequence([_host_byte(byte) for byte in window[offset : offset + 1024]])
-            for offset in range(0, len(window), 1024)
-        ]
+        chunks, chunk_lengths = _host_packed_identity_stream_chunks(window)
         function = "update_stream_state_from_empty"
-        arguments: list[Any] = [_host_sequence(chunks), _host_boolean(finalize)]
+        arguments: list[Any] = [chunks, chunk_lengths, _host_boolean(finalize)]
         if state is not None:
             function = "update_stream_state_continue"
             arguments.insert(0, state)

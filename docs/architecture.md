@@ -505,6 +505,16 @@ and files up to 1 MiB. Differential tests cover a 512 KiB payload, a
 file at the exact 1 MiB bound against independent Python `hashlib` results.
 The retained session adds a one-time compile and open cost; no throughput gain
 over host `hashlib` is claimed.
+For those retained SHA-256 stream calls, the adapter packs each eight payload
+bytes into one little-endian `u64` host value instead of building a typed byte
+node per payload byte. `mncs.test.result_identity_v1` validates each packed
+chunk's byte length, word count, and zero padding, then unpacks the exact byte
+stream into the existing SHA-256 update function. This changes only the embed
+transport; the native application request and its byte-array contract remain
+unchanged. The retained-session regression compares serialized requests and
+confirms the packed stream is more than twice as small as the former byte-node
+form; it also checks that nonzero padding outside the declared byte length is
+rejected by MNCS.
 `manifest_provenance` sends compiler, source, and manifest files up to
 14,336 bytes through `ArtifactStore`, keeping each small provenance hash
 within a single bounded MNCS request. Files above 14,336 bytes use the

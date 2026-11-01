@@ -202,16 +202,52 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             for arguments in request_arguments
         ]
         request_chunks = [
-            arguments[-2]["sequence"]["values"]
+            arguments[-3]["sequence"]["values"]
             for arguments in request_arguments
         ]
-        window_byte_counts = [
+        window_word_counts = [
             sum(
                 len(chunk["sequence"]["values"])
                 for chunk in chunks
             )
             for chunks in request_chunks
         ]
+        window_byte_counts = [
+            sum(
+                item["integer"]["value"]
+                for item in arguments[-2]["sequence"]["values"]
+            )
+            for arguments in request_arguments
+        ]
+        packed_wire_bytes = 0
+        unpacked_wire_bytes = 0
+        for request, arguments, chunks in zip(
+            requests, request_arguments, request_chunks, strict=True
+        ):
+            unpacked_chunks: list[bytes] = []
+            chunk_lengths = [
+                item["integer"]["value"]
+                for item in arguments[-2]["sequence"]["values"]
+            ]
+            for chunk, byte_length in zip(chunks, chunk_lengths, strict=True):
+                words = chunk["sequence"]["values"]
+                unpacked_chunks.append(
+                    b"".join(
+                        item["integer"]["value"].to_bytes(8, "little")
+                        for item in words
+                    )[:byte_length]
+                )
+            legacy_chunks = mncs_test._host_sequence([
+                mncs_test._host_sequence([
+                    mncs_test._host_byte(byte) for byte in chunk
+                ])
+                for chunk in unpacked_chunks
+            ])
+            legacy_arguments = [*arguments[:-3], legacy_chunks, arguments[-1]]
+            packed_wire_bytes += len(mncs_test.compact_json([request]).encode())
+            unpacked_wire_bytes += len(
+                mncs_test.compact_json([{**request, "args": legacy_arguments}]).encode()
+            )
         window_counts = [
             (size + mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - 1)
             // mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
@@ -220,6 +256,17 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
         expected_windows = sum(window_counts)
         assert expected_windows == 65
         assert max(window_byte_counts) == mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
+        assert all(words * 8 >= byte_count for words, byte_count in zip(
+            window_word_counts, window_byte_counts, strict=True
+        ))
+        assert all(
+            words * 8 <= byte_count + 7 * len(chunks)
+            for words, byte_count, chunks in zip(
+                window_word_counts, window_byte_counts, request_chunks, strict=True
+            )
+        )
+        assert sum(window_word_counts) * 3 < sum(window_byte_counts)
+        assert packed_wire_bytes * 2 < unpacked_wire_bytes
         assert all(
             len(chunks)
             <= mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST
@@ -258,6 +305,27 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
         assert native_app.call_count == 3
         assert host_file_digest.call_count == 0
         assert host_bytes_digest.call_count == 0
+        malformed = hasher.session.call_batch([{
+            "module": "mncs.test.result_identity_v1",
+            "function": "update_stream_state_from_empty",
+            "args": [
+                mncs_test._host_sequence([
+                    mncs_test._host_sequence([
+                        mncs_test._host_u64_execution_value(0x10000000000002A)
+                    ])
+                ]),
+                mncs_test._host_sequence([
+                    mncs_test._host_u64_execution_value(1)
+                ]),
+                mncs_test._host_boolean(True),
+            ],
+            "step_budget": 2_097_152,
+        }])
+        rejected_fields = mncs_test.record_fields(
+            hasher._returned(malformed[0], "malformed packed stream")
+        )
+        assert rejected_fields is not None
+        assert mncs_test.boolean_value(rejected_fields.get("accepted")) is False
 
     assert store._identity_hasher is not None
     assert store._identity_hasher.session is not None

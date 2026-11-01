@@ -274,25 +274,191 @@ fn update_stream_digest(
     };
 }
 
-// Retained-session callers pass the previous returned ExecutionValue directly
-// through the embed `args` boundary. The stream state never needs a host-side
-// typed-value tree projection or reconstruction.
-fn update_stream_state_from_empty(
-    chunks: [[byte; up_to 1024]; up_to 14],
+fn stream_word_slots() -> (result: [u64; 8]) {
+    return [0, 1, 2, 3, 4, 5, 6, 7];
+}
+
+fn stream_byte_lanes() -> (result: [u64; 8]) {
+    return [0, 1, 2, 3, 4, 5, 6, 7];
+}
+
+fn valid_packed_stream_chunk(words: [u64; up_to 128], byte_length: u64) -> (result: bool) {
+    if byte_length > 1024 {
+        return false;
+    }
+    let remainder: u64 = byte_length % 8;
+    let expected_words: u64 = byte_length / 8 + select(remainder > 0, 1, 0);
+    if words.len != expected_words {
+        return false;
+    }
+    if remainder == 0 {
+        return true;
+    }
+    let last_word: u64 = words[words.len -% 1];
+    return (last_word >> (remainder *% 8)) == 0;
+}
+
+fn valid_packed_stream_chunks(
+    chunks: [[u64; up_to 128]; up_to 14],
+    chunk_lengths: [u64; up_to 14]
+) -> (result: bool) {
+    if chunks.len != chunk_lengths.len || chunks.len > 14 {
+        return false;
+    }
+    iterate i over chunks carrying valid: bool = true {
+        next valid = valid && valid_packed_stream_chunk(chunks[i], chunk_lengths[i]);
+    }
+    return valid;
+}
+
+fn append_packed_stream_byte(
+    output: [byte; 64],
+    word: u64,
+    word_slot: u64,
+    lane: u64,
+    length: u64
+) -> (result: [byte; 64]) {
+    let position: u64 = word_slot *% 8 +% lane;
+    if position >= length {
+        return output;
+    }
+    let shift: u64 = lane *% 8;
+    let value: byte = ((word >> shift) & 255) as byte;
+    return replace(output, position, value);
+}
+
+fn append_packed_stream_word(
+    output: [byte; 64],
+    words: [u64; up_to 128],
+    byte_length: u64,
+    offset: u64,
+    length: u64,
+    word_slot: u64
+) -> (result: [byte; 64]) {
+    let start: u64 = offset +% word_slot *% 8;
+    if start >= byte_length {
+        return output;
+    }
+    let word: u64 = words[start / 8];
+    iterate lane over stream_byte_lanes() carrying bytes: [byte; 64] = output {
+        next bytes = append_packed_stream_byte(bytes, word, word_slot, lane, length);
+    }
+    return bytes;
+}
+
+fn unpack_packed_stream_block(
+    words: [u64; up_to 128],
+    byte_length: u64,
+    offset: u64,
+    length: u64
+) -> (result: [byte; 64]) {
+    iterate word_slot over stream_word_slots() carrying bytes: [byte; 64] = [0; 64] {
+        next bytes = append_packed_stream_word(
+            bytes, words, byte_length, offset, length, word_slot
+        );
+    }
+    return bytes;
+}
+
+fn update_packed_stream_block(
+    initial: sha256.DigestState,
+    words: [u64; up_to 128],
+    byte_length: u64,
+    offset: u64
+) -> (result: sha256.DigestState) {
+    if offset < byte_length {
+        let remaining: u64 = byte_length -% offset;
+        let length: u64 = select(remaining < 64, remaining, 64);
+        let block: [byte; 64] = unpack_packed_stream_block(words, byte_length, offset, length);
+        let active: [byte; up_to 64] = block[0..length];
+        return sha256.update_standard(initial, active, length);
+    }
+    return initial;
+}
+
+fn absorb_packed_stream_chunk(
+    initial: sha256.DigestState,
+    words: [u64; up_to 128],
+    byte_length: u64
+) -> (result: sha256.DigestState) {
+    let offsets: [u64; 16] = block_offsets();
+    iterate block over offsets carrying digest: sha256.DigestState = initial {
+        next digest = update_packed_stream_block(
+            digest, words, byte_length, offsets[block]
+        );
+    }
+    return digest;
+}
+
+fn update_packed_stream_digest(
+    initial: sha256.DigestState,
+    chunks: [[u64; up_to 128]; up_to 14],
+    chunk_lengths: [u64; up_to 14],
     finalize: bool
 ) -> (result: ResultIdentityStreamUpdateV1) {
-    return update_stream_digest(sha256.init(), chunks, finalize);
+    iterate i over chunks carrying digest: sha256.DigestState = initial {
+        next digest = absorb_packed_stream_chunk(digest, chunks[i], chunk_lengths[i]);
+    }
+    if finalize {
+        return ResultIdentityStreamUpdateV1 {
+            accepted: true,
+            finalized: true,
+            state: digest,
+            digest: sha256.finalize_standard(digest)
+        };
+    }
+    return ResultIdentityStreamUpdateV1 {
+        accepted: true,
+        finalized: false,
+        state: digest,
+        digest: [0; 32]
+    };
+}
+
+fn update_packed_stream_from_empty(
+    chunks: [[u64; up_to 128]; up_to 14],
+    chunk_lengths: [u64; up_to 14],
+    finalize: bool
+) -> (result: ResultIdentityStreamUpdateV1) {
+    if !valid_packed_stream_chunks(chunks, chunk_lengths) {
+        return rejected_stream_update();
+    }
+    return update_packed_stream_digest(sha256.init(), chunks, chunk_lengths, finalize);
+}
+
+fn update_packed_stream_continue(
+    previous: ResultIdentityStreamUpdateV1,
+    chunks: [[u64; up_to 128]; up_to 14],
+    chunk_lengths: [u64; up_to 14],
+    finalize: bool
+) -> (result: ResultIdentityStreamUpdateV1) {
+    if !previous.accepted || previous.finalized || !valid_digest_state(previous.state)
+        || !valid_packed_stream_chunks(chunks, chunk_lengths) {
+        return rejected_stream_update();
+    }
+    return update_packed_stream_digest(previous.state, chunks, chunk_lengths, finalize);
+}
+
+// Retained-session callers pass the previous returned ExecutionValue directly
+// through the embed `args` boundary. The stream state never needs a host-side
+// typed-value tree projection or reconstruction. Payload bytes cross as
+// bounded u64 word arrays plus exact chunk lengths; the native stream unpacks
+// them before SHA-256.
+fn update_stream_state_from_empty(
+    chunks: [[u64; up_to 128]; up_to 14],
+    chunk_lengths: [u64; up_to 14],
+    finalize: bool
+) -> (result: ResultIdentityStreamUpdateV1) {
+    return update_packed_stream_from_empty(chunks, chunk_lengths, finalize);
 }
 
 fn update_stream_state_continue(
     previous: ResultIdentityStreamUpdateV1,
-    chunks: [[byte; up_to 1024]; up_to 14],
+    chunks: [[u64; up_to 128]; up_to 14],
+    chunk_lengths: [u64; up_to 14],
     finalize: bool
 ) -> (result: ResultIdentityStreamUpdateV1) {
-    if !previous.accepted || previous.finalized || !valid_digest_state(previous.state) {
-        return rejected_stream_update();
-    }
-    return update_stream_digest(previous.state, chunks, finalize);
+    return update_packed_stream_continue(previous, chunks, chunk_lengths, finalize);
 }
 
 fn update_stream_state(
