@@ -150,7 +150,11 @@ fn empty_row(kind: byte) -> (result: ExecutionResultAdjudicationRowV1) {
     };
 }
 
-fn adjudicate_item(value: ExecutionResultAdjudicationCaseV1) -> (result: ExecutionResultAdjudicationRowV1) {
+fn adjudicate_projected_item(
+    value: ExecutionResultAdjudicationCaseV1,
+    attempted: bool,
+    projected: projection.NativeResultProjectionV1
+) -> (result: ExecutionResultAdjudicationRowV1) {
     let initial_execution: execution.ExecutionCaseV1 = empty_execution_case(
         value.execution_status,
         value.expected_status,
@@ -166,12 +170,6 @@ fn adjudicate_item(value: ExecutionResultAdjudicationCaseV1) -> (result: Executi
         };
     }
 
-    let attempted: bool = same_bytes(value.execution_status, returned_status());
-    let projected: projection.NativeResultProjectionV1 = maybe_project(
-        attempted,
-        value.kind,
-        value.document
-    );
     let adjudication_case: execution.ExecutionCaseV1 = execution.ExecutionCaseV1 {
         ..initial_execution,
         native_result_present: projected.supported,
@@ -184,6 +182,16 @@ fn adjudicate_item(value: ExecutionResultAdjudicationCaseV1) -> (result: Executi
         native_result: projected,
         process_result: build_process_result(final_process)
     };
+}
+
+fn adjudicate_item(value: ExecutionResultAdjudicationCaseV1) -> (result: ExecutionResultAdjudicationRowV1) {
+    let attempted: bool = same_bytes(value.execution_status, returned_status());
+    let projected: projection.NativeResultProjectionV1 = maybe_project(
+        attempted,
+        value.kind,
+        value.document
+    );
+    return adjudicate_projected_item(value, attempted, projected);
 }
 
 fn valid_request(value: ExecutionResultAdjudicationRequestV1) -> (result: bool) {

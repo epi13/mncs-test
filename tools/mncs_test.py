@@ -34,12 +34,14 @@ from family_contract import (
 )
 from mncs_test_native import (
     EXECUTION_ADJUDICATION_MAX_CASES,
+    EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES,
     EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS,
     NativeBudgetExhaustedError,
     NativeInputBoundError,
     NativeTransportError,
     run_exact_test_identity_selection,
     run_execution_adjudication,
+    run_execution_envelope_adjudication,
     run_execution_result_adjudication,
     run_native_app,
     run_process_transport_adjudication,
@@ -75,6 +77,9 @@ NATIVE_RESULT_SUMMARY_PROJECTION_REQUEST_SCHEMA = "mncs.test.result-summary-proj
 NATIVE_RESULT_SUMMARY_PROJECTION_RESULT_SCHEMA = "mncs.test.result-summary-projection/1"
 NATIVE_RESULT_SUMMARY_PROJECTION_MAX_BYTES = 65_536
 NATIVE_EXECUTION_RESULT_ADJUDICATION_MAX_DOCUMENT_BYTES = 16_384
+NATIVE_EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES = (
+    EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES
+)
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-manifest-request/1"
@@ -2307,6 +2312,101 @@ def native_execution_result_adjudication_batch(
         stats["projection_candidates"] - stats["projection_native"]
     )
     return projected, stats
+
+
+def native_execution_envelope_adjudication(
+    stdout: bytes,
+    *,
+    test: dict[str, Any],
+    suite: bool,
+    returncode: int | None,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, Any] | None:
+    """Project a supported returned compiler envelope from raw stdout in MNCS."""
+    if (not isinstance(stdout, bytes) or not stdout
+            or len(stdout) > NATIVE_EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES
+            or type(returncode) is not int or returncode != 0
+            or b'"returned"' not in stdout):
+        return None
+    try:
+        chunks = _public_result_input_chunks(stdout)
+        document = {
+            "chunks": [
+                {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+                for chunk in chunks
+            ],
+            "byte_length": len(stdout),
+        }
+    except (AdapterError, UnicodeDecodeError):
+        return None
+    kind = 2 if suite else 1
+    rows = run_execution_envelope_adjudication(
+        [{
+            "process_start_failed": False,
+            "timed_out": False,
+            "nonzero_exit": False,
+            "expected_status": expected_status_for(test) or "",
+            "suite": suite,
+            "kind": kind,
+            "document": document,
+        }],
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if len(rows) != 1:
+        raise AdapterError("native execution envelope adjudication omitted its single result")
+    row = rows[0]
+    projection = _native_result_projection_value(row["native_result"], kind)
+    process_result = row["process"]
+    if (row["supported_return"] is not True or row["status"] != "returned"
+            or projection is None or not isinstance(process_result, dict)
+            or process_result.get("decision") != "continue"
+            or process_result.get("terminal") is not False
+            or not isinstance(process_result.get("execution"), dict)):
+        return None
+    execution_document = row["execution_json"]
+    if (execution_document.get("valid") is not True
+            or type(execution_document.get("byte_length")) is not int
+            or not 0 < execution_document["byte_length"] <= 16_384
+            or not isinstance(execution_document.get("chunks"), list)
+            or not 1 <= len(execution_document["chunks"]) <= 16):
+        return None
+    encoded_parts: list[bytes] = []
+    for chunk in execution_document["chunks"]:
+        if not isinstance(chunk, dict) or set(chunk) != {"bytes"}:
+            return None
+        raw = chunk["bytes"]
+        if isinstance(raw, str):
+            try:
+                part = raw.encode("utf-8")
+            except UnicodeEncodeError:
+                return None
+        elif (isinstance(raw, list)
+              and all(type(value) is int and 0 <= value <= 255 for value in raw)):
+            part = bytes(raw)
+        else:
+            return None
+        if not part or len(part) > PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES:
+            return None
+        encoded_parts.append(part)
+    encoded = b"".join(encoded_parts)
+    if len(encoded) != execution_document["byte_length"]:
+        return None
+    try:
+        execution = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(execution, dict):
+        return None
+    return {
+        "status": row["status"],
+        "native_result": projection,
+        "process": process_result,
+        "execution": execution,
+    }
 
 
 def _native_result_summary_projection(
@@ -5536,77 +5636,96 @@ def execute_entry(
     test_result["stdout_artifact"] = process["stdout_artifact"]
     test_result["stderr_artifact"] = process["stderr_artifact"]
     test_result["command_artifact"] = process["command_artifact"]
-    decoded = parse_json_output(process["stdout"])
-    diagnostics = diagnostic_list(decoded)
-    process_observation = {
-        "process_start_failed": "transport_error" in process,
-        "timed_out": process.get("timed_out") is True,
-        "structured_result_present": isinstance(decoded, dict),
-        "nonzero_exit": (
-            type(process.get("returncode")) is int
-            and process["returncode"] != 0
-        ),
-        "diagnostics_present": bool(diagnostics),
-    }
-    combined, _projection_stats = native_execution_result_adjudication_batch(
-        [decoded],
-        [test],
-        suite=suite,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-        process_observations=[process_observation],
-    )
-    combined_result = combined[0]
-    if combined_result is not None:
-        process_decision = combined_result["process"]
-        native = combined_result["native_projection"]
-    else:
-        native_projection: dict[str, Any] | None = None
-        projection_attempted = isinstance(decoded, dict) and decoded.get("status") == "returned"
-        if projection_attempted:
-            projected, _projection_stats = native_result_projection_batch(
-                [decoded],
-                kind=2 if suite else 1,
-                mncs=mncs,
-                cwd=cwd,
-                environment=environment,
-            )
-            native_projection = projected[0]
-        case, native = execution_adjudication_case(
+    native_envelope: dict[str, Any] | None = None
+    try:
+        native_envelope = native_execution_envelope_adjudication(
+            process["stdout"],
             test=test,
-            decoded=decoded if isinstance(decoded, dict) else {},
             suite=suite,
-            native_projection=native_projection,
-            native_projection_attempted=projection_attempted,
+            returncode=process.get("returncode"),
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
         )
-        try:
-            process_decision = run_process_transport_adjudication(
-                process_observation,
-                case,
-                mncs=mncs,
-                cwd=cwd,
-                environment=environment,
+    except (NativeTransportError, OSError, subprocess.TimeoutExpired):
+        native_envelope = None
+    if native_envelope is not None:
+        decoded = {"status": native_envelope["status"], **native_envelope["execution"]}
+        diagnostics: list[dict[str, Any]] = []
+        process_decision = native_envelope["process"]
+        native = native_envelope["native_result"]
+    else:
+        decoded = parse_json_output(process["stdout"])
+        diagnostics = diagnostic_list(decoded)
+        process_observation = {
+            "process_start_failed": "transport_error" in process,
+            "timed_out": process.get("timed_out") is True,
+            "structured_result_present": isinstance(decoded, dict),
+            "nonzero_exit": (
+                type(process.get("returncode")) is int
+                and process["returncode"] != 0
+            ),
+            "diagnostics_present": bool(diagnostics),
+        }
+        combined, _projection_stats = native_execution_result_adjudication_batch(
+            [decoded],
+            [test],
+            suite=suite,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            process_observations=[process_observation],
+        )
+        combined_result = combined[0]
+        if combined_result is not None:
+            process_decision = combined_result["process"]
+            native = combined_result["native_projection"]
+        else:
+            native_projection: dict[str, Any] | None = None
+            projection_attempted = isinstance(decoded, dict) and decoded.get("status") == "returned"
+            if projection_attempted:
+                projected, _projection_stats = native_result_projection_batch(
+                    [decoded],
+                    kind=2 if suite else 1,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                )
+                native_projection = projected[0]
+            case, native = execution_adjudication_case(
+                test=test,
+                decoded=decoded if isinstance(decoded, dict) else {},
+                suite=suite,
+                native_projection=native_projection,
+                native_projection_attempted=projection_attempted,
             )
-        except (NativeTransportError, OSError, subprocess.TimeoutExpired) as error:
-            # Start failures and deadlines are already observed at the host
-            # process boundary. Preserve those outcomes if the classifier cannot
-            # run, for example because the MNCS executable itself is unavailable.
-            if "transport_error" in process:
-                return result_failure(
-                    test_result,
-                    failure_class="infrastructure_failure",
-                    message="MNCS process could not be started",
-                    error=process["transport_error"],
+            try:
+                process_decision = run_process_transport_adjudication(
+                    process_observation,
+                    case,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
                 )
-            if process.get("timed_out") is True:
-                return result_failure(
-                    test_result,
-                    failure_class="timeout",
-                    message=f"MNCS execution exceeded {timeout_seconds}s",
-                    timeout_seconds=timeout_seconds,
-                )
-            raise AdapterError(f"native process transport adjudication failed: {error}") from error
+            except (NativeTransportError, OSError, subprocess.TimeoutExpired) as error:
+                # Start failures and deadlines are already observed at the host
+                # process boundary. Preserve those outcomes if the classifier cannot
+                # run, for example because the MNCS executable itself is unavailable.
+                if "transport_error" in process:
+                    return result_failure(
+                        test_result,
+                        failure_class="infrastructure_failure",
+                        message="MNCS process could not be started",
+                        error=process["transport_error"],
+                    )
+                if process.get("timed_out") is True:
+                    return result_failure(
+                        test_result,
+                        failure_class="timeout",
+                        message=f"MNCS execution exceeded {timeout_seconds}s",
+                        timeout_seconds=timeout_seconds,
+                    )
+                raise AdapterError(f"native process transport adjudication failed: {error}") from error
 
     decision = process_decision["decision"]
     if decision == "start_failure":

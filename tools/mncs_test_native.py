@@ -351,6 +351,14 @@ EXECUTION_RESULT_ADJUDICATION_RESULT_SCHEMA = (
     "mncs.test.execution-result-adjudication/1"
 )
 EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS = 16
+EXECUTION_ENVELOPE_ADJUDICATION_REQUEST_SCHEMA = (
+    "mncs.test.execution-envelope-adjudication-request/1"
+)
+EXECUTION_ENVELOPE_ADJUDICATION_RESULT_SCHEMA = (
+    "mncs.test.execution-envelope-adjudication/1"
+)
+EXECUTION_ENVELOPE_ADJUDICATION_MAX_ITEMS = 16
+EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES = 32768
 PROCESS_TRANSPORT_DECISIONS = {
     "start_failure": ("infrastructure_failure", True),
     "timeout": ("timeout", True),
@@ -1204,6 +1212,148 @@ def run_execution_result_adjudication(
             **process_decision,
             "projection_attempted": attempted,
             "native_result": projection,
+        })
+    return validated
+
+
+def run_execution_envelope_adjudication(
+    cases: list[dict],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> list[dict[str, object]]:
+    """Parse raw compiler stdout and adjudicate returned ABI results in MNCS."""
+    if (not isinstance(cases, list)
+            or len(cases) > EXECUTION_ENVELOPE_ADJUDICATION_MAX_ITEMS):
+        raise NativeTransportError(
+            "execution envelope adjudication accepts at most "
+            f"{EXECUTION_ENVELOPE_ADJUDICATION_MAX_ITEMS} cases"
+        )
+    required = {
+        "process_start_failed", "timed_out", "nonzero_exit", "expected_status",
+        "suite", "kind", "document",
+    }
+    normalized: list[dict[str, object]] = []
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict) or set(case) != required:
+            raise NativeTransportError(
+                f"execution envelope adjudication case {index} has an invalid field set"
+            )
+        for field in ("process_start_failed", "timed_out", "nonzero_exit", "suite"):
+            if type(case[field]) is not bool:
+                raise NativeTransportError(
+                    f"execution envelope adjudication case {index} has invalid {field}"
+                )
+        case["expected_status"] = _bounded_adjudication_text(
+            case["expected_status"], "expected_status"
+        )
+        if case["expected_status"] and case["expected_status"] not in EXECUTION_STATUS_VALUES:
+            raise NativeTransportError(
+                f"execution envelope adjudication case {index} has an unknown expected status"
+            )
+        kind = case["kind"]
+        if (type(kind) is not int or kind not in (1, 2)
+                or case["suite"] is not (kind == 2)):
+            raise NativeTransportError(
+                f"execution envelope adjudication case {index} has invalid result kind"
+            )
+        document = case["document"]
+        if (not isinstance(document, dict)
+                or set(document) != {"chunks", "byte_length"}
+                or type(document["byte_length"]) is not int
+                or not 0 < document["byte_length"] <= EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES
+                or not isinstance(document["chunks"], list)
+                or not 1 <= len(document["chunks"]) <= 32):
+            raise NativeTransportError(
+                f"execution envelope adjudication case {index} has an invalid document"
+            )
+        total = 0
+        for chunk in document["chunks"]:
+            if (not isinstance(chunk, dict) or set(chunk) != {"bytes", "length"}
+                    or not isinstance(chunk["bytes"], str)
+                    or type(chunk["length"]) is not int):
+                raise NativeTransportError(
+                    f"execution envelope adjudication case {index} has a malformed text chunk"
+                )
+            try:
+                length = len(chunk["bytes"].encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise NativeTransportError(
+                    f"execution envelope adjudication case {index} has invalid UTF-8"
+                ) from error
+            if not 0 < length <= 1024 or chunk["length"] != length:
+                raise NativeTransportError(
+                    f"execution envelope adjudication case {index} has an invalid text chunk length"
+                )
+            total += length
+        if total != document["byte_length"]:
+            raise NativeTransportError(
+                f"execution envelope adjudication case {index} has an inconsistent document length"
+            )
+        normalized.append(case)
+
+    request = {
+        "schema_version": EXECUTION_ENVELOPE_ADJUDICATION_REQUEST_SCHEMA,
+        "item_count": len(normalized),
+        "items": normalized,
+    }
+    result = run_native_app(
+        "test-execution-envelope-adjudication.json",
+        request,
+        request_schema=EXECUTION_ENVELOPE_ADJUDICATION_REQUEST_SCHEMA,
+        result_schema=EXECUTION_ENVELOPE_ADJUDICATION_RESULT_SCHEMA,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        step_budget=8_000_000,
+        timeout_seconds=timeout_seconds,
+    )
+    rows = result.get("rows")
+    if (result.get("schema_version") != EXECUTION_ENVELOPE_ADJUDICATION_RESULT_SCHEMA
+            or type(result.get("item_count")) is not int
+            or result["item_count"] != len(normalized)
+            or not isinstance(rows, list)
+            or len(rows) != EXECUTION_ENVELOPE_ADJUDICATION_MAX_ITEMS):
+        raise NativeTransportError(
+            "native execution envelope adjudication returned a mismatched result count"
+        )
+    validated: list[dict[str, object]] = []
+    for index, raw in enumerate(rows[:len(normalized)]):
+        if not isinstance(raw, dict) or set(raw) != {
+            "supported_return", "status", "native_result", "process_result", "execution_json",
+        }:
+            raise NativeTransportError(
+                f"native execution envelope adjudication row {index} is malformed"
+            )
+        supported = raw["supported_return"]
+        status = raw["status"]
+        projection = raw["native_result"]
+        if (type(supported) is not bool or not isinstance(status, str)
+                or not isinstance(projection, dict)
+                or type(projection.get("kind")) is not int
+                or projection.get("kind") != normalized[index]["kind"]
+                or type(projection.get("supported")) is not bool):
+            raise NativeTransportError(
+                f"native execution envelope adjudication row {index} has an invalid projection"
+            )
+        process_result = _process_transport_result(raw["process_result"])
+        execution_json = raw["execution_json"]
+        if (not isinstance(execution_json, dict)
+                or set(execution_json) != {"chunks", "byte_length", "valid"}
+                or type(execution_json["valid"]) is not bool
+                or type(execution_json["byte_length"]) is not int
+                or not isinstance(execution_json["chunks"], list)):
+            raise NativeTransportError(
+                f"native execution envelope adjudication row {index} has malformed execution fields"
+            )
+        validated.append({
+            "supported_return": supported,
+            "status": status,
+            "native_result": projection,
+            "process": process_result,
+            "execution_json": execution_json,
         })
     return validated
 

@@ -313,6 +313,13 @@ def test_execute_entry_projects_and_adjudicates_returned_result_in_mncs(
         "timed_out": False,
         "returncode": 0,
         "stdout": json.dumps({
+            "schema_version": "mncs.execution/1",
+            "target": "canonical-vm",
+            "program_identity": "program:returned-case",
+            "program_fingerprint": "fingerprint:returned-case",
+            "function_identity": "function:exercise",
+            "steps": 17,
+            "effects": [],
             "status": "returned",
             "returned": [_returned_pass_result()],
         }).encode(),
@@ -322,11 +329,18 @@ def test_execute_entry_projects_and_adjudicates_returned_result_in_mncs(
         "command_artifact": "commands/case.json",
     }
     monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
-    observed: list[str] = []
+    monkeypatch.setattr(
+        mncs_test,
+        "parse_json_output",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native stdout projection should bypass the host JSON tree")
+        ),
+    )
+    observed: list[tuple[str, dict[str, object]]] = []
     original = mncs_test_native.run_native_app
 
     def observe(name: str, request: dict[str, object], **kwargs: object) -> dict[str, object]:
-        observed.append(name)
+        observed.append((name, request))
         return original(name, request, **kwargs)
 
     monkeypatch.setattr(mncs_test_native, "run_native_app", observe)
@@ -347,7 +361,21 @@ def test_execute_entry_projects_and_adjudicates_returned_result_in_mncs(
 
     assert result["verdict"] == "PASS"
     assert result["native_result"]["assertions"] == 1
-    assert observed == ["test-execution-result-adjudication.json"]
+    assert result["execution"] == {
+        "schema_version": "mncs.execution/1",
+        "target": "canonical-vm",
+        "program_identity": "program:returned-case",
+        "program_fingerprint": "fingerprint:returned-case",
+        "function_identity": "function:exercise",
+        "steps": 17,
+        "effects": [],
+    }
+    assert [name for name, _request in observed] == [
+        "test-execution-envelope-adjudication.json"
+    ]
+    native_document = observed[0][1]["items"][0]["document"]
+    transported_stdout = "".join(chunk["bytes"] for chunk in native_document["chunks"])
+    assert transported_stdout.encode("utf-8") == process["stdout"]
 
 
 @pytest.mark.parametrize(

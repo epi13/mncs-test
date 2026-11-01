@@ -989,3 +989,21 @@ executions continue through the lower-cost process-adjudication path, while
 unsupported, malformed, over-bound, and unavailable native results retain the
 compatibility projection and adjudication route. Differential projection and
 policy tests plus the live Test self-suite exercise the integrated consumer.
+
+P-048 moves the single-entry returned-result stdout envelope parse into
+`mncs.test.execution_envelope_adjudication_v1`. Python transports the original
+stdout bytes in UTF-8-safe chunks (at most 32,768 bytes and 32 chunks); MNCS
+parses the bounded JSON envelope, projects the returned TestResult or
+SuiteSummary, applies the existing process and execution policies, and emits
+only the bounded public result fields plus selected execution metadata. Python
+no longer builds and re-encodes the typed returned-value tree on this path; it
+decodes only the small metadata document returned by MNCS. The native app
+reuses the P-047 adjudicator through a projected-value entry point, keeping
+policy in one implementation. A cheap status-token prefilter avoids invoking
+the parser for ordinary non-returned stdout. Escaped or otherwise unsupported
+envelopes, diagnostics, malformed data, nonzero exits, native declines, and
+inputs outside the transport bounds retain the prior compatibility path.
+Differential tests verify that the exact original stdout reaches MNCS and that
+the supported returned result succeeds while Python's full-tree decoder is
+disabled; the transport, projection, and live runner regressions verify the
+consumer boundary.
