@@ -1139,6 +1139,16 @@ output matches an independent sorted JSON golden; 597 members still exhaust
 the budget and keep exact sorted compatibility serialization. The 642-member
 shuffled case continues to decline safely.
 
+P-077 removes a repeated object-variant match from each active merge step by
+using the key, value, and tail already bound for the comparison. With the
+8,000,000-step ceiling unchanged, the sampled shuffled `field-NNN` permutation
+now completes the full public-result path natively through 599 members; its
+pretty JSON bytes and SHA-256 match independent expectations, and Python sends
+one unsorted compact transport. A sweep of each size from 600 through 642 for
+that permutation still declines at the native key-order budget, including 642;
+the exact sorted compatibility path remains in place. UTF-8 and embedded-zero
+key ordering regressions continue to cover the comparator.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing

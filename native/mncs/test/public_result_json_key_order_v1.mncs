@@ -854,7 +854,29 @@ fn object_merge_item_active(active: ObjectMergeStateV1) -> (result: ObjectMergeS
     return match active.left {
         ObjectCons { key: left_key, value: left_value, tail: left_tail } => match active.right {
             ObjectCons { key: right_key, value: right_value, tail: right_tail } =>
-                object_merge_compared(active, left_key, right_key),
+                match compare_key(left_key, right_key) {
+                    Before => ObjectMergeStateV1 {
+                        ..active,
+                        left: left_tail,
+                        left_count: active.left_count -% 1,
+                        run_remaining: active.run_remaining -% 1,
+                        output: JsonValueV1.ObjectCons {
+                            key: left_key, value: left_value, tail: active.output
+                        },
+                        output_count: active.output_count +% 1
+                    },
+                    Equal => ObjectMergeStateV1 { ..active, valid: false },
+                    After => ObjectMergeStateV1 {
+                        ..active,
+                        right: right_tail,
+                        right_count: active.right_count -% 1,
+                        run_remaining: active.run_remaining -% 1,
+                        output: JsonValueV1.ObjectCons {
+                            key: right_key, value: right_value, tail: active.output
+                        },
+                        output_count: active.output_count +% 1
+                    }
+                },
             ObjectNil => ObjectMergeStateV1 { ..active, valid: false },
             Empty => ObjectMergeStateV1 { ..active, valid: false },
             Null => ObjectMergeStateV1 { ..active, valid: false },

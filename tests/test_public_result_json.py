@@ -1198,10 +1198,13 @@ def test_native_public_result_key_order_handles_641_and_642_scalar_members(
     _assert_native_document_route(observed)
 
 
-def test_native_public_result_key_order_falls_back_for_unsorted_642_member_budget(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "count", [600, 642], ids=["immediate-boundary", "maximum-bound"]
+)
+def test_native_public_result_key_order_falls_back_for_unsorted_merge_budget(
+    count: int, tmp_path: Path,
 ) -> None:
-    indices = tuple((index * 73) % 642 for index in range(642))
+    indices = tuple((index * 73) % count for index in range(count))
     value = {f"field-{index:03d}": index for index in indices}
     expected = _python_result_bytes(value)
     observed: list[tuple[str, dict[str, object]]] = []
@@ -1244,10 +1247,13 @@ def test_native_public_result_key_order_falls_back_for_unsorted_642_member_budge
     _assert_native_raw_token_route([name for name, _result in observed])
 
 
-def test_native_public_result_key_order_falls_back_for_unsorted_597_member_budget(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "count", [597, 598, 599], ids=["previous-bound", "new-bound", "max-sampled"]
+)
+def test_native_public_result_key_order_handles_unsorted_members_within_budget(
+    count: int, tmp_path: Path,
 ) -> None:
-    indices = tuple((index * 73) % 597 for index in range(597))
+    indices = tuple((index * 73) % count for index in range(count))
     value = {f"field-{index:03d}": index for index in indices}
     expected = _python_result_bytes(value)
     observed: list[tuple[str, dict[str, object]]] = []
@@ -1282,12 +1288,14 @@ def test_native_public_result_key_order_falls_back_for_unsorted_597_member_budge
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert budget_exhaustions == ["test-public-result-json-key-order.json"]
-    assert compact.call_args_list == [
-        mock.call(value, sort_keys=False),
-        mock.call(value),
-    ]
-    _assert_native_raw_token_route([name for name, _result in observed])
+    assert budget_exhaustions == []
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    _assert_native_document_route(observed)
 
 
 def test_native_public_result_key_order_merges_unsorted_256_members(
