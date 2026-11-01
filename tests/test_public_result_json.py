@@ -1199,7 +1199,7 @@ def test_native_public_result_key_order_handles_641_and_642_scalar_members(
 
 
 @pytest.mark.parametrize(
-    "count", [600, 642], ids=["immediate-boundary", "maximum-bound"]
+    "count", [611, 642], ids=["over-budget-sample", "maximum-bound"]
 )
 def test_native_public_result_key_order_falls_back_for_unsorted_merge_budget(
     count: int, tmp_path: Path,
@@ -1248,7 +1248,15 @@ def test_native_public_result_key_order_falls_back_for_unsorted_merge_budget(
 
 
 @pytest.mark.parametrize(
-    "count", [597, 598, 599], ids=["previous-bound", "new-bound", "max-sampled"]
+    "count", [597, 598, 599, 600, 610, 613],
+    ids=[
+        "previous-bound",
+        "new-bound",
+        "max-flat-sample",
+        "first-indexed",
+        "indexed-sample",
+        "max-indexed-sample",
+    ],
 )
 def test_native_public_result_key_order_handles_unsorted_members_within_budget(
     count: int, tmp_path: Path,

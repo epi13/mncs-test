@@ -5,11 +5,13 @@
   "module": "mncs.test.execution_envelope_adjudication_v1",
   "entry_function": "execution_envelope_adjudication_app_v1",
   "profile": "0.18",
-  "interface_identity": "76360d481ecc68c70f944d547fb47bb65144d370201c92276c72984c89792838",
+  "interface_identity": "d560c557117b78b8a9c0001cdd598176eeb1f29e608d88775671f95e2409f0c5",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }

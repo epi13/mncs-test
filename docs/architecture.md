@@ -1149,6 +1149,19 @@ that permutation still declines at the native key-order budget, including 642;
 the exact sorted compatibility path remains in place. UTF-8 and embedded-zero
 key ordering regressions continue to cover the comparator.
 
+P-078 adds a bounded indexed merge tier above 599 members. MNCS copies the
+object's key/value fields into a fixed 642-entry array, merge-sorts a compact
+index array, then rebuilds the linked object list once. This removes the
+full-list reversal after every merge pass without changing the 8,000,000-step
+ceiling or 642-member bound. The shuffled `field-NNN` cases at 600, 610, and
+613 members complete the full public-result route natively with independent
+JSON bytes and SHA-256; a 611-member permutation and the 642-member case still
+decline safely and retain exact sorted compatibility output. Direct native
+key-order checks also match the compact sorted golden at 601, 608, and 609.
+The boundary remains shape-dependent because native merge cost depends on the
+input permutation. No shared Stdlib API was needed: Test owns this policy and
+continues to use the shared JSON scanner.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing

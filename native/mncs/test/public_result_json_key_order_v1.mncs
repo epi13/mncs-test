@@ -4,6 +4,8 @@ mncs 0.18;
 // Input and output stay within sixty-four UTF-8-safe 1 KiB chunks. JSON values are
 // represented as bounded recursive MNCS variants; small objects use ordered
 // insertion, while larger bounded objects use bottom-up merge sorting on close.
+// Above 599 members the bounded sorter orders field indices and rebuilds the
+// object list once instead of reversing the linked list after every merge pass.
 module mncs.test.public_result_json_key_order_v1;
 
 use mncs.std.application.v1;
@@ -187,6 +189,36 @@ record ObjectMergeStateV1 {
 }
 record ObjectMergeSortStateV1 {
     fields: JsonValueV1,
+    count: u64,
+    width: u64,
+    valid: bool
+}
+record ObjectFieldV1 { key: KeyV1, value: JsonValueV1 }
+record ObjectFieldArrayBuildStateV1 {
+    remaining: JsonValueV1,
+    remaining_count: u64,
+    fields: [ObjectFieldV1; 642],
+    count: u64,
+    built: u64,
+    valid: bool
+}
+record ObjectFieldIndexPassStateV1 {
+    fields: [ObjectFieldV1; 642],
+    source: [u64; 642],
+    target: [u64; 642],
+    count: u64,
+    width: u64,
+    output_index: u64,
+    left_index: u64,
+    left_end: u64,
+    right_index: u64,
+    right_end: u64,
+    valid: bool
+}
+record ObjectFieldIndexPassResultV1 { order: [u64; 642], valid: bool }
+record ObjectFieldIndexSortStateV1 {
+    fields: [ObjectFieldV1; 642],
+    order: [u64; 642],
     count: u64,
     width: u64,
     valid: bool
@@ -958,7 +990,7 @@ fn object_merge_sort_step(sorted: ObjectMergeSortStateV1) -> (result: ObjectMerg
     };
 }
 
-fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectSortResultV1) {
+fn sort_object_fields_merge_flat(fields: JsonValueV1, count: u64) -> (result: ObjectSortResultV1) {
     let initial: ObjectMergeSortStateV1 = ObjectMergeSortStateV1 {
         fields: fields,
         count: count,
@@ -972,6 +1004,219 @@ fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectS
         fields: sorted.fields,
         valid: sorted.valid && sorted.width >= sorted.count
     };
+}
+
+fn empty_object_field() -> (result: ObjectFieldV1) {
+    return ObjectFieldV1 {
+        key: KeyV1 {
+            raw_start: 0,
+            raw_length: 0,
+            ordered: [],
+            ordered_length: 0,
+            ordered_prefix: 0,
+            json_escaped: false,
+            valid: false
+        },
+        value: JsonValueV1.Empty
+    };
+}
+
+fn min_object_sort_index(left: u64, right: u64) -> (result: u64) {
+    return select(left < right, left, right);
+}
+
+fn object_field_array_build_step(
+    state: ObjectFieldArrayBuildStateV1
+) -> (result: ObjectFieldArrayBuildStateV1) {
+    if !state.valid || state.built >= state.count { return state; }
+    return match state.remaining {
+        ObjectCons { key: key, value: value, tail: tail } => ObjectFieldArrayBuildStateV1 {
+            ..state,
+            remaining: tail,
+            remaining_count: state.remaining_count -% 1,
+            fields: replace(state.fields, state.built, ObjectFieldV1 { key: key, value: value }),
+            built: state.built +% 1
+        },
+        ObjectNil => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Empty => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Null => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Raw { start: start, length: length } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        String { start: start, length: length } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Boolean { value: flag } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Integer { negative: negative, magnitude: magnitude } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Utf8String { start: start, length: length } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Array { items: items } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        Object { fields: fields } => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        ArrayNil => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
+        ArrayCons { head: head, tail: tail } => ObjectFieldArrayBuildStateV1 { ..state, valid: false }
+    };
+}
+
+fn object_field_index_advance_pair(
+    state: ObjectFieldIndexPassStateV1
+) -> (result: ObjectFieldIndexPassStateV1) {
+    if state.output_index != state.right_end || state.right_end >= state.count { return state; }
+    let next_base: u64 = state.right_end;
+    let next_left_end: u64 = min_object_sort_index(next_base +% state.width, state.count);
+    return ObjectFieldIndexPassStateV1 {
+        ..state,
+        left_index: next_base,
+        left_end: next_left_end,
+        right_index: next_left_end,
+        right_end: min_object_sort_index(next_base +% state.width *% 2, state.count)
+    };
+}
+
+fn object_field_index_emit_left(
+    state: ObjectFieldIndexPassStateV1
+) -> (result: ObjectFieldIndexPassStateV1) {
+    if state.left_index >= state.left_end || state.output_index >= state.count {
+        return ObjectFieldIndexPassStateV1 { ..state, valid: false };
+    }
+    let selected_index: u64 = state.source[state.left_index];
+    let emitted: ObjectFieldIndexPassStateV1 = ObjectFieldIndexPassStateV1 {
+        ..state,
+        target: replace(state.target, state.output_index, selected_index),
+        output_index: state.output_index +% 1,
+        left_index: state.left_index +% 1
+    };
+    return object_field_index_advance_pair(emitted);
+}
+
+fn object_field_index_emit_right(
+    state: ObjectFieldIndexPassStateV1
+) -> (result: ObjectFieldIndexPassStateV1) {
+    if state.right_index >= state.right_end || state.output_index >= state.count {
+        return ObjectFieldIndexPassStateV1 { ..state, valid: false };
+    }
+    let selected_index: u64 = state.source[state.right_index];
+    let emitted: ObjectFieldIndexPassStateV1 = ObjectFieldIndexPassStateV1 {
+        ..state,
+        target: replace(state.target, state.output_index, selected_index),
+        output_index: state.output_index +% 1,
+        right_index: state.right_index +% 1
+    };
+    return object_field_index_advance_pair(emitted);
+}
+
+fn object_field_index_merge_step(
+    state: ObjectFieldIndexPassStateV1
+) -> (result: ObjectFieldIndexPassStateV1) {
+    if !state.valid || state.output_index >= state.count { return state; }
+    if state.left_index >= state.left_end { return object_field_index_emit_right(state); }
+    if state.right_index >= state.right_end { return object_field_index_emit_left(state); }
+    let left_index: u64 = state.source[state.left_index];
+    let right_index: u64 = state.source[state.right_index];
+    return match compare_key(state.fields[left_index].key, state.fields[right_index].key) {
+        Before => object_field_index_emit_left(state),
+        Equal => ObjectFieldIndexPassStateV1 { ..state, valid: false },
+        After => object_field_index_emit_right(state)
+    };
+}
+
+fn merge_object_field_indices_pass(
+    fields: [ObjectFieldV1; 642], source: [u64; 642], count: u64, width: u64
+) -> (result: ObjectFieldIndexPassResultV1) {
+    let left_end: u64 = min_object_sort_index(width, count);
+    let initial: ObjectFieldIndexPassStateV1 = ObjectFieldIndexPassStateV1 {
+        fields: fields,
+        source: source,
+        target: [0; 642],
+        count: count,
+        width: width,
+        output_index: 0,
+        left_index: 0,
+        left_end: left_end,
+        right_index: left_end,
+        right_end: min_object_sort_index(width *% 2, count),
+        valid: count <= 642 && width > 0
+    };
+    iterate i up_to 642 carrying merged: ObjectFieldIndexPassStateV1 = initial {
+        next merged = object_field_index_merge_step(merged);
+    }
+    return ObjectFieldIndexPassResultV1 {
+        order: merged.target,
+        valid: merged.valid && merged.output_index == count
+    };
+}
+
+fn object_field_index_sort_step(
+    sorted: ObjectFieldIndexSortStateV1
+) -> (result: ObjectFieldIndexSortStateV1) {
+    if !sorted.valid || sorted.width >= sorted.count { return sorted; }
+    let merged: ObjectFieldIndexPassResultV1 = merge_object_field_indices_pass(
+        sorted.fields, sorted.order, sorted.count, sorted.width
+    );
+    return ObjectFieldIndexSortStateV1 {
+        fields: sorted.fields,
+        order: merged.order,
+        count: sorted.count,
+        width: sorted.width *% 2,
+        valid: merged.valid
+    };
+}
+
+fn object_field_index_sorted_cons(
+    fields: [ObjectFieldV1; 642],
+    order: [u64; 642],
+    count: u64,
+    index: u64,
+    tail: JsonValueV1
+) -> (result: JsonValueV1) {
+    if index >= count { return tail; }
+    let field: ObjectFieldV1 = fields[order[count -% 1 -% index]];
+    return JsonValueV1.ObjectCons { key: field.key, value: field.value, tail: tail };
+}
+
+fn sort_object_fields_merge_indexed(
+    fields: JsonValueV1, count: u64
+) -> (result: ObjectSortResultV1) {
+    if count <= 599 || count > 642 {
+        return ObjectSortResultV1 { fields: JsonValueV1.Empty, valid: false };
+    }
+    let empty_field: ObjectFieldV1 = empty_object_field();
+    let build_initial: ObjectFieldArrayBuildStateV1 = ObjectFieldArrayBuildStateV1 {
+        remaining: fields,
+        remaining_count: count,
+        fields: [empty_field; 642],
+        count: count,
+        built: 0,
+        valid: true
+    };
+    iterate i up_to 642 carrying built: ObjectFieldArrayBuildStateV1 = build_initial {
+        next built = object_field_array_build_step(built);
+    }
+    if !built.valid || built.remaining_count != 0 || built.built != count {
+        return ObjectSortResultV1 { fields: JsonValueV1.Empty, valid: false };
+    }
+    let initial_order: [u64; 642] = [0; 642];
+    iterate i up_to 642 carrying order: [u64; 642] = initial_order {
+        next order = select(i < count, replace(order, i, i), order);
+    }
+    let sort_initial: ObjectFieldIndexSortStateV1 = ObjectFieldIndexSortStateV1 {
+        fields: built.fields,
+        order: order,
+        count: count,
+        width: 1,
+        valid: true
+    };
+    iterate pass up_to 10 carrying sorted: ObjectFieldIndexSortStateV1 = sort_initial {
+        next sorted = object_field_index_sort_step(sorted);
+    }
+    if !sorted.valid || sorted.width < count {
+        return ObjectSortResultV1 { fields: JsonValueV1.Empty, valid: false };
+    }
+    iterate i up_to 642 carrying ordered: JsonValueV1 = JsonValueV1.ObjectNil {
+        next ordered = object_field_index_sorted_cons(
+            sorted.fields, sorted.order, count, i, ordered
+        );
+    }
+    return ObjectSortResultV1 { fields: ordered, valid: true };
+}
+
+fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectSortResultV1) {
+    if count > 599 { return sort_object_fields_merge_indexed(fields, count); }
+    return sort_object_fields_merge_flat(fields, count);
 }
 
 fn sort_object_fields_at_close(frame: FrameV1) -> (result: ObjectSortResultV1) {

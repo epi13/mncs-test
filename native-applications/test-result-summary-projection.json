@@ -5,11 +5,13 @@
   "module": "mncs.test.result_summary_projection_v1",
   "entry_function": "result_summary_projection_app_v1",
   "profile": "0.18",
-  "interface_identity": "fb0edd925f3f6523354ba06655a774d4c31913fe1256fbd5e430f7d6b5ed7dfb",
+  "interface_identity": "bf940757081c330c9b6d07dd44e20ba5c878a45e24520beee024d2e3f24b872f",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }

@@ -5,11 +5,13 @@
   "module": "mncs.test.execution_result_adjudication_v1",
   "entry_function": "execution_result_adjudication_app_v1",
   "profile": "0.18",
-  "interface_identity": "97442250134bf1d3c809baa34df4a024d8958315c275046dfbacf016db279c22",
+  "interface_identity": "c82cd9d61dc9e12dfe5f42db91c4252ef11290d84103f247e7d85d7cde5abd4b",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
   ],
   "environment_keys": [],
-  "required_capabilities": ["test_artifact"]
+  "required_capabilities": [
+    "test_artifact"
+  ]
 }
