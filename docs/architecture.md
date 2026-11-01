@@ -534,10 +534,14 @@ directory with at most 128 entries, a request within 65,536 bytes, and at most
 application or the retained session; files above 65,536 bytes through 1 MiB
 stream through the retained session after warm-up. Oversized files, cold or
 unavailable sessions, and native failures retain the exact host digest and
-report its fallback reason. `mncs.test.library_tree_identity_v1` owns the
-final ordered `path NUL leaf-digest LF` fold. The adapter reports leaf and
-tree implementations separately and retains an explicit host fold when the
-entry, path, or request bounds are exceeded or native execution fails.
+report its fallback reason. `mncs.test.library_tree_identity_v1` bottom-up
+merge-sorts bounded path and leaf rows into the established sorted `os.walk`
+order: files in a directory precede its child-directory subtrees, and UTF-8
+component bytes determine sibling order. It then owns the `path NUL
+leaf-digest LF` fold. The adapter passes rows in filesystem traversal order
+without sorting directory or file names. The host compatibility fold restores
+the same order only after a native bound or execution failure. Leaf and tree
+implementations remain reported separately.
 Each retained window uses one MNCS function that validates the
 request and advances SHA-256 state together; the final window also finalizes the
 digest in that same call, with no separate initialization or finalization call

@@ -1,9 +1,9 @@
 mncs 0.18;
 
-// mncs.test.library_tree_identity_v1 owns the canonical hash fold for a
-// deterministically enumerated library tree. Filesystem traversal and leaf
-// reads remain with the host adapter; each leaf arrives with its SHA-256
-// text and this module hashes `path NUL leaf-hex LF` in input order.
+// mncs.test.library_tree_identity_v1 owns the canonical path ordering and
+// hash fold for a bounded library tree. Filesystem traversal and leaf reads
+// remain with the host adapter; this module sorts path rows into the same
+// file-before-subdirectory depth-first order before hashing each leaf digest.
 module mncs.test.library_tree_identity_v1;
 
 use mncs.std.application.v1;
@@ -24,6 +24,25 @@ record LibraryTreeIdentityResultV1 {
     schema_version: [byte; up_to 64],
     entry_count: u64,
     digest: [byte; 32]
+}
+
+record LibraryTreePathCompareStateV1 {
+    left_offset: u64,
+    right_offset: u64,
+    order: i64,
+    done: bool
+}
+
+record LibraryTreeMergeStateV1 {
+    source: [LibraryTreeEntryV1; 128],
+    target: [LibraryTreeEntryV1; 128],
+    count: u64,
+    width: u64,
+    middle: u64,
+    end: u64,
+    left: u64,
+    right: u64,
+    output_index: u64
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
@@ -74,6 +93,211 @@ fn valid_request(request: LibraryTreeIdentityRequestV1) -> (result: bool) {
     return valid;
 }
 
+fn empty_tree_entry() -> (result: LibraryTreeEntryV1) {
+    return LibraryTreeEntryV1 { path: [], leaf_sha256: [] };
+}
+
+fn compare_path_segment_step(
+    order: i64,
+    left: [byte; up_to 1024],
+    right: [byte; up_to 1024],
+    left_start: u64,
+    right_start: u64,
+    index: u64,
+    common: u64
+) -> (result: i64) {
+    if order != 0 || index >= common { return order; }
+    if left[left_start +% index] < right[right_start +% index] { return -1; }
+    if left[left_start +% index] > right[right_start +% index] { return 1; }
+    return order;
+}
+
+fn path_segment_end(path: [byte; up_to 1024], start: u64, length: u64) -> (result: u64) {
+    iterate i over path[start..length] carrying end: u64 = length {
+        next end = select(end == length && path[start +% i] == 47, start +% i, end);
+    }
+    return end;
+}
+
+fn compare_path_segment(
+    left: [byte; up_to 1024],
+    left_start: u64,
+    left_end: u64,
+    right: [byte; up_to 1024],
+    right_start: u64,
+    right_end: u64
+) -> (result: i64) {
+    let left_length: u64 = left_end -% left_start;
+    let right_length: u64 = right_end -% right_start;
+    let common: u64 = merge_min(left_length, right_length);
+    iterate i over left[left_start..(left_start +% common)] carrying order: i64 = 0 {
+        next order = compare_path_segment_step(
+            order, left, right, left_start, right_start, i, common
+        );
+    }
+    if order != 0 { return order; }
+    if left_length < right_length { return -1; }
+    if left_length > right_length { return 1; }
+    return 0;
+}
+
+fn compare_path_step(
+    state: LibraryTreePathCompareStateV1,
+    left: [byte; up_to 1024],
+    right: [byte; up_to 1024]
+) -> (result: LibraryTreePathCompareStateV1) {
+    if state.done || state.order != 0 { return state; }
+    let left_end: u64 = path_segment_end(left, state.left_offset, left.len);
+    let right_end: u64 = path_segment_end(right, state.right_offset, right.len);
+    let left_is_file: bool = left_end == left.len;
+    let right_is_file: bool = right_end == right.len;
+    if left_is_file && !right_is_file {
+        return LibraryTreePathCompareStateV1 { ..state, order: -1, done: true };
+    }
+    if !left_is_file && right_is_file {
+        return LibraryTreePathCompareStateV1 { ..state, order: 1, done: true };
+    }
+    let segment_order: i64 = compare_path_segment(
+        left, state.left_offset, left_end, right, state.right_offset, right_end
+    );
+    if segment_order != 0 {
+        return LibraryTreePathCompareStateV1 { ..state, order: segment_order, done: true };
+    }
+    if left_is_file {
+        return LibraryTreePathCompareStateV1 { ..state, done: true };
+    }
+    return LibraryTreePathCompareStateV1 {
+        ..state,
+        left_offset: left_end +% 1,
+        right_offset: right_end +% 1
+    };
+}
+
+fn compare_path(left: LibraryTreeEntryV1, right: LibraryTreeEntryV1) -> (result: i64) {
+    let initial: LibraryTreePathCompareStateV1 = LibraryTreePathCompareStateV1 {
+        left_offset: 0,
+        right_offset: 0,
+        order: 0,
+        done: false
+    };
+    iterate i over left.path carrying state: LibraryTreePathCompareStateV1 = initial {
+        next state = compare_path_step(state, left.path, right.path);
+    }
+    return state.order;
+}
+
+fn merge_min(left: u64, right: u64) -> (result: u64) {
+    return select(left < right, left, right);
+}
+
+fn pad_entries(entries: [LibraryTreeEntryV1; up_to 128]) -> (result: [LibraryTreeEntryV1; 128]) {
+    let empty: LibraryTreeEntryV1 = empty_tree_entry();
+    iterate i over entries carrying values: [LibraryTreeEntryV1; 128] = [empty; 128] {
+        next values = replace(values, i, entries[i]);
+    }
+    return values;
+}
+
+fn empty_tree_merge(entries: [LibraryTreeEntryV1; 128], count: u64) -> (result: LibraryTreeMergeStateV1) {
+    let empty: LibraryTreeEntryV1 = empty_tree_entry();
+    let middle: u64 = merge_min(1, count);
+    let end: u64 = merge_min(2, count);
+    return LibraryTreeMergeStateV1 {
+        source: entries,
+        target: [empty; 128],
+        count: count,
+        width: 1,
+        middle: middle,
+        end: end,
+        left: 0,
+        right: middle,
+        output_index: 0
+    };
+}
+
+fn advance_tree_run(state: LibraryTreeMergeStateV1) -> (result: LibraryTreeMergeStateV1) {
+    if state.output_index < state.end || state.end >= state.count { return state; }
+    let run_start: u64 = state.end;
+    let middle: u64 = merge_min(state.count, run_start +% state.width);
+    let end: u64 = merge_min(state.count, run_start +% (state.width *% 2));
+    return LibraryTreeMergeStateV1 {
+        ..state,
+        middle: middle,
+        end: end,
+        left: run_start,
+        right: middle
+    };
+}
+
+fn take_tree_left(state: LibraryTreeMergeStateV1) -> (result: LibraryTreeMergeStateV1) {
+    return LibraryTreeMergeStateV1 {
+        ..state,
+        target: replace(state.target, state.output_index, state.source[state.left]),
+        left: state.left +% 1,
+        output_index: state.output_index +% 1
+    };
+}
+
+fn take_tree_right(state: LibraryTreeMergeStateV1) -> (result: LibraryTreeMergeStateV1) {
+    return LibraryTreeMergeStateV1 {
+        ..state,
+        target: replace(state.target, state.output_index, state.source[state.right]),
+        right: state.right +% 1,
+        output_index: state.output_index +% 1
+    };
+}
+
+fn tree_merge_output_step(state: LibraryTreeMergeStateV1, index: u64) -> (result: LibraryTreeMergeStateV1) {
+    if index >= state.count { return state; }
+    let run: LibraryTreeMergeStateV1 = advance_tree_run(state);
+    if run.left >= run.middle { return take_tree_right(run); }
+    if run.right >= run.end { return take_tree_left(run); }
+    if compare_path(run.source[run.left], run.source[run.right]) <= 0 {
+        return take_tree_left(run);
+    }
+    return take_tree_right(run);
+}
+
+fn tree_merge_pass(state: LibraryTreeMergeStateV1) -> (result: LibraryTreeMergeStateV1) {
+    if state.width >= state.count { return state; }
+    iterate i up_to 128 carrying current: LibraryTreeMergeStateV1 = state {
+        next current = tree_merge_output_step(current, i);
+    }
+    let merged: [LibraryTreeEntryV1; 128] = current.target;
+    let width: u64 = state.width *% 2;
+    let middle: u64 = merge_min(width, state.count);
+    let end: u64 = merge_min(width *% 2, state.count);
+    return LibraryTreeMergeStateV1 {
+        ..state,
+        source: merged,
+        target: state.source,
+        width: width,
+        middle: middle,
+        end: end,
+        left: 0,
+        right: middle,
+        output_index: 0
+    };
+}
+
+fn sort_entries(entries: [LibraryTreeEntryV1; up_to 128], count: u64) -> (result: [LibraryTreeEntryV1; 128]) {
+    let initial: LibraryTreeMergeStateV1 = empty_tree_merge(pad_entries(entries), count);
+    iterate pass up_to 7 carrying current: LibraryTreeMergeStateV1 = initial {
+        next current = tree_merge_pass(current);
+    }
+    return current.source;
+}
+
+fn update_sorted_entry(
+    state: sha256.DigestState,
+    entries: [LibraryTreeEntryV1; 128],
+    index: u64,
+    count: u64
+) -> (result: sha256.DigestState) {
+    if index >= count { return state; }
+    return update_entry(state, entries[index]);
+}
+
 fn update_path_block(
     state: sha256.DigestState,
     path: [byte; up_to 1024],
@@ -117,8 +341,9 @@ fn update_entry(
 }
 
 fn tree_digest(request: LibraryTreeIdentityRequestV1) -> (result: [byte; 32]) {
-    iterate i over request.entries carrying state: sha256.DigestState = sha256.init() {
-        next state = update_entry(state, request.entries[i]);
+    let sorted: [LibraryTreeEntryV1; 128] = sort_entries(request.entries, request.entry_count);
+    iterate i up_to 128 carrying state: sha256.DigestState = sha256.init() {
+        next state = update_sorted_entry(state, sorted, i, request.entry_count);
     }
     return sha256.finalize_standard(state);
 }

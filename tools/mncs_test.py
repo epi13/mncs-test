@@ -1439,7 +1439,7 @@ def library_tree_identity_sha256(
     cwd: Path,
     environment: dict[str, str],
 ) -> str:
-    """Hash bounded ordered path/leaf records through the Test MNCS app."""
+    """Hash bounded path/leaf records through the native Test sorter and fold."""
     if len(entries) > LIBRARY_TREE_IDENTITY_MAX_ENTRIES:
         raise NativeInputBoundError(
             "library tree exceeds the 128-entry native identity bound",
@@ -1534,6 +1534,14 @@ def _library_tree_native_leaf_fallback_reason(
     return None
 
 
+def _library_tree_walk_order_key(relative: str) -> tuple[tuple[int, str], ...]:
+    """Match sorted os.walk order: files before each directory subtree."""
+    components = relative.split("/")
+    return tuple((1, component) for component in components[:-1]) + (
+        (0, components[-1]),
+    )
+
+
 def _hash_tree_with_method(
     path: Path,
     *,
@@ -1545,9 +1553,9 @@ def _hash_tree_with_method(
     """Return the tree digest and report whether MNCS or the host computed it.
 
     Filesystem enumeration and leaf reads stay in the adapter. For bounded
-    directories, MNCS owns the ordered `path NUL leaf-digest LF` fold. The
-    historical host hash remains an explicit fallback for unsupported bounds
-    and unavailable native execution.
+    directories, MNCS orders the path/leaf rows and owns the canonical
+    `path NUL leaf-digest LF` fold. The historical host hash remains an
+    explicit fallback for unsupported bounds and unavailable native execution.
     """
     if path.is_file():
         return sha256_file(path), {
@@ -1561,8 +1569,6 @@ def _hash_tree_with_method(
         }
     file_entries: list[tuple[Path, str]] = []
     for root, directories, names in os.walk(path, followlinks=False):
-        directories.sort()
-        names.sort()
         root_path = Path(root)
         for name in names:
             item = root_path / name
@@ -1646,6 +1652,7 @@ def _hash_tree_with_method(
         fallback_reason = "native_context_unavailable"
         fallback_detail = None
 
+    entries.sort(key=lambda item: _library_tree_walk_order_key(item[0]))
     material = "".join(f"{name}\0{digest}\n" for name, digest in entries).encode()
     hashing: dict[str, Any] = {
         "algorithm": "sha256-library-tree-records/1",
