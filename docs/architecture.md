@@ -142,8 +142,12 @@ public diagnostic fields, a four-field span, and `found` as null, text,
 boolean, or signed integer. `compile_entry` reconstructs the public diagnostic
 dictionaries from those typed records, so supported compiler documents do not
 pass through Python's JSON tree parser. The projection uses Test's bounded
-`public_result_json_key_order_v1` value parser; the public result contract and
-diagnostic ordering stay unchanged.
+`json_cursor.v1` events directly in a second bounded pass and decodes only
+selected string spans from the original chunks; it no longer builds an
+intermediate `JsonValueV1` tree. It validates the existing bounds and exact
+diagnostic shape before publishing records. Unsupported shapes decline
+atomically to the Python compatibility parser, and the public result contract
+and diagnostic ordering stay unchanged.
 
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite

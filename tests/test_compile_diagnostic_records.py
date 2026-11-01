@@ -122,6 +122,26 @@ def test_native_typed_records_match_independent_json_values() -> None:
     assert mncs_test.native_compile_diagnostic_records(native) == diagnostics
 
 
+def test_native_projection_accepts_empty_main_related_array() -> None:
+    diagnostic = {
+        "code": "MNE041",
+        "stage": "elaboration",
+        "severity": "error",
+        "message": "empty related list",
+        "span": {"start": 1, "end": 2, "line": 1, "column": 1},
+        "expected": [],
+        "found": None,
+        "related": [],
+    }
+    document = json.dumps([diagnostic], separators=(",", ":")).encode("utf-8")
+
+    native = _document_result(document)
+
+    assert native is not None
+    assert native["projection_supported"] is True
+    assert mncs_test.native_compile_diagnostic_records(native) == [diagnostic]
+
+
 @pytest.mark.parametrize(
     "diagnostic",
     [

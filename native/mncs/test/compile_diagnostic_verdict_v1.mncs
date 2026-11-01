@@ -1,8 +1,8 @@
 mncs 0.18;
 
 // Project bounded compiler diagnostics in MNCS. The cursor scan validates the
-// document and derives the compile verdict; a bounded JsonValue parse then
-// projects the standard diagnostic shape into typed records for Test output.
+// document and derives the compile verdict; a bounded cursor pass then projects
+// standard diagnostic fields directly into typed records for Test output.
 module mncs.test.compile_diagnostic_verdict_v1;
 
 use mncs.std.application.v1;
