@@ -5,7 +5,7 @@
   "module": "mncs.test.result_summary_projection_v1",
   "entry_function": "result_summary_projection_app_v1",
   "profile": "0.18",
-  "interface_identity": "bf940757081c330c9b6d07dd44e20ba5c878a45e24520beee024d2e3f24b872f",
+  "interface_identity": "3b72fd5be8c87245d88f41dcda9ebadf4a05d345686b0f418cac7ea9c21ab8c7",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

@@ -1162,6 +1162,17 @@ The boundary remains shape-dependent because native merge cost depends on the
 input permutation. No shared Stdlib API was needed: Test owns this policy and
 continues to use the shared JSON scanner.
 
+P-079 separates key and value storage in the bounded indexed merge state.
+Merge passes now carry only the key array they compare, then use the sorted
+indices to rebuild key/value pairs once. This keeps the 8,000,000-step and
+642-member bounds unchanged and moves the sampled shuffled 611-member case
+from Python's sorted compatibility encoding to the full native serializer.
+Output bytes and SHA-256 match the independent golden, and Python compacts the
+input once without sorting. The sampled 642-member shuffled case remains on
+the exact compatibility path. No shared Stdlib API was needed because the
+representation serves Test's public-result policy and uses the shared JSON
+scanner.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing

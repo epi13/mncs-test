@@ -197,13 +197,14 @@ record ObjectFieldV1 { key: KeyV1, value: JsonValueV1 }
 record ObjectFieldArrayBuildStateV1 {
     remaining: JsonValueV1,
     remaining_count: u64,
-    fields: [ObjectFieldV1; 642],
+    keys: [KeyV1; 642],
+    values: [JsonValueV1; 642],
     count: u64,
     built: u64,
     valid: bool
 }
 record ObjectFieldIndexPassStateV1 {
-    fields: [ObjectFieldV1; 642],
+    keys: [KeyV1; 642],
     source: [u64; 642],
     target: [u64; 642],
     count: u64,
@@ -217,7 +218,7 @@ record ObjectFieldIndexPassStateV1 {
 }
 record ObjectFieldIndexPassResultV1 { order: [u64; 642], valid: bool }
 record ObjectFieldIndexSortStateV1 {
-    fields: [ObjectFieldV1; 642],
+    keys: [KeyV1; 642],
     order: [u64; 642],
     count: u64,
     width: u64,
@@ -1034,7 +1035,8 @@ fn object_field_array_build_step(
             ..state,
             remaining: tail,
             remaining_count: state.remaining_count -% 1,
-            fields: replace(state.fields, state.built, ObjectFieldV1 { key: key, value: value }),
+            keys: replace(state.keys, state.built, key),
+            values: replace(state.values, state.built, value),
             built: state.built +% 1
         },
         ObjectNil => ObjectFieldArrayBuildStateV1 { ..state, valid: false },
@@ -1107,7 +1109,7 @@ fn object_field_index_merge_step(
     if state.right_index >= state.right_end { return object_field_index_emit_left(state); }
     let left_index: u64 = state.source[state.left_index];
     let right_index: u64 = state.source[state.right_index];
-    return match compare_key(state.fields[left_index].key, state.fields[right_index].key) {
+    return match compare_key(state.keys[left_index], state.keys[right_index]) {
         Before => object_field_index_emit_left(state),
         Equal => ObjectFieldIndexPassStateV1 { ..state, valid: false },
         After => object_field_index_emit_right(state)
@@ -1115,11 +1117,11 @@ fn object_field_index_merge_step(
 }
 
 fn merge_object_field_indices_pass(
-    fields: [ObjectFieldV1; 642], source: [u64; 642], count: u64, width: u64
+    keys: [KeyV1; 642], source: [u64; 642], count: u64, width: u64
 ) -> (result: ObjectFieldIndexPassResultV1) {
     let left_end: u64 = min_object_sort_index(width, count);
     let initial: ObjectFieldIndexPassStateV1 = ObjectFieldIndexPassStateV1 {
-        fields: fields,
+        keys: keys,
         source: source,
         target: [0; 642],
         count: count,
@@ -1145,10 +1147,10 @@ fn object_field_index_sort_step(
 ) -> (result: ObjectFieldIndexSortStateV1) {
     if !sorted.valid || sorted.width >= sorted.count { return sorted; }
     let merged: ObjectFieldIndexPassResultV1 = merge_object_field_indices_pass(
-        sorted.fields, sorted.order, sorted.count, sorted.width
+        sorted.keys, sorted.order, sorted.count, sorted.width
     );
     return ObjectFieldIndexSortStateV1 {
-        fields: sorted.fields,
+        keys: sorted.keys,
         order: merged.order,
         count: sorted.count,
         width: sorted.width *% 2,
@@ -1157,15 +1159,18 @@ fn object_field_index_sort_step(
 }
 
 fn object_field_index_sorted_cons(
-    fields: [ObjectFieldV1; 642],
+    keys: [KeyV1; 642],
+    values: [JsonValueV1; 642],
     order: [u64; 642],
     count: u64,
     index: u64,
     tail: JsonValueV1
 ) -> (result: JsonValueV1) {
     if index >= count { return tail; }
-    let field: ObjectFieldV1 = fields[order[count -% 1 -% index]];
-    return JsonValueV1.ObjectCons { key: field.key, value: field.value, tail: tail };
+    let field_index: u64 = order[count -% 1 -% index];
+    return JsonValueV1.ObjectCons {
+        key: keys[field_index], value: values[field_index], tail: tail
+    };
 }
 
 fn sort_object_fields_merge_indexed(
@@ -1178,7 +1183,8 @@ fn sort_object_fields_merge_indexed(
     let build_initial: ObjectFieldArrayBuildStateV1 = ObjectFieldArrayBuildStateV1 {
         remaining: fields,
         remaining_count: count,
-        fields: [empty_field; 642],
+        keys: [empty_field.key; 642],
+        values: [JsonValueV1.Empty; 642],
         count: count,
         built: 0,
         valid: true
@@ -1194,7 +1200,7 @@ fn sort_object_fields_merge_indexed(
         next order = select(i < count, replace(order, i, i), order);
     }
     let sort_initial: ObjectFieldIndexSortStateV1 = ObjectFieldIndexSortStateV1 {
-        fields: built.fields,
+        keys: built.keys,
         order: order,
         count: count,
         width: 1,
@@ -1208,7 +1214,7 @@ fn sort_object_fields_merge_indexed(
     }
     iterate i up_to 642 carrying ordered: JsonValueV1 = JsonValueV1.ObjectNil {
         next ordered = object_field_index_sorted_cons(
-            sorted.fields, sorted.order, count, i, ordered
+            sorted.keys, built.values, sorted.order, count, i, ordered
         );
     }
     return ObjectSortResultV1 { fields: ordered, valid: true };

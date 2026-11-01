@@ -5,7 +5,7 @@
   "module": "mncs.test.public_result_json_key_order_v1",
   "entry_function": "public_result_json_key_order_app_v1",
   "profile": "0.18",
-  "interface_identity": "a4525fd63e0e872b0539916fe45cc4a49baddc3be0e3e91054f4b253f3edb701",
+  "interface_identity": "d59a0084c83ba71404303aec5445fef9a8182fa9f16f3ff7c2e6c766207b87e6",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
