@@ -5,7 +5,7 @@
   "module": "mncs.test.public_result_json_token_v1",
   "entry_function": "public_result_json_token_start_app_v1",
   "profile": "0.18",
-  "interface_identity": "a2bb9a0c0d3e7610b17a0aa6f09c328c20d9fe7a76dbf4ad81bf92ad59997262",
+  "interface_identity": "c94816cdbe305bb9ac50e546338d182d5f9abd1772c389e1b92739d09a23ace7",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

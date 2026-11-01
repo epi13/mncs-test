@@ -229,6 +229,15 @@ existing execution cap. The adapter therefore admits only the verified 18,000
 byte bound and retains the compatibility parser for larger documents; the CLI
 budget was not raised to conceal the measured cost.
 
+P-074 adds `mncs.std.json_cursor.StrictCursor` and uses it in the Test
+compile-diagnostic scanner. The shared cursor still validates string escapes,
+surrogate pairs, control bytes, and UTF-8; the generic JSON grammar state now
+sees only each string's opening and closing quote instead of rescanning its
+contents. The strict-cursor corpus and Test diagnostic differentials pass. A
+repeat of the former 18,432-byte boundary still exhausts the unchanged
+8,000,000-step cap, so Test keeps the verified 18,000-byte admission bound and
+the existing atomic compatibility path for larger documents.
+
 The public-result formatter now emits 4,096-byte windows and carries its
 source SHA-256 state between them. The final window checks the digest against
 the original input identity, avoiding a full-source rehash for every

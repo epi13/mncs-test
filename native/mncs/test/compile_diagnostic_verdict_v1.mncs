@@ -84,8 +84,7 @@ record DiagnosticCodeJsonChunkCopyV1 {
 }
 
 record DiagnosticScanV1 {
-    cursor: json_cursor.Cursor,
-    syntax: json.ScanState,
+    cursor: json_cursor.StrictCursor,
     frames: [DiagnosticFrameV1; 12],
     root_is_object: bool,
     valid_field_present: bool,
@@ -159,14 +158,9 @@ fn empty_decoded_codes() -> (result: DiagnosticCodesV1) {
     };
 }
 
-fn initial_json_scan() -> (result: json.ScanState) {
-    return json.init();
-}
-
 fn initial_diagnostic_scan() -> (result: DiagnosticScanV1) {
     return DiagnosticScanV1 {
-        cursor: json_cursor.init(),
-        syntax: initial_json_scan(),
+        cursor: json_cursor.strict_init(),
         frames: [empty_frame(); 12],
         root_is_object: false,
         valid_field_present: false,
@@ -225,7 +219,7 @@ fn empty_codes(state: DiagnosticScanV1, selection: byte) -> (result: DiagnosticS
         actual_count: 0,
         codes_valid: true,
         diagnostics_json_present: true,
-        diagnostics_json_start: state.cursor.position,
+        diagnostics_json_start: state.cursor.cursor.position,
         diagnostics_json_length: 0,
         diagnostic_count: 0
     };
@@ -269,10 +263,10 @@ fn valid_scalar_step(state: DiagnosticScanV1, value: byte) -> (result: Diagnosti
 }
 
 fn begins_value(state: DiagnosticScanV1, value: byte) -> (result: bool) {
-    let expected: bool = state.syntax.expect == 0
-        || state.syntax.expect == 3
-        || state.syntax.expect == 5;
-    return state.syntax.mode == 0 && expected && !json.is_space(value);
+    let expected: bool = state.cursor.syntax.expect == 0
+        || state.cursor.syntax.expect == 3
+        || state.cursor.syntax.expect == 5;
+    return state.cursor.syntax.mode == 0 && expected && !json.is_space(value);
 }
 
 fn begin_value(
@@ -282,7 +276,7 @@ fn begin_value(
 ) -> (result: DiagnosticScanV1) {
     if !begins_value(state, value) { return state; }
     let next_count: u64 = state.value_count +% 1;
-    let root_value: bool = state.syntax.expect == 0;
+    let root_value: bool = state.cursor.syntax.expect == 0;
     let root_object: bool = root_value && value == 123;
     let entered_root_array: bool = root_value && value == 91;
     let counted: DiagnosticScanV1 = DiagnosticScanV1 {
@@ -298,8 +292,8 @@ fn begin_value(
         empty_codes(counted, 1),
         counted
     );
-    if selected_root.cursor.depth == 0 { return selected_root; }
-    let parent_index: u64 = (selected_root.cursor.depth as u64) -% 1;
+    if selected_root.cursor.cursor.depth == 0 { return selected_root; }
+    let parent_index: u64 = (selected_root.cursor.cursor.depth as u64) -% 1;
     let parent: DiagnosticFrameV1 = selected_root.frames[parent_index];
     if parent.kind == 1 {
         let next_fields: u64 = parent.field_count +% 1;
@@ -344,7 +338,7 @@ fn begin_value(
         return counted_fields;
     }
     if parent.kind == 2
-        && selected_root.syntax.expect == 5
+        && selected_root.cursor.syntax.expect == 5
         && is_selected_array(parent.role, selected_root.selection) {
         let next_members: u64 = parent.member_count +% 1;
         let object_count: u64 = selected_root.diagnostic_count +% ((value == 123) as u64);
@@ -413,13 +407,13 @@ fn push_container(
 }
 
 fn key_closed(state: DiagnosticScanV1) -> (result: DiagnosticScanV1) {
-    let depth: u64 = state.cursor.depth as u64;
+    let depth: u64 = state.cursor.cursor.depth as u64;
     if depth == 0 { return DiagnosticScanV1 { ..state, supported: false }; }
     let index: u64 = depth -% 1;
     let frame: DiagnosticFrameV1 = state.frames[index];
-    let plain: bool = key_span_is_plain(state.cursor);
+    let plain: bool = key_span_is_plain(state.cursor.cursor);
     if frame.role == 1 {
-        let tag: byte = root_key_tag(state.cursor);
+        let tag: byte = root_key_tag(state.cursor.cursor);
         let duplicate: bool = (tag == 1 && state.valid_seen)
             || (tag == 2 && state.errors_seen)
             || (tag == 3 && state.diagnostics_seen);
@@ -435,7 +429,7 @@ fn key_closed(state: DiagnosticScanV1) -> (result: DiagnosticScanV1) {
         };
     }
     if frame.role == 5 {
-        let tag: byte = diagnostic_key_tag(state.cursor);
+        let tag: byte = diagnostic_key_tag(state.cursor.cursor);
         let duplicate: bool = tag == 4 && frame.code_seen;
         let updated: DiagnosticFrameV1 = DiagnosticFrameV1 {
             ..frame,
@@ -455,15 +449,15 @@ fn decode_code_string(
     state: DiagnosticScanV1,
     expects_failure: bool
 ) -> (result: DiagnosticScanV1) {
-    let depth: u64 = state.cursor.depth as u64;
+    let depth: u64 = state.cursor.cursor.depth as u64;
     if !expects_failure || depth == 0 { return state; }
     let index: u64 = depth -% 1;
     let frame: DiagnosticFrameV1 = state.frames[index];
     if frame.role != 5 || frame.key != 4 { return state; }
-    let raw_length: u64 = state.cursor.string_end -% state.cursor.string_start;
+    let raw_length: u64 = state.cursor.cursor.string_end -% state.cursor.cursor.string_start;
     let updated_frame: DiagnosticFrameV1 = DiagnosticFrameV1 {
         ..frame,
-        code_start: state.cursor.string_start,
+        code_start: state.cursor.cursor.string_start,
         code_length: raw_length
     };
     return DiagnosticScanV1 {
@@ -503,7 +497,7 @@ fn close_diagnostic_array(
     if !is_selected_array(frame.role, state.selection) { return state; }
     return DiagnosticScanV1 {
         ..state,
-        diagnostics_json_length: state.cursor.position
+        diagnostics_json_length: state.cursor.cursor.position
             -% state.diagnostics_json_start,
         projection_supported: state.projection_supported
             && frame.member_count <= 32 && state.diagnostic_count <= 32
@@ -701,17 +695,17 @@ fn observe_event(
     value: byte,
     expects_failure: bool
 ) -> (result: DiagnosticScanV1) {
-    if state.cursor.event == 2 { return key_closed(state); }
-    if state.cursor.event == 4 {
+    if state.cursor.cursor.event == 2 { return key_closed(state); }
+    if state.cursor.cursor.event == 4 {
         return decode_code_string(state, expects_failure);
     }
-    if state.cursor.event == 5 || state.cursor.event == 6 {
+    if state.cursor.cursor.event == 5 || state.cursor.cursor.event == 6 {
         return push_container(state, parent_depth, value, expects_failure);
     }
-    if state.cursor.event == 7 {
-        return append_diagnostic(state, state.cursor.depth as u64, expects_failure);
+    if state.cursor.cursor.event == 7 {
+        return append_diagnostic(state, state.cursor.cursor.depth as u64, expects_failure);
     }
-    if state.cursor.event == 8 {
+    if state.cursor.cursor.event == 8 {
         return close_diagnostic_array(state, parent_depth);
     }
     return state;
@@ -727,14 +721,12 @@ fn scan_byte(
         finish_valid_scalar(state),
         state
     );
-    let parent_depth: u64 = finished.cursor.depth as u64;
+    let parent_depth: u64 = finished.cursor.cursor.depth as u64;
     let started: DiagnosticScanV1 = begin_value(finished, value, expects_failure);
-    let cursor: json_cursor.Cursor = json_cursor.feed_byte(started.cursor, value);
-    let syntax: json.ScanState = json.scan_step(started.syntax, value);
+    let cursor: json_cursor.StrictCursor = json_cursor.strict_feed_byte(started.cursor, value);
     let advanced: DiagnosticScanV1 = DiagnosticScanV1 {
         ..started,
-        cursor: cursor,
-        syntax: syntax
+        cursor: cursor
     };
     if started.valid_scalar_active && !finished.valid_scalar_active {
         let updated: DiagnosticScanV1 = DiagnosticScanV1 { ..advanced };
@@ -804,11 +796,8 @@ fn scan_is_valid(
     scanned: DiagnosticScanV1,
     expects_failure: bool
 ) -> (result: bool) {
-    let syntax: json.ScanState = json.scan_finish_end(scanned.syntax);
-    let syntax_valid: bool = syntax.valid && syntax.depth == 0
-        && syntax.mode == 0 && syntax.expect == 7;
-    let cursor_valid: bool = json_cursor.is_valid(scanned.cursor);
-    return scanned.supported && syntax_valid && cursor_valid
+    let cursor_valid: bool = json_cursor.strict_is_complete(scanned.cursor);
+    return scanned.supported && cursor_valid
         && (!expects_failure || scanned.codes_valid);
 }
 
@@ -821,9 +810,9 @@ fn result(
 ) -> (result: CompileDiagnosticVerdictResultV1) {
     let span_in_bounds: bool = scanned.diagnostics_json_present
         && scanned.diagnostics_json_length >= 2
-        && scanned.diagnostics_json_start <= scanned.cursor.position
+        && scanned.diagnostics_json_start <= scanned.cursor.cursor.position
         && scanned.diagnostics_json_length
-            <= scanned.cursor.position -% scanned.diagnostics_json_start;
+            <= scanned.cursor.cursor.position -% scanned.diagnostics_json_start;
     let no_array: bool = scanned.selection == 0
         && !scanned.diagnostics_json_present && scanned.diagnostic_count == 0;
     let span_valid: bool = select(
