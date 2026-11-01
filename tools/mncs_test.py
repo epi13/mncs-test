@@ -139,7 +139,7 @@ VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
 COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-diagnostic-verdict-request/1"
-COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/5"
+COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/6"
 COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 16_384
 COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES = 16
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
@@ -232,7 +232,7 @@ class NativeDiagnosticValueSpan:
     """A native-validated JSON span carried opaquely to the public serializer."""
 
     json_fragment: bytes
-    diagnostic_codes: tuple[str, ...]
+    diagnostic_codes_json: bytes
     json_span_present: bool
 
 
@@ -1941,7 +1941,8 @@ def native_compile_diagnostic_document_result(
     valid_field_is_true = result.get("valid_field_is_true")
     diagnostic_count = result.get("diagnostic_count")
     diagnostic_code_count = result.get("diagnostic_code_count")
-    diagnostic_code_records = result.get("diagnostic_codes")
+    diagnostic_codes_json_chunks = result.get("diagnostic_codes_json_chunks")
+    diagnostic_codes_json_length = result.get("diagnostic_codes_json_length")
     diagnostics_json_present = result.get("diagnostics_json_present")
     diagnostics_json_start = result.get("diagnostics_json_start")
     diagnostics_json_length = result.get("diagnostics_json_length")
@@ -1976,40 +1977,52 @@ def native_compile_diagnostic_document_result(
         or diagnostics_json_length != 0
     ):
         raise AdapterError("MNCS compiler diagnostic app exposed a partial unsupported span")
+    if not isinstance(diagnostic_codes_json_chunks, list) or not 1 <= len(
+        diagnostic_codes_json_chunks
+    ) <= 16:
+        raise AdapterError("MNCS compiler diagnostic app returned malformed code JSON chunks")
+    code_json_parts: list[bytes] = []
+    for index, chunk in enumerate(diagnostic_codes_json_chunks):
+        if not isinstance(chunk, dict):
+            raise AdapterError("MNCS compiler diagnostic app returned a malformed code JSON chunk")
+        chunk_value = chunk.get("bytes")
+        chunk_length = chunk.get("length")
+        if isinstance(chunk_value, str):
+            chunk_bytes = chunk_value.encode("utf-8")
+        elif isinstance(chunk_value, bytes):
+            chunk_bytes = chunk_value
+        elif isinstance(chunk_value, list) and all(
+            type(value) is int and 0 <= value <= 255 for value in chunk_value
+        ):
+            chunk_bytes = bytes(chunk_value)
+        else:
+            raise AdapterError("MNCS compiler diagnostic app returned malformed code JSON bytes")
+        if (
+            type(chunk_length) is not int
+            or not 1 <= chunk_length <= 1024
+            or len(chunk_bytes) != chunk_length
+            or (index < len(diagnostic_codes_json_chunks) - 1 and chunk_length != 1024)
+        ):
+            raise AdapterError("MNCS compiler diagnostic app returned malformed code JSON chunk bounds")
+        code_json_parts.append(chunk_bytes)
+    diagnostic_codes_json = b"".join(code_json_parts)
     if (
         type(diagnostic_code_count) is not int
         or not 0 <= diagnostic_code_count <= 32
-        or not isinstance(diagnostic_code_records, list)
-        or len(diagnostic_code_records) != diagnostic_code_count
+        or type(diagnostic_codes_json_length) is not int
+        or not 2 <= diagnostic_codes_json_length <= COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES
+        or len(diagnostic_codes_json_chunks)
+        != (diagnostic_codes_json_length + 1023) // 1024
+        or len(diagnostic_codes_json) != diagnostic_codes_json_length
+        or not diagnostic_codes_json.startswith(b"[")
+        or not diagnostic_codes_json.endswith(b"]")
     ):
-        raise AdapterError("MNCS compiler diagnostic app returned malformed typed codes")
-    diagnostic_codes: list[str] = []
-    for record in diagnostic_code_records:
-        if not isinstance(record, dict):
-            raise AdapterError("MNCS compiler diagnostic app returned a malformed typed code")
-        value = record.get("value")
-        if isinstance(value, str):
-            try:
-                encoded = value.encode("utf-8")
-            except UnicodeEncodeError as error:
-                raise AdapterError("MNCS compiler diagnostic code is not valid UTF-8") from error
-        elif isinstance(value, list) and all(
-            type(byte) is int and 0 <= byte <= 255 for byte in value
-        ):
-            encoded = bytes(value)
-        else:
-            raise AdapterError("MNCS compiler diagnostic app returned malformed code bytes")
-        if len(encoded) > MAX_DIAGNOSTIC_CODE_BYTES:
-            raise AdapterError("MNCS compiler diagnostic code exceeds its native byte bound")
-        try:
-            diagnostic_codes.append(encoded.decode("utf-8"))
-        except UnicodeDecodeError as error:
-            raise AdapterError("MNCS compiler diagnostic code is not valid UTF-8") from error
-    if not expects_failure and diagnostic_codes:
+        raise AdapterError("MNCS compiler diagnostic app returned malformed code JSON bounds")
+    if not expects_failure and diagnostic_code_count:
         raise AdapterError("MNCS compiler diagnostic app returned codes for a passing test")
-    if expects_failure and projection_supported and len(diagnostic_codes) != diagnostic_count:
+    if expects_failure and projection_supported and diagnostic_code_count != diagnostic_count:
         raise AdapterError("MNCS compiler diagnostic code count disagrees with its selected span")
-    result["diagnostic_codes"] = diagnostic_codes
+    result["diagnostic_codes_json"] = diagnostic_codes_json
     verdict = result.get("verdict")
     if not isinstance(verdict, str) or verdict not in {
         "compile_pass", "expected_failure", "compile_expectation_mismatch",
@@ -2076,14 +2089,20 @@ def native_compile_diagnostic_values(
         if count != 0 or start != 0 or length != 0:
             raise AdapterError("native compile diagnostic projection omitted its JSON span")
         encoded = b"[]"
-    codes = result.get("diagnostic_codes")
-    if not isinstance(codes, list) or len(codes) > 32 or any(
-        not isinstance(code, str) for code in codes
+    codes = result.get("diagnostic_codes_json")
+    code_count = result.get("diagnostic_code_count")
+    if (
+        not isinstance(codes, bytes)
+        or not 2 <= len(codes) <= COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES
+        or not codes.startswith(b"[")
+        or not codes.endswith(b"]")
+        or type(code_count) is not int
+        or not 0 <= code_count <= 32
     ):
-        raise AdapterError("native compile diagnostic result returned malformed typed codes")
+        raise AdapterError("native compile diagnostic result returned malformed code JSON")
     return NativeDiagnosticValueSpan(
         json_fragment=encoded,
-        diagnostic_codes=tuple(codes),
+        diagnostic_codes_json=codes,
         json_span_present=present,
     )
 
@@ -6749,11 +6768,15 @@ def compile_entry(
             message="source compiled but the manifest expected a diagnostic",
         )
     if native_verdict == "diagnostic_mismatch":
-        observed_codes = (
-            list(native_values.diagnostic_codes)
-            if native_values is not None
-            else [str(item.get("code", "")) for item in diagnostics or []]
-        )
+        if native_values is not None:
+            observed_codes = _native_json_fragment_marker(
+                native_values.diagnostic_codes_json, 2
+            )
+            test_result.setdefault("_mncs_raw_json_fragments", []).append(
+                (observed_codes, native_values.diagnostic_codes_json)
+            )
+        else:
+            observed_codes = [str(item.get("code", "")) for item in diagnostics or []]
         return result_failure(
             test_result,
             failure_class=native_verdict,

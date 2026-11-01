@@ -197,6 +197,20 @@ explicitly request records; the ordinary compile consumer no longer calls it.
 The Test JSON cursor remains shared by public-result formatting and related
 consumers, so this migration did not add a Stdlib parser or remove that cursor.
 
+P-071 removes the remaining diagnostic-code list projection from the normal
+compile-result path. The native verdict application applies compile policy to
+its decoded code values, then emits the observed string array as canonical JSON
+in at most sixteen 1,024-byte chunks. Python validates the chunk bounds and
+joins their bytes; on a diagnostic mismatch it carries that fragment opaquely
+into `observed_codes`. It no longer decodes native code records into a Python
+string list. Tests compare the fragment with independent JSON expectations,
+including escaped values and a fragment that crosses a chunk boundary. The
+explicit `native_compile_diagnostic_records` API remains the API-boundary path
+for callers that request diagnostic dictionaries; unsupported compiler
+documents still use the bounded compatibility parser atomically. No Stdlib
+change was needed: this slice has one Test consumer, and the existing Stdlib
+cursor does not own Test's public-result JSON fragment contract.
+
 The public-result formatter now emits 4,096-byte windows and carries its
 source SHA-256 state between them. The final window checks the digest against
 the original input identity, avoiding a full-source rehash for every

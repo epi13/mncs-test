@@ -203,7 +203,7 @@ def test_native_diagnostic_document_verdict_matches_independent_json_expectation
     )
 
 
-def test_native_diagnostic_result_exposes_typed_codes_to_the_test_consumer() -> None:
+def test_native_diagnostic_result_exposes_code_json_to_the_test_consumer() -> None:
     document = b'{"valid":false,"errors":[{"code":"MNE\\u0031"},{"code":"MNE042"}]}'
     result = mncs_test.native_compile_diagnostic_document_result(
         document,
@@ -216,8 +216,55 @@ def test_native_diagnostic_result_exposes_typed_codes_to_the_test_consumer() -> 
     )
 
     assert result is not None
-    assert result["diagnostic_codes"] == ["MNE1", "MNE042"]
+    codes_json = result["diagnostic_codes_json"]
+    assert isinstance(codes_json, bytes)
+    assert codes_json == b'["MNE1","MNE042"]'
+    assert json.loads(codes_json) == ["MNE1", "MNE042"]
     assert result["diagnostic_code_count"] == 2
+
+
+def test_native_diagnostic_code_json_canonicalizes_escaped_values() -> None:
+    document = b'{"valid":false,"errors":[{"code":"quote\\\"slash\\\\control\\u0001\xce\xbb"}]}'
+    result = mncs_test.native_compile_diagnostic_document_result(
+        document,
+        [],
+        compiler_exit_code=2,
+        expects_failure=True,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+    assert result is not None
+    codes_json = result["diagnostic_codes_json"]
+    expected = ['quote"slash\\control\x01λ']
+    assert codes_json == json.dumps(
+        expected, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert json.loads(codes_json) == expected
+
+
+def test_native_diagnostic_code_json_streams_across_bounded_chunks() -> None:
+    expected = ["A" * 512, "B" * 512, "C" * 512]
+    document = json.dumps(
+        {"valid": False, "errors": [{"code": code} for code in expected]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    result = mncs_test.native_compile_diagnostic_document_result(
+        document,
+        [],
+        compiler_exit_code=2,
+        expects_failure=True,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+    assert result is not None
+    codes_json = result["diagnostic_codes_json"]
+    assert len(codes_json) > 1024
+    assert json.loads(codes_json) == expected
+    assert result["diagnostic_code_count"] == 3
 
 
 def test_native_diagnostic_document_declines_out_of_bound_or_unsupported_inputs() -> None:

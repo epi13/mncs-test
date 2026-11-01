@@ -21,6 +21,11 @@ record CompileDiagnosticVerdictRequestV1 {
     expected: [policy.DiagnosticCodeV1; up_to 16]
 }
 
+record DiagnosticCodeJsonChunkV1 {
+    bytes: [byte; up_to 1024],
+    length: u64
+}
+
 record CompileDiagnosticVerdictResultV1 {
     schema_version: [byte; up_to 64],
     supported: bool,
@@ -30,7 +35,8 @@ record CompileDiagnosticVerdictResultV1 {
     valid_field_is_true: bool,
     diagnostic_count: u64,
     diagnostic_code_count: u64,
-    diagnostic_codes: [policy.DiagnosticCodeV1; up_to 32],
+    diagnostic_codes_json_chunks: [DiagnosticCodeJsonChunkV1; up_to 16],
+    diagnostic_codes_json_length: u64,
     diagnostics_json_present: bool,
     diagnostics_json_start: u64,
     diagnostics_json_length: u64,
@@ -59,6 +65,25 @@ record DiagnosticCodesV1 {
     valid: bool
 }
 
+enum DiagnosticCodeJsonChunkListV1 {
+    Empty,
+    Cons { head: DiagnosticCodeJsonChunkV1, tail: DiagnosticCodeJsonChunkListV1 }
+}
+
+record DiagnosticCodesJsonV1 {
+    current_bytes: [byte; 1024],
+    current_length: u64,
+    completed: DiagnosticCodeJsonChunkListV1,
+    completed_count: u64,
+    length: u64,
+    valid: bool
+}
+
+record DiagnosticCodeJsonChunkCopyV1 {
+    remaining: DiagnosticCodeJsonChunkListV1,
+    chunks: [DiagnosticCodeJsonChunkV1; 16]
+}
+
 record DiagnosticScanV1 {
     cursor: json_cursor.Cursor,
     syntax: json.ScanState,
@@ -85,7 +110,7 @@ fn request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,53];
+    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,54];
 }
 
 fn schema_is(value: [byte; up_to 64], expected: [byte; up_to 64]) -> (result: bool) {
@@ -490,6 +515,140 @@ fn decode_code_spans(
     return codes;
 }
 
+fn empty_code_json() -> (result: DiagnosticCodesJsonV1) {
+    return DiagnosticCodesJsonV1 {
+        current_bytes: [0; 1024],
+        current_length: 0,
+        completed: DiagnosticCodeJsonChunkListV1.Empty,
+        completed_count: 0,
+        length: 0,
+        valid: true
+    };
+}
+
+fn code_json_byte(state: DiagnosticCodesJsonV1, value: byte) -> (result: DiagnosticCodesJsonV1) {
+    if !state.valid { return state; }
+    if state.length >= 16384 { return DiagnosticCodesJsonV1 { ..state, valid: false }; }
+    if state.current_length >= 1024 {
+        let completed: DiagnosticCodeJsonChunkV1 = DiagnosticCodeJsonChunkV1 {
+            bytes: state.current_bytes[0..state.current_length],
+            length: state.current_length
+        };
+        let empty: [byte; 1024] = [0; 1024];
+        let updated: [byte; 1024] = replace(empty, 0, value);
+        return DiagnosticCodesJsonV1 {
+            current_bytes: updated,
+            current_length: 1,
+            completed: DiagnosticCodeJsonChunkListV1.Cons {
+                head: completed,
+                tail: state.completed
+            },
+            completed_count: state.completed_count +% 1,
+            length: state.length +% 1,
+            valid: true
+        };
+    }
+    return DiagnosticCodesJsonV1 {
+        ..state,
+        current_bytes: replace(state.current_bytes, state.current_length, value),
+        current_length: state.current_length +% 1,
+        length: state.length +% 1
+    };
+}
+
+fn empty_code_json_chunk() -> (result: DiagnosticCodeJsonChunkV1) {
+    return DiagnosticCodeJsonChunkV1 { bytes: [], length: 0 };
+}
+
+fn copy_code_json_chunk(
+    state: DiagnosticCodeJsonChunkCopyV1,
+    index: u64,
+    completed_count: u64
+) -> (result: DiagnosticCodeJsonChunkCopyV1) {
+    if index >= completed_count { return state; }
+    return match state.remaining {
+        Empty => state,
+        Cons { head: head, tail: tail } => DiagnosticCodeJsonChunkCopyV1 {
+            remaining: tail,
+            chunks: replace(state.chunks, completed_count -% index -% 1, head)
+        }
+    };
+}
+
+fn code_json_output_chunks(state: DiagnosticCodesJsonV1) -> (result: [DiagnosticCodeJsonChunkV1; up_to 16]) {
+    let initial: DiagnosticCodeJsonChunkCopyV1 = DiagnosticCodeJsonChunkCopyV1 {
+        remaining: state.completed,
+        chunks: [empty_code_json_chunk(); 16]
+    };
+    iterate i up_to 16 carrying copied: DiagnosticCodeJsonChunkCopyV1 = initial {
+        next copied = copy_code_json_chunk(copied, i, state.completed_count);
+    }
+    let final_chunk: DiagnosticCodeJsonChunkV1 = DiagnosticCodeJsonChunkV1 {
+        bytes: state.current_bytes[0..state.current_length],
+        length: state.current_length
+    };
+    let output: [DiagnosticCodeJsonChunkV1; 16] = replace(
+        copied.chunks, state.completed_count, final_chunk
+    );
+    return output[0..state.completed_count +% 1];
+}
+
+fn code_json_hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (48 +% value) as byte; }
+    return (87 +% value) as byte;
+}
+
+fn code_json_string_byte(state: DiagnosticCodesJsonV1, value: byte) -> (result: DiagnosticCodesJsonV1) {
+    if value == 34 || value == 92 {
+        return code_json_byte(code_json_byte(state, 92), value);
+    }
+    if value == 8 { return code_json_byte(code_json_byte(state, 92), 98); }
+    if value == 9 { return code_json_byte(code_json_byte(state, 92), 116); }
+    if value == 10 { return code_json_byte(code_json_byte(state, 92), 110); }
+    if value == 12 { return code_json_byte(code_json_byte(state, 92), 102); }
+    if value == 13 { return code_json_byte(code_json_byte(state, 92), 114); }
+    if value < 32 {
+        let number: u64 = value as u64;
+        let slash: DiagnosticCodesJsonV1 = code_json_byte(state, 92);
+        let marker: DiagnosticCodesJsonV1 = code_json_byte(slash, 117);
+        let zero_high: DiagnosticCodesJsonV1 = code_json_byte(marker, 48);
+        let zero_low: DiagnosticCodesJsonV1 = code_json_byte(zero_high, 48);
+        let high: DiagnosticCodesJsonV1 = code_json_byte(
+            zero_low, code_json_hex_digit(number / 16)
+        );
+        return code_json_byte(high, code_json_hex_digit(number % 16));
+    }
+    return code_json_byte(state, value);
+}
+
+fn code_json_item(
+    state: DiagnosticCodesJsonV1,
+    codes: DiagnosticCodesV1,
+    index: u64
+) -> (result: DiagnosticCodesJsonV1) {
+    if index >= codes.count { return state; }
+    let separated: DiagnosticCodesJsonV1 = select(
+        index > 0, code_json_byte(state, 44), state
+    );
+    let code: policy.DiagnosticCodeV1 = codes.actual[index];
+    let opened: DiagnosticCodesJsonV1 = code_json_byte(separated, 34);
+    iterate i over code.value carrying encoded: DiagnosticCodesJsonV1 = opened {
+        next encoded = code_json_string_byte(encoded, code.value[i]);
+    }
+    return code_json_byte(encoded, 34);
+}
+
+fn encode_code_json(codes: DiagnosticCodesV1) -> (result: DiagnosticCodesJsonV1) {
+    if !codes.valid || codes.count > 32 {
+        return DiagnosticCodesJsonV1 { ..empty_code_json(), valid: false };
+    }
+    let opened: DiagnosticCodesJsonV1 = code_json_byte(empty_code_json(), 91);
+    iterate i up_to 32 carrying encoded: DiagnosticCodesJsonV1 = opened {
+        next encoded = code_json_item(encoded, codes, i);
+    }
+    return code_json_byte(encoded, 93);
+}
+
 fn selected_codes(
     scan: DiagnosticScanV1,
     document: json_order.JsonTokenDocumentV1,
@@ -618,6 +777,7 @@ fn result(
     verdict: [byte; up_to 64],
     projected: projection.DiagnosticProjectionV1,
     codes: DiagnosticCodesV1,
+    codes_json: DiagnosticCodesJsonV1,
     projection_supported: bool,
     root_is_object: bool,
     valid_field_present: bool,
@@ -629,6 +789,11 @@ fn result(
     let safe_codes: DiagnosticCodesV1 = select(
         supported && codes.valid, codes, empty_decoded_codes()
     );
+    let safe_codes_json: DiagnosticCodesJsonV1 = select(
+        supported && codes.valid && codes_json.valid,
+        codes_json,
+        encode_code_json(empty_decoded_codes())
+    );
     return CompileDiagnosticVerdictResultV1 {
         schema_version: result_schema(),
         supported: supported,
@@ -638,7 +803,8 @@ fn result(
         valid_field_is_true: valid_field_is_true,
         diagnostic_count: safe_projection.count,
         diagnostic_code_count: safe_codes.count,
-        diagnostic_codes: safe_codes.actual[0..safe_codes.count],
+        diagnostic_codes_json_chunks: code_json_output_chunks(safe_codes_json),
+        diagnostic_codes_json_length: safe_codes_json.length,
         diagnostics_json_present: safe_projection.diagnostics_json_present,
         diagnostics_json_start: safe_projection.diagnostics_json_start,
         diagnostics_json_length: safe_projection.diagnostics_json_length,
@@ -667,7 +833,8 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
         && shape.total == request.document.byte_length
         && request.document.byte_length <= 16384;
     let empty: CompileDiagnosticVerdictResultV1 = result(
-        false, [], empty_projection(), empty_decoded_codes(), false, false, false, false
+        false, [], empty_projection(), empty_decoded_codes(),
+        encode_code_json(empty_decoded_codes()), false, false, false, false
     );
     let scanned: DiagnosticScanV1 = scan_request(
         request_valid, request.document, request.expects_failure
@@ -682,6 +849,13 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
         scanned, request.document, request.expects_failure
     );
     if !codes.valid {
+        let published: u64 = structured_write(context.argv[1], result_schema(), empty);
+        if published == 0 { return failure([112,117,98,108,105,115,104,32,99,111,109,112,105,108,101,32,100,105,97,103,110,111,115,116,105,99,32,114,101,115,117,108,116,32,102,97,105,108,101,100], 3); }
+        return success([]);
+    }
+
+    let codes_json: DiagnosticCodesJsonV1 = encode_code_json(codes);
+    if !codes_json.valid {
         let published: u64 = structured_write(context.argv[1], result_schema(), empty);
         if published == 0 { return failure([112,117,98,108,105,115,104,32,99,111,109,112,105,108,101,32,100,105,97,103,110,111,115,116,105,99,32,114,101,115,117,108,116,32,102,97,105,108,101,100], 3); }
         return success([]);
@@ -712,7 +886,7 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
     );
     let projection_supported: bool = projected.supported && projected.count <= 32;
     let ready: CompileDiagnosticVerdictResultV1 = result(
-        true, decision.verdict, projected, codes, projection_supported,
+        true, decision.verdict, projected, codes, codes_json, projection_supported,
         scanned.root_is_object, scanned.valid_field_present,
         scanned.valid_field_is_true
     );

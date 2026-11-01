@@ -136,7 +136,7 @@ def test_native_diagnostic_span_matches_independent_json_values() -> None:
     assert document[start:start + length].endswith(b"]")
     values = mncs_test.native_compile_diagnostic_values(native, document)
     assert values is not None
-    assert values.diagnostic_codes == tuple(item["code"] for item in diagnostics)
+    assert json.loads(values.diagnostic_codes_json) == [item["code"] for item in diagnostics]
     assert _native_records(native, document) == diagnostics
 
 
@@ -266,7 +266,7 @@ def test_native_diagnostic_values_keep_the_selected_json_span_opaque() -> None:
         native["diagnostics_json_start"]:
         native["diagnostics_json_start"] + native["diagnostics_json_length"]
     ]
-    assert values.diagnostic_codes == ("",)
+    assert json.loads(values.diagnostic_codes_json) == [""]
 
 
 def test_native_span_declines_selected_arrays_over_its_item_bound() -> None:
@@ -346,6 +346,66 @@ def test_compile_entry_carries_native_diagnostic_span_opaquely(
     assert isinstance(marker, str)
     fragment = next(raw for selected_marker, raw in fragments if selected_marker == marker)
     assert json.loads(fragment) == expected
+
+
+def test_compile_entry_carries_native_observed_codes_as_json_fragment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = b'{"valid":false,"errors":[{"code":"MNE\\u0031"}]}'
+    process = {
+        "stdout": document,
+        "stderr": b"",
+        "returncode": 2,
+        "timed_out": False,
+        "transport_error": None,
+        "stdout_artifact": {"name": "stdout"},
+        "stderr_artifact": {"name": "stderr"},
+        "command_artifact": {"name": "command"},
+    }
+    monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
+
+    result = mncs_test.compile_entry(
+        test={
+            "id": "native-diagnostic-code-json",
+            "entry": "invalid_return",
+            "kind": "diagnostic",
+            "diagnostic_codes": ["MNE9"],
+        },
+        source_path=ROOT / "tests/fixtures/compile_fail.mncs",
+        source_text="",
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+        default_timeout=30,
+        artifacts=object(),
+        artifact_key="native-diagnostic-code-json",
+    )
+
+    assert result["compile_verdict"] == "diagnostic_mismatch"
+    observed_marker = result["failure"]["observed_codes"]
+    fragments = result["_mncs_raw_json_fragments"]
+    observed_fragment = next(
+        raw for marker, raw in fragments if marker == observed_marker
+    )
+    assert observed_fragment == b'["MNE1"]'
+    payload, digest = mncs_test._public_result_json_payload_with_raw_fragments(
+        {"failure": result["failure"]},
+        [(observed_marker, observed_fragment)],
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+    expected_value = {
+        "failure": {
+            "class": "diagnostic_mismatch",
+            "expected_codes": ["MNE9"],
+            "message": "compiler diagnostics did not match the manifest",
+            "observed_codes": ["MNE1"],
+        },
+    }
+    expected = mncs_test.json_bytes(expected_value)
+    assert payload == expected
+    assert digest == mncs_test.sha256_bytes(expected)
 
 
 def test_raw_native_diagnostic_fragment_keeps_canonical_public_json_bytes() -> None:
