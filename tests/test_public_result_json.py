@@ -231,6 +231,34 @@ def test_native_raw_tokenizer_reuses_transport_source_digest(tmp_path: Path) -> 
     assert digest.call_count == 1
 
 
+def test_native_token_formatter_rejects_out_of_range_packed_token_word(
+    tmp_path: Path,
+) -> None:
+    result = mncs_test.run_native_app(
+        "test-public-result-json-token-tape.json",
+        {
+            "schema_version": mncs_test.PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
+            "input_sha256": "0" * 64,
+            "tape": {
+                "token_words": [2**53],
+                "chunks": [{"bytes": "1", "length": 1}],
+                "byte_length": 1,
+            },
+        },
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+
+    assert result["supported"] is False
+    assert result["request_valid"] is False
+    assert result["tape_shape_valid"] is False
+    assert result["tape_shape_code"] == 9
+
+
 def test_native_key_order_reuses_transport_source_digest(tmp_path: Path) -> None:
     source = b'{"b":2,"a":1}'
     digest = mock.Mock(wraps=hashlib.sha256)
@@ -363,7 +391,7 @@ def test_native_raw_tokenizer_rejects_changed_source_between_windows(
             "chunk_index": first["next_chunk_index"],
             "scan_state": first["scan_state"],
             "cursor_state": first["cursor_state"],
-            "tokens": first["tokens"],
+            "token_words": first["token_words"],
             "token_count": first["token_count"],
         },
         request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA,
@@ -1185,7 +1213,10 @@ def test_native_document_route_handles_key_order_decline_from_encoded_document(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_args_list[0].args[0] == "test-public-result-json-token.json"
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert applications[0] == "test-public-result-json-native-token-tape.json"
+    assert "test-public-result-json-token-tape.json" in applications
+    assert "test-public-result-json-token.json" not in applications
 
 
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
@@ -1229,7 +1260,7 @@ def test_native_key_order_sorts_documents_larger_than_eight_kibibytes(tmp_path: 
     _assert_native_raw_token_route(calls)
 
 
-def test_native_document_formatter_handles_a_33_kibibyte_object_after_key_order_declines(
+def test_native_packed_token_route_handles_a_33_kibibyte_object_after_key_order_declines(
     tmp_path: Path,
 ) -> None:
     value = {
@@ -1267,12 +1298,28 @@ def test_native_document_formatter_handles_a_33_kibibyte_object_after_key_order_
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
     assert calls[0] == "test-public-result-json-key-order.json"
-    assert native_results[0][0] == "test-public-result-json-token.json"
+    assert native_results[0][0] == "test-public-result-json-native-token-tape.json"
     _assert_native_raw_token_route(calls)
-    _assert_native_document_route(native_results)
+    assert "test-public-result-json-token-tape.json" in [
+        name for name, _result in native_results
+    ]
+    requests = {
+        call.args[0]: call.args[1]
+        for call in native_app.call_args_list
+    }
+    continuation = requests["test-public-result-json-native-token-tape-window.json"]
+    assert isinstance(continuation["token_words"], list)
+    assert "tokens" not in continuation
+    assert all(type(word) is int and 0 <= word < 2**53 for word in continuation["token_words"])
+    tape_request = requests["test-public-result-json-token-tape.json"]
+    tape = tape_request["tape"]
+    assert isinstance(tape, dict)
+    assert "tokens" not in tape
+    assert isinstance(tape["token_words"], list)
+    assert all(type(word) is int and 0 <= word < 2**53 for word in tape["token_words"])
+    assert all(set(chunk) == {"bytes", "length"} for chunk in tape["chunks"])
     assert compact.call_args_list == [
         mock.call(value, sort_keys=False),
-        mock.call(value),
     ]
 
 
@@ -1693,6 +1740,7 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
     ]
     expected_applications = [
         "test-public-result-json-key-order.json",
+        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
         "test-public-result-json-token.json",
     ]

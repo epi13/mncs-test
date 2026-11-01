@@ -16,18 +16,23 @@ use mncs.std.sha256.v1 as sha256;
 record TokenMetaV1 { kind: byte, offset: u64, chunk_index: u64, chunk_offset: u64, length: u64 }
 record TokenRangeV1 { chunk_index: u64, chunk_offset: u64, length: u64 }
 record PayloadChunkV1 { offset: u64, bytes: [byte; up_to 1024], length: u64 }
+record JsonInputChunkV1 { bytes: [byte; up_to 1024], length: u64 }
+record JsonInputDocumentV1 { chunks: [JsonInputChunkV1; up_to 64], byte_length: u64 }
 record TokenTapeV1 {
     tokens: [TokenMetaV1; up_to 512],
     chunks: [PayloadChunkV1; up_to 64],
     byte_length: u64
 }
+record TokenTapeWireV1 {
+    token_words: [u64; up_to 512],
+    chunks: [JsonInputChunkV1; up_to 64],
+    byte_length: u64
+}
 record TapeRequestV1 {
     schema_version: [byte; up_to 64],
     input_sha256: [byte; up_to 64],
-    tape: TokenTapeV1
+    tape: TokenTapeWireV1
 }
-record JsonInputChunkV1 { bytes: [byte; up_to 1024], length: u64 }
-record JsonInputDocumentV1 { chunks: [JsonInputChunkV1; up_to 64], byte_length: u64 }
 record RawTapeStartRequestV1 {
     schema_version: [byte; up_to 64],
     document: JsonInputDocumentV1,
@@ -40,7 +45,7 @@ record RawTapeRequestV1 {
     chunk_index: u64,
     scan_state: json.ScanState,
     cursor_state: json_tokens.CursorV1,
-    tokens: [TokenMetaV1; up_to 512],
+    token_words: [u64; up_to 512],
     token_count: u64
 }
 record SourceDigestRequestV1 {
@@ -70,7 +75,9 @@ record TokenizeStateV1 {
     valid: bool
 }
 record RawWindowStateV1 { token_state: TokenizeStateV1, next_chunk_index: u64 }
-record TokenArrayV1 { tokens: [TokenMetaV1; 512], count: u64 }
+record TokenArrayV1 { tokens: [TokenMetaV1; 512], count: u64, valid: bool }
+record TokenWordDecodeV1 { token: TokenMetaV1, valid: bool }
+record TokenTapeDecodeV1 { tape: TokenTapeV1, valid: bool }
 record PayloadArrayV1 { chunks: [PayloadChunkV1; 64], count: u64, total_bytes: u64 }
 
 record KeyV1 {
@@ -170,12 +177,12 @@ record RawTokenizeResultV1 {
     input_sha256: [byte; up_to 64],
     scan_state: json.ScanState,
     cursor_state: json_tokens.CursorV1,
-    tokens: [TokenMetaV1; up_to 512],
+    token_words: [u64; up_to 512],
     token_count: u64
 }
 
 fn request_schema_v1() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 51];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 52];
 }
 
 fn result_schema_v1() -> (result: [byte; up_to 64]) {
@@ -183,7 +190,7 @@ fn result_schema_v1() -> (result: [byte; up_to 64]) {
 }
 
 fn raw_request_schema_v1() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
 }
 
 fn raw_start_request_schema_v1() -> (result: [byte; up_to 64]) {
@@ -191,7 +198,7 @@ fn raw_start_request_schema_v1() -> (result: [byte; up_to 64]) {
 }
 
 fn raw_result_schema_v1() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 116, 111, 107, 101, 110, 105, 122, 101, 45, 119, 105, 110, 100, 111, 119, 47, 50];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 110, 97, 116, 105, 118, 101, 45, 116, 111, 107, 101, 110, 105, 122, 101, 45, 119, 105, 110, 100, 111, 119, 47, 51];
 }
 
 fn source_digest_request_schema_v1() -> (result: [byte; up_to 64]) {
@@ -412,10 +419,86 @@ fn collect_raw_tokens(tokens: TokenMetaListV1, output: [TokenMetaV1; 512], index
 
 fn raw_token_array(state: TokenizeStateV1) -> (result: TokenArrayV1) {
     let empty: [TokenMetaV1; 512] = [empty_token_meta(); 512];
-    if state.token_count == 0 { return TokenArrayV1 { tokens: empty, count: 0 }; }
+    if state.token_count == 0 { return TokenArrayV1 { tokens: empty, count: 0, valid: state.valid }; }
     return TokenArrayV1 {
         tokens: collect_raw_tokens(state.tokens, empty, state.token_count -% 1),
-        count: state.token_count
+        count: state.token_count,
+        valid: state.valid
+    };
+}
+
+fn token_meta_word(token: TokenMetaV1) -> (result: u64) {
+    return (token.kind as u64)
+        +% token.offset *% 256
+        +% token.chunk_index *% 33554432
+        +% token.chunk_offset *% 2147483648
+        +% token.length *% 2199023255552;
+}
+
+fn token_word_decode(word: u64) -> (result: TokenWordDecodeV1) {
+    let token: TokenMetaV1 = TokenMetaV1 {
+        kind: (word % 256) as byte,
+        offset: (word / 256) % 131072,
+        chunk_index: (word / 33554432) % 64,
+        chunk_offset: (word / 2147483648) % 1024,
+        length: (word / 2199023255552) % 4096
+    };
+    let valid: bool = word < 9007199254740992
+        && token.kind != 0
+        && token.offset <= 65536
+        && token.chunk_index < 64
+        && token.chunk_offset < 1024
+        && token.length <= 3072;
+    return TokenWordDecodeV1 { token: token, valid: valid };
+}
+
+fn token_word_array_step(
+    output: TokenArrayV1,
+    words: [u64; up_to 512],
+    index: u64
+) -> (result: TokenArrayV1) {
+    let decoded: TokenWordDecodeV1 = token_word_decode(words[index]);
+    return TokenArrayV1 {
+        tokens: replace(output.tokens, index, decoded.token),
+        count: output.count +% 1,
+        valid: output.valid && decoded.valid
+    };
+}
+
+fn token_word_array(words: [u64; up_to 512]) -> (result: TokenArrayV1) {
+    let empty: [TokenMetaV1; 512] = [empty_token_meta(); 512];
+    let initial: TokenArrayV1 = TokenArrayV1 { tokens: empty, count: 0, valid: true };
+    iterate i over words carrying decoded: TokenArrayV1 = initial {
+        next decoded = token_word_array_step(decoded, words, i);
+    }
+    return decoded;
+}
+
+fn raw_token_words(state: TokenizeStateV1) -> (result: [u64; up_to 512]) {
+    let token_array: TokenArrayV1 = raw_token_array(state);
+    let empty: [u64; 512] = [0; 512];
+    iterate i over token_array.tokens[0..token_array.count] carrying words: [u64; 512] = empty {
+        next words = replace(words, i, token_meta_word(token_array.tokens[i]));
+    }
+    return words[0..token_array.count];
+}
+
+fn decode_token_tape_wire(wire: TokenTapeWireV1) -> (result: TokenTapeDecodeV1) {
+    let decoded: TokenArrayV1 = token_word_array(wire.token_words);
+    let document: JsonInputDocumentV1 = JsonInputDocumentV1 {
+        chunks: wire.chunks,
+        byte_length: wire.byte_length
+    };
+    let payload: PayloadArrayV1 = raw_payload_array(document);
+    let tape: TokenTapeV1 = TokenTapeV1 {
+        tokens: decoded.tokens[0..decoded.count],
+        chunks: payload.chunks[0..payload.count],
+        byte_length: wire.byte_length
+    };
+    return TokenTapeDecodeV1 {
+        tape: tape,
+        valid: decoded.valid && decoded.count == wire.token_words.len && decoded.count <= 512
+            && payload.count == wire.chunks.len && payload.total_bytes == wire.byte_length
     };
 }
 
@@ -466,23 +549,25 @@ fn restore_token_list(tokens: [TokenMetaV1; up_to 512]) -> (result: TokenMetaLis
 
 fn restore_tokenize_state(
     cursor: json_tokens.CursorV1,
-    tokens: [TokenMetaV1; up_to 512],
+    token_words: [u64; up_to 512],
     token_count: u64
 ) -> (result: TokenizeStateV1) {
+    let decoded: TokenArrayV1 = token_word_array(token_words);
+    let words_valid: bool = decoded.valid && token_count == decoded.count && token_count <= 512;
     if token_count == 0 {
         let marker: TokenMetaV1 = TokenMetaV1 { kind: 254, offset: 0, chunk_index: 0, chunk_offset: 0, length: 0 };
         return TokenizeStateV1 {
             cursor: cursor,
             tokens: TokenMetaListV1.TokenCons { head: marker, tail: TokenMetaListV1.TokenNil },
             token_count: 1,
-            valid: true
+            valid: words_valid
         };
     }
     return TokenizeStateV1 {
         cursor: cursor,
-        tokens: restore_token_list(tokens),
+        tokens: restore_token_list(decoded.tokens[0..decoded.count]),
         token_count: token_count,
-        valid: token_count == tokens.len
+        valid: words_valid
     };
 }
 
@@ -557,11 +642,11 @@ fn raw_tokenize_window_result(
     chunk_index: u64,
     scan_state: json.ScanState,
     cursor_state: json_tokens.CursorV1,
-    tokens: [TokenMetaV1; up_to 512],
+    token_words: [u64; up_to 512],
     token_count: u64
 ) -> (result: RawTokenizeResultV1) {
     let shape: RawDocumentShapeV1 = raw_document_shape(document);
-    let state: TokenizeStateV1 = restore_tokenize_state(cursor_state, tokens, token_count);
+    let state: TokenizeStateV1 = restore_tokenize_state(cursor_state, token_words, token_count);
     let window: RawWindowStateV1 = raw_window(document, state, chunk_index);
     let current_tokens: TokenizeStateV1 = window.token_state;
     let next_chunk_index: u64 = window.next_chunk_index;
@@ -589,7 +674,7 @@ fn raw_tokenize_window_result(
         input_sha256: input_sha256,
         scan_state: finished_scan,
         cursor_state: finalized.cursor,
-        tokens: token_array.tokens[0..token_array.count],
+        token_words: raw_token_words(finalized),
         token_count: token_array.count
     };
 }
@@ -1651,8 +1736,8 @@ fn output_chunks(writer: WriterV1) -> (result: ChunkBuilderV1) {
     return ChunkBuilderV1 { chunks: chunks, count: finished.completed_count };
 }
 
-fn checked_parse(request: TapeRequestV1, request_valid: bool) -> (result: ParseStateV1) {
-    if request_valid { return parse_tape(request.tape); }
+fn checked_parse(tape: TokenTapeV1, request_valid: bool) -> (result: ParseStateV1) {
+    if request_valid { return parse_tape(tape); }
     return empty_parse_state();
 }
 
@@ -1689,11 +1774,13 @@ fn public_result_json_token_tape_app_v1(context: ApplicationContext) -> (result:
         return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 116, 111, 107, 101, 110, 45, 116, 97, 112, 101, 32, 112, 97, 116, 104, 115], 2);
     }
     let request: TapeRequestV1 = structured_read(context.argv[0], request_schema_v1());
-    let tape_shape_code: u64 = request_tape_shape_code(request.tape);
+    let decoded: TokenTapeDecodeV1 = decode_token_tape_wire(request.tape);
+    let shape_code: u64 = request_tape_shape_code(decoded.tape);
+    let tape_shape_code: u64 = select(decoded.valid, shape_code, 9);
     let tape_shape_valid: bool = tape_shape_code == 0;
     let request_valid: bool = valid_request(request, tape_shape_valid);
-    let parsed: ParseStateV1 = checked_parse(request, request_valid);
-    let writer: WriterV1 = checked_writer(parsed, request.tape);
+    let parsed: ParseStateV1 = checked_parse(decoded.tape, request_valid);
+    let writer: WriterV1 = checked_writer(parsed, decoded.tape);
     let builder: ChunkBuilderV1 = output_chunks(writer);
     let supported: bool = request_valid && parsed.valid && writer.ok && builder.count > 0;
     let result: TapeResultV1 = result_value(supported, request_valid, tape_shape_valid, tape_shape_code, parsed, writer, builder);
@@ -1716,7 +1803,7 @@ fn public_result_json_native_tape_start_app_v1(context: ApplicationContext) -> (
     if request.document.chunks.len == 0 {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 110, 97, 116, 105, 118, 101, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 105, 122, 101, 114, 32, 99, 104, 117, 110, 107], 4);
     }
-    let empty_tokens: [TokenMetaV1; up_to 512] = [];
+    let empty_tokens: [u64; up_to 512] = [];
     let result: RawTokenizeResultV1 = raw_tokenize_window_result(
         same_bytes(request.schema_version, raw_start_request_schema_v1()),
         request.document,
@@ -1757,7 +1844,7 @@ fn public_result_json_native_tape_app_v1(context: ApplicationContext) -> (result
         request.chunk_index,
         request.scan_state,
         request.cursor_state,
-        request.tokens,
+        request.token_words,
         request.token_count
     );
     let published: u64 = structured_write(context.argv[1], raw_result_schema_v1(), result);

@@ -66,11 +66,11 @@ PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA = "mncs.test.public-json-ascii-escape-request/1"
 PUBLIC_RESULT_JSON_ASCII_RESULT_SCHEMA = "mncs.test.public-json-ascii-escape/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-start-request/1"
-PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-request/1"
-PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA = "mncs.test.public-json-native-tokenize-window/2"
+PUBLIC_RESULT_JSON_NATIVE_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-request/2"
+PUBLIC_RESULT_JSON_NATIVE_TAPE_RESULT_SCHEMA = "mncs.test.public-json-native-tokenize-window/3"
 PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA = "mncs.test.public-json-source-digest-request/2"
 PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-digest/2"
-PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/3"
+PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/4"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
 NATIVE_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test.native-result-projection-request/1"
 NATIVE_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test.native-result-projection/1"
@@ -774,7 +774,7 @@ def _native_public_result_token_tape(
     ):
         raise AdapterError("MNCS public-result token source changed during transport packing")
 
-    tokens: list[dict[str, Any]] = []
+    token_words: list[int] = []
     token_count = 0
     next_chunk_index = 0
     scan_state: dict[str, Any] | None = None
@@ -802,7 +802,7 @@ def _native_public_result_token_tape(
                 "chunk_index": next_chunk_index,
                 "scan_state": scan_state,
                 "cursor_state": cursor_state,
-                "tokens": tokens,
+                "token_words": token_words,
                 "token_count": token_count,
             }
         try:
@@ -827,7 +827,7 @@ def _native_public_result_token_tape(
             raise AdapterError("MNCS native JSON tokenizer returned malformed support metadata")
         if not result["supported"]:
             return None
-        output_tokens = result.get("tokens")
+        output_words = result.get("token_words")
         output_count = result.get("token_count")
         output_next = result.get("next_chunk_index")
         complete = result.get("complete")
@@ -837,9 +837,9 @@ def _native_public_result_token_tape(
             result.get("input_sha256") != input_hash
             or type(output_count) is not int
             or not 1 <= output_count <= 512
-            or not isinstance(output_tokens, list)
-            or len(output_tokens) != output_count
-            or any(not isinstance(token, dict) for token in output_tokens)
+            or not isinstance(output_words, list)
+            or len(output_words) != output_count
+            or any(type(word) is not int or not 0 <= word < 2**53 for word in output_words)
             or output_next != next_expected
             or type(complete) is not bool
             or complete != (next_expected == len(source_chunks))
@@ -847,7 +847,7 @@ def _native_public_result_token_tape(
             or not isinstance(output_cursor, dict)
         ):
             raise AdapterError("MNCS native JSON tokenizer returned malformed continuation state")
-        tokens = output_tokens
+        token_words = output_words
         token_count = output_count
         scan_state = output_scan
         cursor_state = output_cursor
@@ -861,21 +861,12 @@ def _native_public_result_token_tape(
     ) is not True:
         return None
 
-    tape_chunks: list[dict[str, Any]] = []
-    offset = 0
-    for source_chunk in source_chunks:
-        tape_chunks.append({
-            "offset": offset,
-            "bytes": source_chunk["bytes"],
-            "length": source_chunk["length"],
-        })
-        offset += source_chunk["length"]
     tape_request = {
         "schema_version": PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA,
         "input_sha256": input_hash,
         "tape": {
-            "tokens": tokens,
-            "chunks": tape_chunks,
+            "token_words": token_words,
+            "chunks": source_chunks,
             "byte_length": len(document),
         },
     }
@@ -940,6 +931,14 @@ def _native_public_result_payload(
             if ordered is not None:
                 source = ordered
             elif len(source) <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+                token_tape = _native_public_result_token_tape(
+                    source,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                )
+                if token_tape is not None:
+                    return token_tape
                 try:
                     source = compact_json(value).encode("utf-8")
                 except (RecursionError, TypeError, ValueError, UnicodeEncodeError):

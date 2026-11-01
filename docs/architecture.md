@@ -968,6 +968,22 @@ control text, large objects and arrays, and expanded output. The complete
 public-result JSON suite passes all 56 tests with the release MNCS binary and
 integrated Stdlib JSON cursor provider.
 
+P-059 removes the Python token-array round trip from ordinary public-result
+formatting: documents accepted by native key ordering flow directly into the
+MNCS cursor formatter. P-060 keeps large objects on a native route when key
+ordering declines its step budget. The tokenizer returns each bounded token as
+one packed 53-bit-safe integer; Python forwards those words unchanged, and the
+native formatter validates and decodes them while deriving payload offsets from
+the original UTF-8 chunks. The 33,361-byte, 40-field differential case now
+sorts and formats through this native token path with bytes and SHA-256 matching
+independent expectations. Inputs that exceed the 512-token tape or its step
+budget retain sorted compatibility encoding and the bounded native document
+formatter. The 65,536-byte input/output bounds and 8,000,000-step ceiling are
+unchanged. All 57 public-result cases pass across the full run and targeted
+reruns of the two updated route assertions; the related projection and
+family-check suites pass 40 tests. No shared Stdlib API was needed for this
+Test-specific wire format.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing
