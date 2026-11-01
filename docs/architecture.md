@@ -984,6 +984,16 @@ reruns of the two updated route assertions; the related projection and
 family-check suites pass 40 tests. No shared Stdlib API was needed for this
 Test-specific wire format.
 
+P-061 extends Test-native public-result key ordering from 640 to 641 members
+without raising the 8,000,000-step ceiling. Ascending and descending 641-member
+objects now stay on the native key-order and cursor-formatting route; independent
+JSON-byte and SHA-256 expectations match, and Python compacts each value once
+with `sort_keys=False`. A 642-member object still declines key ordering and uses
+the exact sorted compatibility serializer. The bounds remain explicit in the
+native parser, merge/reverse passes, and packed-token value validation.
+All 59 public-result JSON regressions pass with the release MNCS binary and
+integrated Stdlib cursor provider.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing

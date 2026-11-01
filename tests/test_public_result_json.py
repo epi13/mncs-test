@@ -1061,10 +1061,56 @@ def test_native_public_result_key_order_handles_640_scalar_members(
     _assert_native_document_route(observed)
 
 
-def test_native_public_result_key_order_falls_back_at_641_members(
+@pytest.mark.parametrize(
+    "indices",
+    [tuple(range(641)), tuple(reversed(range(641)))],
+    ids=["ascending-input", "descending-input"],
+)
+def test_native_public_result_key_order_handles_641_scalar_members(
+    indices: tuple[int, ...], tmp_path: Path,
+) -> None:
+    value = {f"field-{index:03d}": index for index in indices}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    _assert_native_document_route(observed)
+
+
+def test_native_public_result_key_order_falls_back_at_642_members(
     tmp_path: Path,
 ) -> None:
-    value = {f"field-{index:03d}": index for index in range(641)}
+    value = {f"field-{index:03d}": index for index in range(642)}
     expected = _python_result_bytes(value)
     observed: list[tuple[str, dict[str, object]]] = []
     original_run_native_app = mncs_test.run_native_app
