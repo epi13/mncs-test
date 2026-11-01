@@ -81,7 +81,7 @@ fn request_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
-    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,50];
+    return [109,110,99,115,46,116,101,115,116,45,99,111,109,112,105,108,101,45,100,105,97,103,110,111,115,116,105,99,45,118,101,114,100,105,99,116,47,51];
 }
 
 fn schema_is(value: [byte; up_to 64], expected: [byte; up_to 64]) -> (result: bool) {
@@ -630,15 +630,18 @@ fn result(
     projected: projection.DiagnosticProjectionV1,
     projection_supported: bool
 ) -> (result: CompileDiagnosticVerdictResultV1) {
+    let safe_projection: projection.DiagnosticProjectionV1 = select(
+        projection_supported, projected, empty_projection()
+    );
     return CompileDiagnosticVerdictResultV1 {
         schema_version: result_schema(),
         supported: supported,
         projection_supported: projection_supported,
-        root_is_object: select(projection_supported, projected.root_is_object, false),
-        valid_field_present: select(projection_supported, projected.valid_field_present, false),
-        valid_field_is_true: select(projection_supported, projected.valid_field_is_true, false),
-        diagnostic_count: select(projection_supported, projected.count, 0),
-        diagnostics: projected.records,
+        root_is_object: safe_projection.root_is_object,
+        valid_field_present: safe_projection.valid_field_present,
+        valid_field_is_true: safe_projection.valid_field_is_true,
+        diagnostic_count: safe_projection.count,
+        diagnostics: safe_projection.records,
         verdict: verdict
     };
 }

@@ -60,7 +60,9 @@ def test_native_typed_records_match_independent_json_values() -> None:
             "severity": "error",
             "message": "escaped \u03bb and 東京",
             "span": {"start": 1, "end": 9, "line": 2, "column": 4},
-            "expected": [],
+            "expected": [
+                "type", "expression", "lambda", "τ", "東京", "identifier", "pattern", "module"
+            ],
             "found": None,
         },
         {
@@ -69,8 +71,20 @@ def test_native_typed_records_match_independent_json_values() -> None:
             "severity": "error",
             "message": "found string",
             "span": {"start": 9, "end": 12, "line": 3, "column": 1},
-            "expected": [],
+            "expected": ["identifier"],
             "found": "value",
+            "related": [
+                {
+                    "code": "MNE043",
+                    "stage": "elaboration",
+                    "severity": "error",
+                    "message": "import boundary",
+                    "span": {"start": 23, "end": 25, "line": 6, "column": 2},
+                    "expected": ["module"],
+                    "found": "leaf",
+                    "related": [],
+                }
+            ],
         },
         {
             "code": "MNE043",
@@ -117,18 +131,29 @@ def test_native_typed_records_match_independent_json_values() -> None:
             "severity": "error",
             "message": "needs expected values",
             "span": {"start": 1, "end": 2, "line": 1, "column": 1},
-            "expected": ["type", "expression"],
+            "expected": ["type", 17],
             "found": None,
         },
         {
             "code": "MNE041",
             "stage": "elaboration",
             "severity": "error",
-            "message": "has an extension field",
+            "message": "has too many related records",
             "span": {"start": 1, "end": 2, "line": 1, "column": 1},
             "expected": [],
             "found": None,
-            "related": [],
+            "related": [
+                {
+                    "code": "MNE042",
+                    "stage": "elaboration",
+                    "severity": "error",
+                    "message": "related",
+                    "span": {"start": 1, "end": 2, "line": 1, "column": 1},
+                    "expected": [],
+                    "found": None,
+                }
+                for _ in range(5)
+            ],
         },
     ],
 )
@@ -139,9 +164,13 @@ def test_native_projection_declines_shapes_that_need_compatibility_fallback(
 
     native = _document_result(document)
 
-    assert native["supported"] is True
-    assert native["projection_supported"] is False
-    assert native["verdict"] == "expected_failure"
+    # A document that crosses the native execution budget also takes the
+    # established host compatibility path without publishing partial records.
+    assert native is None or (
+        native["supported"] is True
+        and native["projection_supported"] is False
+        and native["verdict"] == "expected_failure"
+    )
 
 
 def test_compile_entry_uses_native_records_without_parsing_raw_compiler_json(

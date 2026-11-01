@@ -133,15 +133,17 @@ public TestResult contract, while it no longer builds a second host list of
 diagnostic codes for ordinary bounded verdicts.
 
 P-064 adds a bounded typed projection for the standard compiler diagnostic
-shape. The native application projects up to 32 records with the seven public
-diagnostic fields, a four-field span, an empty `expected` array, and `found` as
-null, text, boolean, or signed integer. `compile_entry` reconstructs the
-public diagnostic dictionaries from those typed records, so supported
-compiler documents do not pass through Python's JSON tree parser. The native
-projection uses Test's bounded `public_result_json_key_order_v1` value parser
-and declines extended or unsupported shapes, non-empty `expected` arrays, and
-oversized documents; those retain the established compatibility path. The public result
-contract and diagnostic ordering stay unchanged.
+shape. P-065 extends it to preserve up to eight expected token-kind strings
+(128 UTF-8 bytes each) and up to four related diagnostics per record. Related
+children retain their standard fields and may preserve an explicitly empty
+`related` array; deeper related trees and over-bound data decline to the
+compatibility path. The native application projects up to 32 records with the
+public diagnostic fields, a four-field span, and `found` as null, text,
+boolean, or signed integer. `compile_entry` reconstructs the public diagnostic
+dictionaries from those typed records, so supported compiler documents do not
+pass through Python's JSON tree parser. The projection uses Test's bounded
+`public_result_json_key_order_v1` value parser; the public result contract and
+diagnostic ordering stay unchanged.
 
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite

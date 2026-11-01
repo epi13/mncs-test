@@ -5,13 +5,13 @@
   "commons_pressure_id": "MNCS-TOOLING-E920D54703E3",
   "target_layer": "compiler/tooling",
   "observed_need": "Compile-fail and diagnostic tests must match diagnostic identity and preserve source spans without scraping human prose.",
-  "current_language_behavior": "The Rust toolchain exposes versioned structured diagnostics and the native runner fail-closes on invalid admission. P-062 added a Test-owned MNCS application that projects diagnostic codes and applies compile verdict policy without building a host diagnostic-code list. P-063 replaces the verdict application's Test JsonValue tree projection with bounded Stdlib JSON cursor events and a syntax validator. P-064 adds bounded native typed records for standard diagnostic objects so compile_entry can skip Python JSON tree construction on supported documents. MNCS application code still cannot directly consume compiler Diagnostic values.",
-  "why_insufficient": "The typed fast path accepts the exact standard diagnostic shape with an empty expected array and scalar found value. Extended shapes, non-empty expected arrays, unsupported scalar forms, and oversized documents still use Python's compatibility parser; all paths still cross the structured CLI JSON boundary.",
+  "current_language_behavior": "The Rust toolchain exposes versioned structured diagnostics and the native runner fail-closes on invalid admission. P-062 added a Test-owned MNCS application that projects diagnostic codes and applies compile verdict policy without building a host diagnostic-code list. P-063 replaces the verdict application's Test JsonValue tree projection with bounded Stdlib JSON cursor events and a syntax validator. P-064 adds bounded native typed records for standard diagnostic objects so compile_entry can skip Python JSON tree construction on supported documents. P-065 adds bounded expected-token strings and one-level related diagnostic records to that native projection. MNCS application code still cannot directly consume compiler Diagnostic values.",
+  "why_insufficient": "The native typed path accepts at most 32 diagnostics, eight expected token strings of 128 UTF-8 bytes each, and four related records per diagnostic; related children are bounded to the standard shape and cannot themselves carry non-empty related lists. Unsupported value types, deeper or oversized structures, execution-budget exhaustion, and oversized documents still use Python's compatibility parser; all paths still cross the structured CLI JSON boundary.",
   "minimal_reproducer": "tests/fixtures/compile_fail.mncs plus tools/mncs_test.py: compile_entry sends the raw document to native/mncs/test/compile_diagnostic_verdict_v1.mncs for bounded verdict and typed-record projection, then uses the Python JSON compatibility parser only when native projection declines.",
   "desired_direction": "A versioned diagnostic value/protocol exposing code, severity, source span, related diagnostics, and rendered forms to native tooling.",
   "severity": "major",
   "disposition": "native_typed_projection_with_bounded_fallback",
-  "workaround": "The Test-owned native application validates up to 16,384 bytes with the Stdlib JSON cursor and syntax scanner, applies compile verdict policy, and projects up to 32 standard diagnostics into typed MNCS records. Python reconstructs the established public dictionaries from those records. Shapes outside the bounded projection retain the Python compatibility parser; no formatted-stderr parsing is used.",
+  "workaround": "The Test-owned native application validates up to 16,384 bytes with the Stdlib JSON cursor and syntax scanner, applies compile verdict policy, and projects up to 32 standard diagnostics into typed MNCS records with bounded expected-token strings and one level of related diagnostics. Python reconstructs the established public dictionaries from those records. Shapes outside the bounded projection retain the Python compatibility parser; no formatted-stderr parsing is used.",
   "status": "open",
   "relevant_files": [
     "tools/mncs_test.py",
@@ -24,6 +24,7 @@
   "relevant_tests": [
     "tests/test_compile_verdict.py::test_native_diagnostic_document_verdict_matches_independent_json_expectations",
     "tests/test_compile_diagnostic_records.py::test_native_typed_records_match_independent_json_values",
+    "tests/test_compile_diagnostic_records.py::test_native_projection_declines_shapes_that_need_compatibility_fallback",
     "tests/test_compile_diagnostic_records.py::test_compile_entry_uses_native_records_without_parsing_raw_compiler_json",
     "tests/test_compile_diagnostic_records.py::test_compile_entry_fallback_preserves_unsupported_diagnostic_values",
     "tests/test_runner.py::test_expected_compile_failure",
@@ -32,6 +33,7 @@
     "tests/test_runner.py::test_compile_failure_is_reported_for_compile_pass_expectation"
   ],
   "relevant_commits": [
+    "mncs-test:8078c84",
     "mncs-test:81f279c",
     "mncs-test:b170470",
     "mncs-test:e396217",

@@ -39,6 +39,26 @@ record UnsignedScanV1 {
     valid: bool
 }
 
+record RelatedDiagnosticRecordV1 {
+    code: [byte; up_to 512],
+    stage: [byte; up_to 512],
+    severity: [byte; up_to 512],
+    message: [byte; up_to 512],
+    span_start: u64,
+    span_end: u64,
+    span_line: u64,
+    span_column: u64,
+    expected_count: u64,
+    expected_values: [[byte; up_to 128]; 8],
+    found_kind: byte,
+    found_text: [byte; up_to 512],
+    found_negative: bool,
+    found_magnitude: u64,
+    found_boolean: bool,
+    related_field_present: bool,
+    valid: bool
+}
+
 record DiagnosticRecordV1 {
     code: [byte; up_to 512],
     stage: [byte; up_to 512],
@@ -49,12 +69,32 @@ record DiagnosticRecordV1 {
     span_line: u64,
     span_column: u64,
     expected_count: u64,
+    expected_values: [[byte; up_to 128]; 8],
     found_kind: byte,
     found_text: [byte; up_to 512],
     found_negative: bool,
     found_magnitude: u64,
     found_boolean: bool,
+    related_field_present: bool,
+    related_count: u64,
+    related: [RelatedDiagnosticRecordV1; 4],
     valid: bool
+}
+
+record ExpectedArrayStateV1 {
+    remaining: json_order.JsonValueV1,
+    values: [[byte; up_to 128]; 8],
+    count: u64,
+    valid: bool,
+    done: bool
+}
+
+record RelatedArrayStateV1 {
+    remaining: json_order.JsonValueV1,
+    values: [RelatedDiagnosticRecordV1; 4],
+    count: u64,
+    valid: bool,
+    done: bool
 }
 
 record DiagnosticArrayStateV1 {
@@ -126,6 +166,7 @@ fn key_column() -> (result: json_order.KeyV1) { return static_key([99,111,108,11
 fn key_valid() -> (result: json_order.KeyV1) { return static_key([118,97,108,105,100]); }
 fn key_errors() -> (result: json_order.KeyV1) { return static_key([101,114,114,111,114,115]); }
 fn key_diagnostics() -> (result: json_order.KeyV1) { return static_key([100,105,97,103,110,111,115,116,105,99,115]); }
+fn key_related() -> (result: json_order.KeyV1) { return static_key([114,101,108,97,116,101,100]); }
 
 fn field_count_step(remaining: json_order.JsonValueV1, count: u64, limit: u64) -> (result: u64) {
     if count >= limit { return count +% 1; }
@@ -190,6 +231,113 @@ fn read_text(value: json_order.JsonValueV1, document: json_order.JsonTokenDocume
         json_order.JsonValueV1.ObjectNil => TextReadV1 { value: [], valid: false },
         json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => TextReadV1 { value: [], valid: false }
     };
+}
+
+fn copy_expected_text_step(values: [byte; 128], source: [byte; up_to 512], index: u64) -> (result: [byte; 128]) {
+    if index >= source.len || index >= 128 { return values; }
+    return replace(values, index, source[index]);
+}
+
+fn expected_text_value(source: [byte; up_to 512]) -> (result: [byte; up_to 128]) {
+    iterate i up_to 128 carrying values: [byte; 128] = [0; 128] {
+        next values = copy_expected_text_step(values, source, i);
+    }
+    return values[0..select(source.len > 128, 128, source.len)];
+}
+
+fn empty_expected_array_state() -> (result: ExpectedArrayStateV1) {
+    return ExpectedArrayStateV1 {
+        remaining: json_order.JsonValueV1.ArrayNil,
+        values: [[]; 8],
+        count: 0,
+        valid: true,
+        done: false
+    };
+}
+
+fn expected_array_item(
+    state: ExpectedArrayStateV1,
+    item: json_order.JsonValueV1,
+    tail: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: ExpectedArrayStateV1) {
+    if state.count >= 8 {
+        return ExpectedArrayStateV1 { ..state, valid: false, done: true };
+    }
+    return match item {
+        json_order.JsonValueV1.String { start: start, length: length } => append_expected_text(state, tail, document, start, length),
+        json_order.JsonValueV1.Empty => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Null => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Array { items: items } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Object { fields: fields } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ArrayNil => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: rest } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: rest } => ExpectedArrayStateV1 { ..state, valid: false, done: true }
+    };
+}
+
+fn append_expected_text(
+    state: ExpectedArrayStateV1,
+    tail: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: ExpectedArrayStateV1) {
+    let text: TextReadV1 = decode_text_span(document, start, length);
+    if !text.valid || text.value.len > 128 {
+        return ExpectedArrayStateV1 { ..state, valid: false, done: true };
+    }
+    return ExpectedArrayStateV1 {
+        ..state,
+        remaining: tail,
+        values: replace(state.values, state.count, expected_text_value(text.value)),
+        count: state.count +% 1
+    };
+}
+
+fn expected_array_step(state: ExpectedArrayStateV1, document: json_order.JsonTokenDocumentV1) -> (result: ExpectedArrayStateV1) {
+    return match state.remaining {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => expected_array_item(state, head, tail, document),
+        json_order.JsonValueV1.ArrayNil => ExpectedArrayStateV1 { ..state, done: true },
+        json_order.JsonValueV1.Empty => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Null => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.String { start: start, length: length } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Array { items: items } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Object { fields: fields } => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => ExpectedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => ExpectedArrayStateV1 { ..state, valid: false, done: true }
+    };
+}
+
+fn project_expected_array(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: ExpectedArrayStateV1) {
+    let initial: ExpectedArrayStateV1 = match value {
+        json_order.JsonValueV1.Array { items: items } => ExpectedArrayStateV1 { ..empty_expected_array_state(), remaining: items },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => ExpectedArrayStateV1 { ..empty_expected_array_state(), remaining: value },
+        json_order.JsonValueV1.ArrayNil => ExpectedArrayStateV1 { ..empty_expected_array_state(), done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: raw_empty_array(document, start, length), done: true },
+        json_order.JsonValueV1.Empty => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Null => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.String { start: start, length: length } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Object { fields: fields } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => ExpectedArrayStateV1 { ..empty_expected_array_state(), valid: false, done: true }
+    };
+    iterate i up_to 9 carrying scanned: ExpectedArrayStateV1 = initial {
+        next scanned = select(scanned.done, scanned, expected_array_step(scanned, document));
+    }
+    return ExpectedArrayStateV1 { ..scanned, valid: scanned.valid && scanned.done };
 }
 
 fn unsigned_byte(state: UnsignedScanV1, value: byte) -> (result: UnsignedScanV1) {
@@ -378,13 +526,164 @@ fn project_found(value: json_order.JsonValueV1, document: json_order.JsonTokenDo
     };
 }
 
+fn empty_related_diagnostic() -> (result: RelatedDiagnosticRecordV1) {
+    return RelatedDiagnosticRecordV1 {
+        code: [], stage: [], severity: [], message: [],
+        span_start: 0, span_end: 0, span_line: 0, span_column: 0,
+        expected_count: 0, expected_values: [[]; 8],
+        found_kind: 0, found_text: [], found_negative: false,
+        found_magnitude: 0, found_boolean: false,
+        related_field_present: false, valid: false
+    };
+}
+
+fn project_related_diagnostic(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: RelatedDiagnosticRecordV1) {
+    let code_field: FieldLookupV1 = lookup_field(fields, key_code());
+    let stage_field: FieldLookupV1 = lookup_field(fields, key_stage());
+    let severity_field: FieldLookupV1 = lookup_field(fields, key_severity());
+    let message_field: FieldLookupV1 = lookup_field(fields, key_message());
+    let span_field: FieldLookupV1 = lookup_field(fields, key_span());
+    let expected_field: FieldLookupV1 = lookup_field(fields, key_expected());
+    let found_field: FieldLookupV1 = lookup_field(fields, key_found());
+    let related_field: FieldLookupV1 = lookup_field(fields, key_related());
+    let code: TextReadV1 = read_text(code_field.value, document);
+    let stage: TextReadV1 = read_text(stage_field.value, document);
+    let severity: TextReadV1 = read_text(severity_field.value, document);
+    let message: TextReadV1 = read_text(message_field.value, document);
+    let span: SpanValueV1 = project_span(span_field.value, document);
+    let expected: ExpectedArrayStateV1 = project_expected_array(expected_field.value, document);
+    let found: FoundValueV1 = project_found(found_field.value, document);
+    let found_valid: bool = found.kind != 0 && (found.kind != 2 || found.boolean);
+    let related_empty: bool = !related_field.found || expected_is_empty(related_field.value, document);
+    let field_count: u64 = 7 +% (related_field.found as u64);
+    return RelatedDiagnosticRecordV1 {
+        code: code.value,
+        stage: stage.value,
+        severity: severity.value,
+        message: message.value,
+        span_start: span.start,
+        span_end: span.end,
+        span_line: span.line,
+        span_column: span.column,
+        expected_count: expected.count,
+        expected_values: expected.values,
+        found_kind: found.kind,
+        found_text: found.text,
+        found_negative: found.negative,
+        found_magnitude: found.magnitude,
+        found_boolean: found.boolean,
+        related_field_present: related_field.found,
+        valid: code_field.found && stage_field.found && severity_field.found && message_field.found
+            && span_field.found && expected_field.found && found_field.found
+            && has_exact_field_count(fields, field_count)
+            && code.valid && stage.valid && severity.valid && message.valid
+            && span.valid && expected.valid && found_valid && related_empty
+    };
+}
+
+fn empty_related_array_state() -> (result: RelatedArrayStateV1) {
+    return RelatedArrayStateV1 {
+        remaining: json_order.JsonValueV1.ArrayNil,
+        values: [empty_related_diagnostic(); 4],
+        count: 0,
+        valid: true,
+        done: true
+    };
+}
+
+fn append_projected_related(
+    state: RelatedArrayStateV1,
+    fields: json_order.JsonValueV1,
+    tail: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: RelatedArrayStateV1) {
+    if state.count >= 4 {
+        return RelatedArrayStateV1 { ..state, valid: false, done: true };
+    }
+    let diagnostic: RelatedDiagnosticRecordV1 = project_related_diagnostic(fields, document);
+    if !diagnostic.valid {
+        return RelatedArrayStateV1 { ..state, valid: false, done: true };
+    }
+    return RelatedArrayStateV1 {
+        ..state,
+        remaining: tail,
+        values: replace(state.values, state.count, diagnostic),
+        count: state.count +% 1
+    };
+}
+
+fn related_array_item(
+    state: RelatedArrayStateV1,
+    item: json_order.JsonValueV1,
+    tail: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: RelatedArrayStateV1) {
+    return match item {
+        json_order.JsonValueV1.Object { fields: fields } => append_projected_related(state, fields, tail, document),
+        json_order.JsonValueV1.Empty => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Null => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.String { start: start, length: length } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Array { items: items } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ArrayNil => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: rest } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: rest } => RelatedArrayStateV1 { ..state, valid: false, done: true }
+    };
+}
+
+fn related_array_step(state: RelatedArrayStateV1, document: json_order.JsonTokenDocumentV1) -> (result: RelatedArrayStateV1) {
+    return match state.remaining {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => related_array_item(state, head, tail, document),
+        json_order.JsonValueV1.ArrayNil => RelatedArrayStateV1 { ..state, done: true },
+        json_order.JsonValueV1.Empty => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Null => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.String { start: start, length: length } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Array { items: items } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Object { fields: fields } => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => RelatedArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => RelatedArrayStateV1 { ..state, valid: false, done: true }
+    };
+}
+
+fn project_related_array(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: RelatedArrayStateV1) {
+    let initial: RelatedArrayStateV1 = match value {
+        json_order.JsonValueV1.Array { items: items } => RelatedArrayStateV1 { ..empty_related_array_state(), remaining: items, done: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => RelatedArrayStateV1 { ..empty_related_array_state(), remaining: value, done: false },
+        json_order.JsonValueV1.ArrayNil => empty_related_array_state(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: raw_empty_array(document, start, length) },
+        json_order.JsonValueV1.Empty => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.Null => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.Boolean { value: flag } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.ObjectNil => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => RelatedArrayStateV1 { ..empty_related_array_state(), valid: false }
+    };
+    iterate i up_to 5 carrying scanned: RelatedArrayStateV1 = initial {
+        next scanned = select(scanned.done, scanned, related_array_step(scanned, document));
+    }
+    return RelatedArrayStateV1 { ..scanned, valid: scanned.valid && scanned.done };
+}
+
 fn empty_diagnostic() -> (result: DiagnosticRecordV1) {
     return DiagnosticRecordV1 {
         code: [], stage: [], severity: [], message: [],
         span_start: 0, span_end: 0, span_line: 0, span_column: 0,
-        expected_count: 0,
+        expected_count: 0, expected_values: [[]; 8],
         found_kind: 0, found_text: [], found_negative: false,
-        found_magnitude: 0, found_boolean: false, valid: false
+        found_magnitude: 0, found_boolean: false,
+        related_field_present: false, related_count: 0,
+        related: [empty_related_diagnostic(); 4], valid: false
     };
 }
 
@@ -401,9 +700,16 @@ fn project_diagnostic(fields: json_order.JsonValueV1, document: json_order.JsonT
     let severity: TextReadV1 = read_text(severity_field.value, document);
     let message: TextReadV1 = read_text(message_field.value, document);
     let span: SpanValueV1 = project_span(span_field.value, document);
-    let expected_empty: bool = expected_is_empty(expected_field.value, document);
+    let expected: ExpectedArrayStateV1 = project_expected_array(expected_field.value, document);
     let found: FoundValueV1 = project_found(found_field.value, document);
+    let related_field: FieldLookupV1 = lookup_field(fields, key_related());
+    let related: RelatedArrayStateV1 = select(
+        related_field.found,
+        project_related_array(related_field.value, document),
+        empty_related_array_state()
+    );
     let found_valid: bool = found.kind != 0 && (found.kind != 2 || found.boolean);
+    let field_count: u64 = 7 +% (related_field.found as u64);
     return DiagnosticRecordV1 {
         code: code.value,
         stage: stage.value,
@@ -413,17 +719,22 @@ fn project_diagnostic(fields: json_order.JsonValueV1, document: json_order.JsonT
         span_end: span.end,
         span_line: span.line,
         span_column: span.column,
-        expected_count: 0,
+        expected_count: expected.count,
+        expected_values: expected.values,
         found_kind: found.kind,
         found_text: found.text,
         found_negative: found.negative,
         found_magnitude: found.magnitude,
         found_boolean: found.boolean,
+        related_field_present: related_field.found,
+        related_count: related.count,
+        related: related.values,
         valid: code_field.found && stage_field.found && severity_field.found && message_field.found
             && span_field.found && expected_field.found && found_field.found
-            && has_exact_field_count(fields, 7)
+            && (!related_field.found || related.valid)
+            && has_exact_field_count(fields, field_count)
             && code.valid && stage.valid && severity.valid && message.valid
-            && span.valid && expected_empty && found_valid
+            && span.valid && expected.valid && found_valid
     };
 }
 
