@@ -8,7 +8,7 @@ module mncs.test.public_result_json_token_v1;
 
 use mncs.std.application.v1;
 use mncs.std.json.v1 as json;
-use mncs.std.json_cursor.v1 as cursor;
+use mncs.test.json_token_cursor_v1 as json_tokens;
 use mncs.std.sha256.v1 as sha256;
 
 record JsonTokenInputChunkV1 {
@@ -38,7 +38,7 @@ record JsonTokenWindowRequestV1 {
     input_chunk_index: u64,
     input_chunk_offset: u64,
     window_start: u64,
-    cursor_state: cursor.Cursor,
+    cursor_state: json_tokens.CursorV1,
     pending_open: bool,
     value_count: u64,
     child_counts: [u64; 64],
@@ -76,7 +76,7 @@ record JsonTokenFormattedByteV1 {
 
 record JsonTokenStateV1 {
     writer: JsonTokenWriterV1,
-    cursor_state: cursor.Cursor,
+    cursor_state: json_tokens.CursorV1,
     scan_state: json.ScanState,
     input_sha256: [byte; up_to 64],
     input_offset: u64,
@@ -104,7 +104,7 @@ record JsonTokenResultV1 {
     input_offset: u64,
     input_chunk_index: u64,
     input_chunk_offset: u64,
-    cursor_state: cursor.Cursor,
+    cursor_state: json_tokens.CursorV1,
     scan_state: json.ScanState,
     pending_open: bool,
     value_count: u64,
@@ -179,32 +179,6 @@ fn offset_step(total: u64, chunk: JsonTokenInputChunkV1, index: u64, target: u64
     return total;
 }
 
-fn scan_document_chunk(
-    scanned: json.ScanState,
-    document: JsonTokenInputChunkV1,
-    start: u64
-) -> (result: json.ScanState) {
-    if start >= document.length { return scanned; }
-    let remaining: u64 = document.length -% start;
-    let size: u64 = select(remaining < 64, remaining, 64);
-    let part: [byte; up_to 64] = document.bytes[start..start +% size];
-    return json.feed_chunk(scanned, part);
-}
-
-fn scan_one_document_chunk(scanned: json.ScanState, chunk: JsonTokenInputChunkV1) -> (result: json.ScanState) {
-    iterate i up_to 16 carrying current: json.ScanState = scanned {
-        next current = scan_document_chunk(current, chunk, i *% 64);
-    }
-    return current;
-}
-
-fn scan_document(scanned: json.ScanState, document: JsonTokenDocumentV1) -> (result: json.ScanState) {
-    iterate i over document.chunks carrying current: json.ScanState = scanned {
-        next current = scan_one_document_chunk(current, document.chunks[i]);
-    }
-    return json.finish(current);
-}
-
 fn hash_input_chunk(hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1) -> (result: sha256.DigestState) {
     iterate i up_to 16 carrying current: sha256.DigestState = hashed {
         next current = hash_input_part(current, chunk, i *% 64);
@@ -230,8 +204,8 @@ fn document_digest(document: JsonTokenDocumentV1) -> (result: [byte; up_to 64]) 
 
 fn count_value_token(
     state: JsonTokenStateV1,
-    before: cursor.Cursor,
-    after: cursor.Cursor
+    before: json_tokens.CursorV1,
+    after: json_tokens.CursorV1
 ) -> (result: JsonTokenStateV1) {
     if state.value_count >= 1024 || after.token_depth > 63 {
         return JsonTokenStateV1 { ..state, valid: false };
@@ -243,7 +217,7 @@ fn count_value_token(
     let child_counts: [u64; 64] = state.child_counts;
     if depth > 0 {
         let parent_index: u64 = depth -% 1;
-        let parent_kind: byte = before.stack[parent_index];
+        let parent_kind: byte = json_tokens.cursor_container_kind_v1(before, parent_index);
         let child_count: u64 = state.child_counts[parent_index] +% 1;
         if parent_kind == 1 && child_count > 640 {
             return JsonTokenStateV1 { ..state, valid: false };
@@ -280,8 +254,8 @@ fn count_value_token(
 
 fn bound_token(
     state: JsonTokenStateV1,
-    before: cursor.Cursor,
-    after: cursor.Cursor
+    before: json_tokens.CursorV1,
+    after: json_tokens.CursorV1
 ) -> (result: JsonTokenStateV1) {
     if !after.token_event { return state; }
     let kind: u64 = after.token_kind as u64;
@@ -400,7 +374,7 @@ fn indent_step(output: JsonTokenWriterV1, index: u64, depth: u64) -> (result: Js
 fn format_current_byte(
     writer: JsonTokenWriterV1,
     empty_close: bool,
-    before: cursor.Cursor,
+    before: json_tokens.CursorV1,
     value: byte
 ) -> (result: JsonTokenFormattedByteV1) {
     if !before.in_string && is_space(value) {
@@ -446,7 +420,7 @@ fn format_current_byte(
 fn format_input_byte(
     writer: JsonTokenWriterV1,
     pending_open: bool,
-    before: cursor.Cursor,
+    before: json_tokens.CursorV1,
     value: byte
 ) -> (result: JsonTokenFormattedByteV1) {
     if !before.in_string && is_space(value) {
@@ -562,9 +536,12 @@ fn empty_state(
     scan_state: json.ScanState,
     input_sha256: [byte; up_to 64]
 ) -> (result: JsonTokenStateV1) {
+    let initial_cursor: json_tokens.CursorV1 = json_tokens.CursorV1 {
+        ..json_tokens.cursor_init_v1(), scan_state: scan_state
+    };
     return JsonTokenStateV1 {
         writer: token_writer_empty(window_start),
-        cursor_state: cursor.init(),
+        cursor_state: initial_cursor,
         scan_state: scan_state,
         input_sha256: input_sha256,
         input_offset: 0,
@@ -660,10 +637,12 @@ fn format_input_step(
     let chunk: JsonTokenInputChunkV1 = document.chunks[chunk_index];
     let local_position: u64 = state.input_chunk_offset;
     let value: byte = chunk.bytes[local_position];
-    let before: cursor.Cursor = state.cursor_state;
-    let advanced: cursor.Cursor = cursor.feed_byte(before, value);
+    let before: json_tokens.CursorV1 = state.cursor_state;
+    let advanced: json_tokens.CursorV1 = json_tokens.cursor_feed_byte_v1(before, value);
     let counted: JsonTokenStateV1 = bound_token(
-        JsonTokenStateV1 { ..state, cursor_state: advanced }, before, advanced
+        JsonTokenStateV1 {
+            ..state, cursor_state: advanced, scan_state: advanced.scan_state
+        }, before, advanced
     );
     let formatted_byte: JsonTokenFormattedByteV1 = format_input_byte(
         counted.writer, counted.pending_open, before, value
@@ -682,17 +661,18 @@ fn format_input_step(
             valid: counted.valid && advanced.valid
         };
     }
-    let finished_cursor: cursor.Cursor = cursor.finish(advanced);
+    let finished_cursor: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(advanced);
     let finished_counts: JsonTokenStateV1 = bound_token(
         JsonTokenStateV1 { ..counted, cursor_state: finished_cursor },
         advanced,
         finished_cursor
     );
     let with_newline: JsonTokenWriterV1 = token_writer_byte(formatted_byte.writer, 10);
-    let cursor_valid: bool = cursor.is_valid(finished_cursor);
+    let cursor_valid: bool = json_tokens.cursor_is_valid_v1(finished_cursor);
     return JsonTokenStateV1 {
         ..finished_counts,
         writer: with_newline,
+        scan_state: finished_cursor.scan_state,
         input_offset: position_after,
         input_chunk_index: chunk_index +% 1,
         input_chunk_offset: 0,
@@ -716,7 +696,10 @@ fn valid_window_request(request: JsonTokenWindowRequestV1) -> (result: bool) {
         && same_bytes(request.input_sha256, document_digest(request.document))
         && valid_output_window_bytes(request.output_window_bytes)
         && request.window_start < 65536
-        && json.is_valid(request.scan_state)
+        && request.scan_state.valid
+        && json_tokens.json_scan_states_equal_v1(
+            request.scan_state, request.cursor_state.scan_state
+        )
         && request.cursor_state.valid
         && request.cursor_state.depth <= 63
         && request.cursor_state.position == request.input_offset
@@ -751,11 +734,10 @@ fn public_result_json_token_start_app_v1(context: ApplicationContext) -> (result
         || !valid_output_window_bytes(request.output_window_bytes) {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 114, 101, 113, 117, 101, 115, 116], 4);
     }
-    let scanned: json.ScanState = scan_document(json.init(), request.document);
-    let syntax_valid: bool = json.is_valid(scanned);
+    let initial_scan: json.ScanState = json_tokens.json_scan_initial_v1();
     let initial: JsonTokenStateV1 = JsonTokenStateV1 {
-        ..empty_state(0, scanned, request.input_sha256),
-        valid: syntax_valid
+        ..empty_state(0, initial_scan, request.input_sha256),
+        valid: initial_scan.valid
     };
     let output: JsonTokenStateV1 = format_window(request.document, initial, request.output_window_bytes);
     let supported: bool = output.valid && output.writer.ok;

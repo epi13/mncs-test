@@ -8,7 +8,7 @@ module mncs.test.check_result_json_native_v1;
 
 use mncs.std.application.v1;
 use mncs.std.json.v1 as json;
-use mncs.std.json_cursor.v1 as json_cursor;
+use mncs.test.json_token_cursor_v1 as json_tokens;
 use mncs.std.sha256.v1 as sha256;
 use mncs.test.public_result_json_key_order_v1 as json_order;
 use mncs.test.check_result_projection_v1 as check_result;
@@ -173,7 +173,7 @@ record ExtractedTestResultV1 {
 enum TokenKeyListV1 { Nil, Cons { head: json_order.KeyV1, tail: TokenKeyListV1 } }
 
 record CheckResultTokenStateV1 {
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     scanner_string_has_escape: bool,
     contexts: [byte; 12],
     pending_tags: [byte; 12],
@@ -250,14 +250,14 @@ record TokenEventV1 {
 }
 
 record TokenCaptureStateV1 {
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     events: [TokenEventV1; 64],
     string_had_escape: bool,
     count: u64
 }
 
 record StringSkipStateV1 {
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     closed: bool,
     had_escape: bool
 }
@@ -857,7 +857,7 @@ fn empty_token_state(selection_digest_mode: bool) -> (result: CheckResultTokenSt
         passed: 0, failed: 0, skipped: 0
     };
     return CheckResultTokenStateV1 {
-        cursor: json_cursor.init(),
+        cursor: json_tokens.cursor_init_v1(),
         scanner_string_has_escape: false,
         contexts: [0; 12],
         pending_tags: [0; 12],
@@ -965,7 +965,7 @@ fn token_key_tag(context: byte, key: json_order.KeyV1) -> (result: byte) {
     return 0;
 }
 
-fn token_value_field(token: json_cursor.Cursor) -> (result: FieldLookupV1) {
+fn token_value_field(token: json_tokens.CursorV1) -> (result: FieldLookupV1) {
     return FieldLookupV1 {
         found: true,
         value: TokenValueSpanV1 {
@@ -1018,7 +1018,7 @@ fn key_history_has_duplicate(
 fn mark_token_key(
     state: CheckResultTokenStateV1,
     document: json_order.JsonTokenDocumentV1,
-    token: json_cursor.Cursor
+    token: json_tokens.CursorV1
 ) -> (result: CheckResultTokenStateV1) {
     if token.token_depth == 0 || token.token_depth > 12 {
         return CheckResultTokenStateV1 { ..state, valid: false };
@@ -1302,7 +1302,7 @@ fn token_value_context(
 
 fn token_open_container(
     state: CheckResultTokenStateV1,
-    token: json_cursor.Cursor
+    token: json_tokens.CursorV1
 ) -> (result: CheckResultTokenStateV1) {
     if token.token_depth >= 12 {
         return CheckResultTokenStateV1 { ..state, valid: false };
@@ -1345,7 +1345,7 @@ fn token_open_container(
 fn token_store_scalar(
     state: CheckResultTokenStateV1,
     document: json_order.JsonTokenDocumentV1,
-    token: json_cursor.Cursor
+    token: json_tokens.CursorV1
 ) -> (result: CheckResultTokenStateV1) {
     let within_values: bool = state.value_count < 512;
     if token.token_depth == 0 {
@@ -1515,7 +1515,7 @@ fn process_cursor_token(
     state: CheckResultTokenStateV1,
     document: json_order.JsonTokenDocumentV1
 ) -> (result: CheckResultTokenStateV1) {
-    let token: json_cursor.Cursor = state.cursor;
+    let token: json_tokens.CursorV1 = state.cursor;
     if !token.token_event { return state; }
     if token.token_kind == 1 { return mark_token_key(state, document, token); }
     if token.token_kind == 2 || (token.token_kind >= 3 && token.token_kind <= 6) {
@@ -1534,7 +1534,7 @@ fn process_cursor_token(
 
 
 fn empty_token_capture(
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     string_had_escape: bool
 ) -> (result: TokenCaptureStateV1) {
     let empty: TokenEventV1 = TokenEventV1 {
@@ -1576,7 +1576,7 @@ fn capture_cursor_byte(
     state: TokenCaptureStateV1,
     value: byte
 ) -> (result: TokenCaptureStateV1) {
-    let next_cursor: json_cursor.Cursor = json_cursor.feed_byte(state.cursor, value);
+    let next_cursor: json_tokens.CursorV1 = json_tokens.cursor_feed_byte_v1(state.cursor, value);
     let advanced: TokenCaptureStateV1 = TokenCaptureStateV1 {
         ..state, cursor: next_cursor
     };
@@ -1592,66 +1592,15 @@ fn skip_string_byte(
 ) -> (result: StringSkipStateV1) {
     if state.closed || index >= chunk.length { return state; }
     let value: byte = chunk.bytes[index];
-    let position: u64 = chunk_base +% index +% 1;
-    if state.cursor.escaped {
-        return StringSkipStateV1 {
-            cursor: json_cursor.Cursor {
-                ..state.cursor,
-                escaped: false,
-                event: 0,
-                token_event: false,
-                position: position
-            },
-            closed: false,
-            had_escape: state.had_escape
-        };
-    }
-    if value == 92 {
-        return StringSkipStateV1 {
-            cursor: json_cursor.Cursor {
-                ..state.cursor,
-                escaped: true,
-                event: 0,
-                token_event: false,
-                position: position
-            },
-            closed: false,
-            had_escape: true
-        };
-    }
-    if value == 34 {
-        let is_key: bool = state.cursor.string_is_key;
-        let closed: json_cursor.Cursor = json_cursor.Cursor {
-            ..state.cursor,
-            in_string: false,
-            expect_key: false,
-            escaped: false,
-            unicode_remaining: 0,
-            pending_high_surrogate: false,
-            utf8_remaining: 0,
-            utf8_lead: 0,
-            event: select(is_key, 2, 4),
-            string_end: position -% 1,
-            string_length: 0,
-            pending_key: is_key,
-            position: position,
-            token_event: true,
-            token_kind: select(is_key, 1, 2),
-            token_end: position
-        };
-        return StringSkipStateV1 {
-            cursor: closed, closed: true, had_escape: state.had_escape
-        };
-    }
+    let was_escaped: bool = state.cursor.escaped;
+    let next_cursor: json_tokens.CursorV1 = json_tokens.cursor_skip_string_byte_v1(
+        state.cursor, value
+    );
+    let closed: bool = state.cursor.in_string && !next_cursor.in_string;
     return StringSkipStateV1 {
-        cursor: json_cursor.Cursor {
-            ..state.cursor,
-            event: 0,
-            token_event: false,
-            position: position
-        },
-        closed: false,
-        had_escape: state.had_escape
+        cursor: next_cursor,
+        closed: closed,
+        had_escape: state.had_escape || (value == 92 && !was_escaped)
     };
 }
 
@@ -1678,7 +1627,7 @@ fn skip_string_block(
     start: u64
 ) -> (result: TokenCaptureStateV1) {
     let initial: StringSkipStateV1 = StringSkipStateV1 {
-        cursor: json_cursor.Cursor { ..capture.cursor, event: 0, token_event: false },
+        cursor: json_tokens.CursorV1 { ..capture.cursor, event: 0, token_event: false },
         closed: false,
         had_escape: capture.string_had_escape
     };
@@ -1719,7 +1668,7 @@ fn capture_token_block_step(
 }
 
 fn capture_token_block(
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     string_had_escape: bool,
     chunk: json_order.JsonTokenInputChunkV1,
     chunk_base: u64,
@@ -1739,7 +1688,7 @@ fn capture_token_block(
 
 fn close_number_parent(
     state: CheckResultTokenStateV1,
-    token: json_cursor.Cursor,
+    token: json_tokens.CursorV1,
     document: json_order.JsonTokenDocumentV1
 ) -> (result: CheckResultTokenStateV1) {
     if token.token_kind != 3 || (token.event != 7 && token.event != 8) {
@@ -1753,7 +1702,7 @@ fn close_number_parent(
 
 fn is_failure_message_token(
     state: CheckResultTokenStateV1,
-    token: json_cursor.Cursor
+    token: json_tokens.CursorV1
 ) -> (result: bool) {
     if token.token_kind != 2 || token.token_depth == 0 || token.token_depth > 12 {
         return false;
@@ -1768,7 +1717,7 @@ fn token_cursor_event(
     document: json_order.JsonTokenDocumentV1,
     has_escape: bool
 ) -> (result: CheckResultTokenStateV1) {
-    let token: json_cursor.Cursor = state.cursor;
+    let token: json_tokens.CursorV1 = state.cursor;
     let is_message: bool = is_failure_message_token(state, token);
     let processed: CheckResultTokenStateV1 = process_cursor_token(state, document);
     if is_message {
@@ -1784,9 +1733,9 @@ fn process_captured_event(
     state: CheckResultTokenStateV1,
     event: TokenEventV1,
     document: json_order.JsonTokenDocumentV1,
-    final_cursor: json_cursor.Cursor
+    final_cursor: json_tokens.CursorV1
 ) -> (result: CheckResultTokenStateV1) {
-    let token_cursor: json_cursor.Cursor = json_cursor.Cursor {
+    let token_cursor: json_tokens.CursorV1 = json_tokens.CursorV1 {
         ..final_cursor,
         event: event.event,
         token_event: true,
@@ -1820,7 +1769,7 @@ fn consume_token_events(
     state: CheckResultTokenStateV1,
     captured: TokenCaptureStateV1,
     document: json_order.JsonTokenDocumentV1,
-    final_cursor: json_cursor.Cursor
+    final_cursor: json_tokens.CursorV1
 ) -> (result: CheckResultTokenStateV1) {
     if captured.count == 0 { return CheckResultTokenStateV1 { ..state, cursor: final_cursor }; }
     iterate i up_to 64 carrying processed: CheckResultTokenStateV1 = state {
@@ -1871,9 +1820,10 @@ fn token_scan_document(
     iterate i over document.chunks carrying state: CheckResultTokenStateV1 = empty_token_state(selection_digest_mode) {
         next state = token_scan_chunk(state, document, document.chunks[i]);
     }
-    let finished: json_cursor.Cursor = json_cursor.finish(state.cursor);
+    let finished: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(state.cursor);
     let with_finish: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
-        ..state, cursor: finished, valid: state.valid && finished.valid
+        ..state, cursor: finished,
+        valid: state.valid && json_tokens.cursor_is_valid_v1(finished)
     };
     if finished.token_event { return token_cursor_event(with_finish, document, false); }
     return with_finish;
@@ -1882,10 +1832,9 @@ fn token_scan_document(
 fn checked_token_scan(
     document: json_order.JsonTokenDocumentV1,
     request_valid: bool,
-    syntax_valid: bool,
     selection_digest_mode: bool
 ) -> (result: CheckResultTokenStateV1) {
-    if request_valid && syntax_valid { return token_scan_document(document, selection_digest_mode); }
+    if request_valid { return token_scan_document(document, selection_digest_mode); }
     return CheckResultTokenStateV1 { ..empty_token_state(selection_digest_mode), valid: false };
 }
 
@@ -1948,7 +1897,7 @@ fn extract_token_result(
         test_count: tests.count,
         tests: tests.rows[0..tests.count]
     };
-    let supported: bool = state.valid && json_cursor.is_valid(state.cursor) && state.root_is_object
+    let supported: bool = state.valid && json_tokens.cursor_is_valid_v1(state.cursor) && state.root_is_object
         && (metadata.check_id.len > 0 || (state.id_seen && id_text.valid && id_text.length <= 1024))
         && state.provider_seen && provider.valid
         && state.verdict_seen && verdict.valid
@@ -2175,7 +2124,7 @@ fn extract_family_metadata(
         && inventory_identity_matches_expected(
             inventory_value, request.expected_inventory_identity
         );
-    let supported: bool = state.valid && json_cursor.is_valid(state.cursor)
+    let supported: bool = state.valid && json_tokens.cursor_is_valid_v1(state.cursor)
         && state.root_is_object && state.verdict_seen && verdict_value.valid
         && verdict_value.length <= 16 && state.selection_valid
         && state.selected_test_identities_valid && state.selected_test_identity_count <= 256
@@ -2230,13 +2179,11 @@ fn inspect_check_artifact(
     };
     let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.check_document);
     let transport_valid: bool = json_order.valid_order_request(order_request, shape);
-    let scanned: json.ScanState = json_order.scan_document(request.check_document);
-    let syntax_valid: bool = json.is_valid(scanned);
     let tokenized: CheckResultTokenStateV1 = checked_token_scan(
-        request.check_document, transport_valid, syntax_valid, false
+        request.check_document, transport_valid, false
     );
-    let supported: bool = transport_valid && syntax_valid && tokenized.valid
-        && json_cursor.is_valid(tokenized.cursor);
+    let supported: bool = transport_valid && tokenized.valid
+        && json_tokens.cursor_is_valid_v1(tokenized.cursor);
     let schema_value: TextValueV1 = decode_text_value(
         request.check_document,
         FieldLookupV1 {
@@ -2347,13 +2294,8 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     };
     let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.document);
     let transport_valid: bool = json_order.valid_order_request(order_request, shape);
-    // Keep json.v1's independent syntax pass before cursor token extraction;
-    // the streaming cursor supplies spans and events, not full JSON syntax.
-    let scanned: json.ScanState = json_order.scan_document(request.document);
-    let syntax_valid: bool = json.is_valid(scanned);
     let tokenized: CheckResultTokenStateV1 = checked_token_scan(
-        request.document, transport_valid, syntax_valid,
-        request.selection_digest_expectation_present
+        request.document, transport_valid, request.selection_digest_expectation_present
     );
     let extracted: ExtractedTestResultV1 = extract_token_result(
         request.document, tokenized, request
@@ -2364,7 +2306,7 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     let check_artifact: CheckArtifactMetadataV1 = inspect_check_artifact(
         request, family_metadata
     );
-    let supported: bool = transport_valid && syntax_valid && extracted.supported;
+    let supported: bool = transport_valid && tokenized.valid && extracted.supported;
     let selected_request: check_result.CheckResultProjectionRequestV1 = select(
         supported, extracted.request, empty_projection_request(request)
     );

@@ -7,9 +7,12 @@ module mncs.test.public_result_json_token_tape_v1;
 
 use mncs.std.application.v1;
 use mncs.std.json.v1 as json;
-use mncs.std.json_cursor.v1 as json_cursor;
+use mncs.test.json_token_cursor_v1 as json_tokens;
 use mncs.std.sha256.v1 as sha256;
 
+// The shared Stdlib cursor reports structural and string-boundary events.
+// Test needs complete raw token spans, so this native adapter adds scalar
+// boundaries for the Test consumers that retain bounded source windows.
 record TokenMetaV1 { kind: byte, offset: u64, chunk_index: u64, chunk_offset: u64, length: u64 }
 record TokenRangeV1 { chunk_index: u64, chunk_offset: u64, length: u64 }
 record PayloadChunkV1 { offset: u64, bytes: [byte; up_to 1024], length: u64 }
@@ -36,7 +39,7 @@ record RawTapeRequestV1 {
     input_sha256: [byte; up_to 64],
     chunk_index: u64,
     scan_state: json.ScanState,
-    cursor_state: json_cursor.Cursor,
+    cursor_state: json_tokens.CursorV1,
     tokens: [TokenMetaV1; up_to 512],
     token_count: u64
 }
@@ -61,12 +64,12 @@ record RawDocumentShapeV1 { total_bytes: u64, valid: bool }
 record TokenLocationV1 { base: u64, chunk_index: u64, chunk_offset: u64, found: bool }
 enum TokenMetaListV1 { TokenNil, TokenCons { head: TokenMetaV1, tail: TokenMetaListV1 } }
 record TokenizeStateV1 {
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     tokens: TokenMetaListV1,
     token_count: u64,
     valid: bool
 }
-record RawWindowStateV1 { scan_state: json.ScanState, token_state: TokenizeStateV1, next_chunk_index: u64 }
+record RawWindowStateV1 { token_state: TokenizeStateV1, next_chunk_index: u64 }
 record TokenArrayV1 { tokens: [TokenMetaV1; 512], count: u64 }
 record PayloadArrayV1 { chunks: [PayloadChunkV1; 64], count: u64, total_bytes: u64 }
 
@@ -166,7 +169,7 @@ record RawTokenizeResultV1 {
     next_chunk_index: u64,
     input_sha256: [byte; up_to 64],
     scan_state: json.ScanState,
-    cursor_state: json_cursor.Cursor,
+    cursor_state: json_tokens.CursorV1,
     tokens: [TokenMetaV1; up_to 512],
     token_count: u64
 }
@@ -274,21 +277,6 @@ fn source_digest_hex(hashed: sha256.DigestState) -> (result: [byte; up_to 64]) {
     return encoded;
 }
 
-fn scan_raw_part(scanned: json.ScanState, chunk: JsonInputChunkV1, part: u64) -> (result: json.ScanState) {
-    let start: u64 = part *% 64;
-    if start >= chunk.length { return scanned; }
-    let remaining: u64 = chunk.length -% start;
-    let size: u64 = select(remaining < 64, remaining, 64);
-    return json.feed_chunk(scanned, chunk.bytes[start..start +% size]);
-}
-
-fn scan_raw_chunk(scanned: json.ScanState, chunk: JsonInputChunkV1) -> (result: json.ScanState) {
-    iterate i up_to 16 carrying current: json.ScanState = scanned {
-        next current = scan_raw_part(current, chunk, i);
-    }
-    return current;
-}
-
 fn empty_token_meta() -> (result: TokenMetaV1) {
     return TokenMetaV1 { kind: 0, offset: 0, chunk_index: 0, chunk_offset: 0, length: 0 };
 }
@@ -372,7 +360,7 @@ fn raw_cursor_step(state: TokenizeStateV1, document: JsonInputDocumentV1, chunk_
     if !state.valid { return state; }
     let chunk: JsonInputChunkV1 = document.chunks[chunk_index];
     if chunk_offset >= chunk.length { return state; }
-    let advanced: json_cursor.Cursor = json_cursor.feed_byte(state.cursor, chunk.bytes[chunk_offset]);
+    let advanced: json_tokens.CursorV1 = json_tokens.cursor_feed_byte_v1(state.cursor, chunk.bytes[chunk_offset]);
     if !advanced.valid { return TokenizeStateV1 { ..state, cursor: advanced, valid: false }; }
     let token_kind: byte = select(advanced.token_event, raw_token_kind(advanced.token_kind), 0);
     let token_start: u64 = select(advanced.token_event, advanced.token_start, advanced.position -% 1);
@@ -401,7 +389,7 @@ fn raw_cursor_chunk(state: TokenizeStateV1, document: JsonInputDocumentV1, chunk
 fn raw_cursor_document(document: JsonInputDocumentV1) -> (result: TokenizeStateV1) {
     let marker: TokenMetaV1 = TokenMetaV1 { kind: 254, offset: 0, chunk_index: 0, chunk_offset: 0, length: 0 };
     let initial: TokenizeStateV1 = TokenizeStateV1 {
-        cursor: json_cursor.init(),
+        cursor: json_tokens.cursor_init_v1(),
         tokens: TokenMetaListV1.TokenCons { head: marker, tail: TokenMetaListV1.TokenNil },
         token_count: 1,
         valid: true
@@ -409,8 +397,8 @@ fn raw_cursor_document(document: JsonInputDocumentV1) -> (result: TokenizeStateV
     iterate i over document.chunks carrying scanned: TokenizeStateV1 = initial {
         next scanned = raw_cursor_chunk(scanned, document, i);
     }
-    let finished: json_cursor.Cursor = json_cursor.finish(scanned.cursor);
-    return TokenizeStateV1 { ..scanned, cursor: finished, valid: scanned.valid && json_cursor.is_valid(finished) };
+    let finished: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(scanned.cursor);
+    return TokenizeStateV1 { ..scanned, cursor: finished, valid: scanned.valid && json_tokens.cursor_is_valid_v1(finished) };
 }
 
 fn collect_raw_tokens(tokens: TokenMetaListV1, output: [TokenMetaV1; 512], index: u64) -> (result: [TokenMetaV1; 512]) {
@@ -477,7 +465,7 @@ fn restore_token_list(tokens: [TokenMetaV1; up_to 512]) -> (result: TokenMetaLis
 }
 
 fn restore_tokenize_state(
-    cursor: json_cursor.Cursor,
+    cursor: json_tokens.CursorV1,
     tokens: [TokenMetaV1; up_to 512],
     token_count: u64
 ) -> (result: TokenizeStateV1) {
@@ -499,7 +487,7 @@ fn restore_tokenize_state(
 }
 
 fn finish_raw_cursor(state: TokenizeStateV1, document: JsonInputDocumentV1) -> (result: TokenizeStateV1) {
-    let finished: json_cursor.Cursor = json_cursor.finish(state.cursor);
+    let finished: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(state.cursor);
     let with_cursor: TokenizeStateV1 = TokenizeStateV1 { ..state, cursor: finished };
     if finished.token_event {
         return append_cursor_token(
@@ -542,20 +530,17 @@ fn raw_document_offset(document: JsonInputDocumentV1, chunk_index: u64) -> (resu
 fn raw_window_part(state: RawWindowStateV1, document: JsonInputDocumentV1, end_chunk: u64) -> (result: RawWindowStateV1) {
     if state.next_chunk_index >= end_chunk { return state; }
     let index: u64 = state.next_chunk_index;
-    let scanned: json.ScanState = scan_raw_chunk(state.scan_state, document.chunks[index]);
     let tokenized: TokenizeStateV1 = raw_cursor_chunk(state.token_state, document, index);
     return RawWindowStateV1 {
-        scan_state: scanned,
         token_state: tokenized,
         next_chunk_index: index +% 1
     };
 }
 
-fn raw_window(document: JsonInputDocumentV1, scan_state: json.ScanState, token_state: TokenizeStateV1, start_chunk: u64) -> (result: RawWindowStateV1) {
+fn raw_window(document: JsonInputDocumentV1, token_state: TokenizeStateV1, start_chunk: u64) -> (result: RawWindowStateV1) {
     let desired_end: u64 = start_chunk +% 4;
     let end_chunk: u64 = select(desired_end < document.chunks.len, desired_end, document.chunks.len);
     let initial: RawWindowStateV1 = RawWindowStateV1 {
-        scan_state: scan_state,
         token_state: token_state,
         next_chunk_index: start_chunk
     };
@@ -571,14 +556,13 @@ fn raw_tokenize_window_result(
     input_sha256: [byte; up_to 64],
     chunk_index: u64,
     scan_state: json.ScanState,
-    cursor_state: json_cursor.Cursor,
+    cursor_state: json_tokens.CursorV1,
     tokens: [TokenMetaV1; up_to 512],
     token_count: u64
 ) -> (result: RawTokenizeResultV1) {
     let shape: RawDocumentShapeV1 = raw_document_shape(document);
     let state: TokenizeStateV1 = restore_tokenize_state(cursor_state, tokens, token_count);
-    let window: RawWindowStateV1 = raw_window(document, scan_state, state, chunk_index);
-    let current_scan: json.ScanState = window.scan_state;
+    let window: RawWindowStateV1 = raw_window(document, state, chunk_index);
     let current_tokens: TokenizeStateV1 = window.token_state;
     let next_chunk_index: u64 = window.next_chunk_index;
     let complete: bool = next_chunk_index == document.chunks.len;
@@ -586,9 +570,12 @@ fn raw_tokenize_window_result(
     let token_array: TokenArrayV1 = raw_token_array(finalized);
     let valid_request: bool = schema_valid && shape.valid && input_sha256.len == 64
         && chunk_index < document.chunks.len && token_count <= 512
-        && state.valid && finalized.valid && token_array.count <= 512;
-    let scan_valid: bool = json.is_valid(current_scan);
-    let cursor_valid: bool = json_cursor.is_valid(finalized.cursor);
+        && state.valid && finalized.valid && token_array.count <= 512
+        && scan_state.valid
+        && json_tokens.json_scan_states_equal_v1(scan_state, cursor_state.scan_state);
+    let finished_scan: json.ScanState = finalized.cursor.scan_state;
+    let scan_valid: bool = json_tokens.json_scan_is_valid_v1(finished_scan);
+    let cursor_valid: bool = json_tokens.cursor_is_valid_v1(finalized.cursor);
     let valid_end: bool = raw_window_end_valid(complete, scan_valid, cursor_valid);
     let supported: bool = valid_request && valid_end;
     return RawTokenizeResultV1 {
@@ -600,7 +587,7 @@ fn raw_tokenize_window_result(
         complete: complete,
         next_chunk_index: next_chunk_index,
         input_sha256: input_sha256,
-        scan_state: current_scan,
+        scan_state: finished_scan,
         cursor_state: finalized.cursor,
         tokens: token_array.tokens[0..token_array.count],
         token_count: token_array.count
@@ -1082,10 +1069,10 @@ fn finish_container(state: ParseStateV1, kind: byte, index: u64) -> (result: Par
 }
 
 fn valid_scalar(tape: TokenTapeV1, token: TokenMetaV1) -> (result: bool) {
-    let initial: json.ScanState = json.init();
+    let initial: json.ScanState = json_tokens.json_scan_initial_v1();
     let range: TokenRangeV1 = TokenRangeV1 { chunk_index: token.chunk_index, chunk_offset: token.chunk_offset, length: token.length };
     let scanned: json.ScanState = feed_payload_range(initial, tape, range);
-    return json.is_valid(json.finish(scanned));
+    return json_tokens.json_scan_is_valid_v1(json_tokens.json_scan_finish_v1(scanned));
 }
 
 fn set_key(state: ParseStateV1, token: TokenMetaV1, tape: TokenTapeV1, index: u64) -> (result: ParseStateV1) {
@@ -1379,7 +1366,7 @@ fn feed_range_subpart(scanned: json.ScanState, tape: TokenTapeV1, range: TokenRa
     if offset >= range.length { return scanned; }
     let remaining: u64 = range.length -% offset;
     let size: u64 = select(remaining < 64, remaining, 64);
-    return json.feed_chunk(scanned, range_bytes64(tape, range, offset, size));
+    return json_tokens.json_scan_feed_chunk_v1(scanned, range_bytes64(tape, range, offset, size));
 }
 
 fn feed_range_piece(scanned: json.ScanState, tape: TokenTapeV1, range: TokenRangeV1, segment: u64) -> (result: json.ScanState) {
@@ -1735,8 +1722,8 @@ fn public_result_json_native_tape_start_app_v1(context: ApplicationContext) -> (
         request.document,
         request.input_sha256,
         0,
-        json.init(),
-        json_cursor.init(),
+        json_tokens.json_scan_initial_v1(),
+        json_tokens.cursor_init_v1(),
         empty_tokens,
         0
     );
