@@ -879,7 +879,7 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
         && request.expected_count <= 16
         && shape.valid
         && shape.total == request.document.byte_length
-        && request.document.byte_length <= 16384;
+        && request.document.byte_length <= 18000;
     let scanned: DiagnosticScanV1 = scan_request(
         request_valid, request.document, request.expects_failure
     );

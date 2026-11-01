@@ -268,7 +268,9 @@ def test_native_diagnostic_code_json_streams_across_bounded_chunks() -> None:
 
 
 def test_native_diagnostic_document_declines_out_of_bound_or_unsupported_inputs() -> None:
-    large = b'{"valid":false,"errors":[],"padding":"' + b"x" * 16_400 + b'"}'
+    prefix = b'{"valid":false,"errors":[],"padding":"'
+    suffix = b'"}'
+    large = prefix + b"x" * (18_001 - len(prefix) - len(suffix)) + suffix
     too_many_diagnostics = json.dumps([
         {"code": f"MNE{index:03d}"} for index in range(33)
     ]).encode()

@@ -143,11 +143,11 @@ def test_native_diagnostic_span_matches_independent_json_values() -> None:
 def test_maximum_bounded_document_uses_one_native_diagnostic_scan() -> None:
     prefix = b'{"valid":false,"errors":[{"code":"MNE041"}],"padding":"'
     suffix = b'"}'
-    document = prefix + b'x' * (16_384 - len(prefix) - len(suffix)) + suffix
+    document = prefix + b'x' * (18_000 - len(prefix) - len(suffix)) + suffix
 
     native = _document_result(document)
 
-    assert len(document) == 16_384
+    assert len(document) == 18_000
     assert native is not None
     assert native["supported"] is True
     assert native["projection_supported"] is True

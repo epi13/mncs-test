@@ -221,6 +221,14 @@ diagnostic span within that unchanged cap, verified against the independent
 expected bytes. Inputs outside the existing structural bounds still use the
 atomic compatibility path.
 
+P-073 raises the native compiler-diagnostic input ceiling to 18,000 bytes while
+keeping the `run-app` limit at 8,000,000 steps. An 18,000-byte document completes
+with its native verdict and exact span. A 18,432-byte document, which fills the
+next complete 1 KiB chunk, and 32,768-byte and 65,536-byte probes exhaust the
+existing execution cap. The adapter therefore admits only the verified 18,000
+byte bound and retains the compatibility parser for larger documents; the CLI
+budget was not raised to conceal the measured cost.
+
 The public-result formatter now emits 4,096-byte windows and carries its
 source SHA-256 state between them. The final window checks the digest against
 the original input identity, avoiding a full-source rehash for every

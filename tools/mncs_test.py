@@ -140,7 +140,9 @@ COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
 COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-diagnostic-verdict-request/1"
 COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/6"
-COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 16_384
+COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 18_000
+COMPILE_DIAGNOSTIC_VERDICT_MAX_CODE_JSON_BYTES = 16_384
+COMPILE_DIAGNOSTIC_VERDICT_STEP_BUDGET = 8_000_000
 COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES = 16
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
 TEST_RESULT_SUMMARY_RESULT_SCHEMA = "mncs.test-result-summary/1"
@@ -1922,7 +1924,7 @@ def native_compile_diagnostic_document_result(
             mncs=mncs,
             cwd=cwd,
             environment=environment,
-            step_budget=8_000_000,
+            step_budget=COMPILE_DIAGNOSTIC_VERDICT_STEP_BUDGET,
         )
     except (NativeBudgetExhaustedError, NativeInputBoundError):
         return None
@@ -2010,7 +2012,7 @@ def native_compile_diagnostic_document_result(
         type(diagnostic_code_count) is not int
         or not 0 <= diagnostic_code_count <= 32
         or type(diagnostic_codes_json_length) is not int
-        or not 2 <= diagnostic_codes_json_length <= COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES
+        or not 2 <= diagnostic_codes_json_length <= COMPILE_DIAGNOSTIC_VERDICT_MAX_CODE_JSON_BYTES
         or len(diagnostic_codes_json_chunks)
         != (diagnostic_codes_json_length + 1023) // 1024
         or len(diagnostic_codes_json) != diagnostic_codes_json_length
@@ -2093,7 +2095,7 @@ def native_compile_diagnostic_values(
     code_count = result.get("diagnostic_code_count")
     if (
         not isinstance(codes, bytes)
-        or not 2 <= len(codes) <= COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES
+        or not 2 <= len(codes) <= COMPILE_DIAGNOSTIC_VERDICT_MAX_CODE_JSON_BYTES
         or not codes.startswith(b"[")
         or not codes.endswith(b"]")
         or type(code_count) is not int
