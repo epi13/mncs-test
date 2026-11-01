@@ -150,7 +150,10 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
         cwd=tmp_path,
         environment=_native_environment(),
     )
-    payload = bytes((index * 37 + 5) % 256 for index in range(512 * 1024))
+    payload = bytes(
+        (index * 37 + 5) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES)
+    )
     file_payload = bytes((index * 41 + 13) % 256 for index in range(384 * 1024 + 17))
     path = artifact_root / "compiler" / "large.bin"
     path.parent.mkdir(parents=True)
@@ -254,7 +257,7 @@ def test_artifact_store_hashes_large_payloads_in_a_retained_mncs_session(
             for size in (len(payload), len(file_payload))
         ]
         expected_windows = sum(window_counts)
-        assert expected_windows == 65
+        assert expected_windows == 175
         assert max(window_byte_counts) == mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
         assert all(words * 8 >= byte_count for words, byte_count in zip(
             window_word_counts, window_byte_counts, strict=True
@@ -344,9 +347,7 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
     compiler.chmod(0o755)
     source = tmp_path / "sample.mncs"
     source_bytes = b"module sample;\n"
-    source_bytes += b" " * (
-        mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 17 - len(source_bytes)
-    )
+    source_bytes += b" " * (1024 * 1024 + 17 - len(source_bytes))
     source.write_bytes(source_bytes)
     manifest_path = tmp_path / "sample.json"
     manifest_path.write_text('{"profile":"mncs 0.18"}\n', encoding="utf-8")
