@@ -268,7 +268,11 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
     )
     compiler.chmod(0o755)
     source = tmp_path / "sample.mncs"
-    source.write_text("module sample;\n", encoding="utf-8")
+    source_bytes = b"module sample;\n"
+    source_bytes += b" " * (
+        mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 17 - len(source_bytes)
+    )
+    source.write_bytes(source_bytes)
     manifest_path = tmp_path / "sample.json"
     manifest_path.write_text('{"profile":"mncs 0.18"}\n', encoding="utf-8")
     library = tmp_path / "library"
@@ -400,9 +404,9 @@ def test_manifest_provenance_hashes_bounded_sources_with_mncs(
             if call.args[0] == "test-library-tree-identity.json"
         ]
         assert len(tree_calls) == 1
-        assert native_file_hash.call_count == 3
-        assert native_payload_hash.call_count == 3
-        assert native_digest.call_count == 6
+        assert native_file_hash.call_count == 4
+        assert native_payload_hash.call_count == 2
+        assert native_digest.call_count == 5
         assert host_file_digest.call_count == 0
         assert host_payload_digest.call_count == 0
 
@@ -484,7 +488,7 @@ def test_artifact_store_reports_host_fallback_before_embed_session_warmup(
 def test_artifact_store_reports_host_fallback_above_native_file_bound(
     tmp_path: Path,
 ) -> None:
-    payload = b"y" * (mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
+    payload = b"y" * (mncs_test.TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES + 1)
     path = tmp_path / "too-large.bin"
     path.write_bytes(payload)
     store = mncs_test.ArtifactStore(
@@ -502,6 +506,68 @@ def test_artifact_store_reports_host_fallback_above_native_file_bound(
         "implementation": "host",
         "fallback_reason": "artifact_file_over_native_bound",
     }
+
+
+@pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
+def test_artifact_store_hashes_files_above_payload_bound_natively_after_warmup(
+    tmp_path: Path,
+) -> None:
+    store = mncs_test.ArtifactStore(
+        tmp_path / "artifacts",
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+    payload = bytes(
+        (index * 53 + 23) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES)
+    )
+    path = tmp_path / "large-provenance.bin"
+    path.write_bytes(payload)
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+        mock.patch.object(
+            mncs_test, "sha256_file", wraps=mncs_test.sha256_file
+        ) as host_file_digest,
+    ):
+        with store:
+            for small_payload in (b"first", b"second", b"third"):
+                store.digest_payload(small_payload)
+            hasher = store._start_identity_hasher()
+            assert hasher is not None
+            with mock.patch.object(
+                hasher, "digest_chunks", wraps=hasher.digest_chunks
+            ) as native_stream, mock.patch.object(
+                hasher, "_update_stream_window", wraps=hasher._update_stream_window
+            ) as stream_windows:
+                digest, hashing = store.digest_file_with_method(path)
+
+            assert native_stream.call_count == 1
+            assert native_stream.call_args.kwargs["max_bytes"] == (
+                mncs_test.TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES
+            )
+            windows = [call.args[1] for call in stream_windows.call_args_list]
+            assert len(windows) == (
+                len(payload) + mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES - 1
+            ) // mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
+            assert max(map(len, windows)) == (
+                mncs_test.TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES
+            )
+            assert sum(map(len, windows)) == len(payload)
+            assert not any(
+                call.kwargs.get("finalize", False)
+                for call in stream_windows.call_args_list[:-1]
+            )
+            assert stream_windows.call_args_list[-1].kwargs["finalize"] is True
+            assert store._identity_hasher is hasher
+
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert hashing == {"implementation": "mncs-embed"}
+    assert native_app.call_count == 3
+    host_file_digest.assert_not_called()
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")
@@ -638,7 +704,11 @@ def test_artifact_store_keeps_large_files_on_host_after_session_warmup(
         for index in range(mncs_test.TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
     )
     path = tmp_path / "large.bin"
-    path.write_bytes(payload)
+    oversized_file = bytes(
+        (index * 43 + 29) % 256
+        for index in range(mncs_test.TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES + 1)
+    )
+    path.write_bytes(oversized_file)
 
     with (
         mock.patch.object(
@@ -657,7 +727,7 @@ def test_artifact_store_keeps_large_files_on_host_after_session_warmup(
         file_digest = store.digest_file(path)
 
     assert digest == hashlib.sha256(payload).hexdigest()
-    assert file_digest == hashlib.sha256(payload).hexdigest()
+    assert file_digest == hashlib.sha256(oversized_file).hexdigest()
     assert native_app.call_count == 3
     assert host_digest.call_count == 1
     assert host_file_digest.call_count == 1

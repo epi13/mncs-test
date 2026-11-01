@@ -499,24 +499,28 @@ continuation is bounded to five application executions. The maximum per-call
 step estimate remains below 8,000,000. After three native
 application hashes in one store, it compiles the same MNCS module to a backend
 artifact and retains an `mncs-embed` session. That session calls the pure MNCS
-identity and SHA-256 functions in bounded windows for payloads and files up to
-512 KiB. A differential test covers a 512 KiB payload and a 393,233-byte compiler
-artifact against independent Python `hashlib` results. The retained session
-adds a one-time compile and open cost; no throughput gain over host `hashlib`
-is claimed. `manifest_provenance` sends compiler, source, and manifest files up
-to 14,336 bytes through `ArtifactStore`, keeping each small provenance hash
-within a single bounded MNCS request. Larger files through 512 KiB use its
-bounded file adapter; after the retained session is warm, that adapter hashes
-the runner source through the MNCS stream in 14,336-byte windows. Files above
-512 KiB retain host fallback. Before retained-session warm-up, the existing
-native application handles files through 65,536 bytes; larger files fall back
-to the host until warm-up. If embedding fails, bounded files use the existing
-native application through 65,536 bytes and larger files use host fallback.
+identity and SHA-256 functions in bounded windows for payloads up to 512 KiB
+and files up to 1 MiB. Differential tests cover a 512 KiB payload, a
+393,233-byte compiler artifact, a provenance source just above 512 KiB, and a
+file at the exact 1 MiB bound against independent Python `hashlib` results.
+The retained session adds a one-time compile and open cost; no throughput gain
+over host `hashlib` is claimed.
+`manifest_provenance` sends compiler, source, and manifest files up to
+14,336 bytes through `ArtifactStore`, keeping each small provenance hash
+within a single bounded MNCS request. Files above 14,336 bytes use the
+bounded file adapter. After the
+retained session is warm, it hashes files through 1 MiB in 14,336-byte windows
+without buffering the whole file.
+Files above 1 MiB retain host fallback. Before retained-session warm-up, the
+existing native application handles files through 65,536 bytes; larger files
+fall back to the host until warm-up. If embedding fails, bounded files use the
+existing native application through 65,536 bytes and larger files use host
+fallback.
 Library directory enumeration and per-file reads stay on the host. For a
 directory with at most 128 entries, a request within 65,536 bytes, and at most
 1 MiB of leaf bytes, `ArtifactStore` hashes eligible leaf files through
 `mncs.test.result_identity_v1`: files through 65,536 bytes use a native
-application or the retained session; larger files through 512 KiB use the
+application or the retained session; larger files through 1 MiB use the
 retained session after warm-up. Oversized files, a retained session that is
 not warm or unavailable, and native failures retain the exact host digest and
 report its fallback reason. `mncs.test.library_tree_identity_v1` owns the
@@ -527,8 +531,9 @@ Each retained window uses one MNCS function that validates the
 request and advances SHA-256 state together; the final window also finalizes the
 digest in that same call, with no separate initialization or finalization call
 from Python. Larger artifacts encountered
-before warm-up, or any artifact over 512 KiB, retain the host streaming
-fallback. Python still reads and writes files, supplies bounded typed values,
+before warm-up, or any file over 1 MiB, retain the host streaming fallback.
+Payloads over 512 KiB retain the host digest path. Python still reads and
+writes files, supplies bounded typed values,
 enumerates library directories, and preserves explicit host fallback for
 unavailable or out-of-bound leaf, tree, and source hashes.
 

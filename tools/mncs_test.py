@@ -157,7 +157,8 @@ TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES = 14 * 1024
 TEST_RESULT_IDENTITY_STREAM_CHUNKS_PER_REQUEST = 14
 TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES = 65_536
 TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES = 512 * 1024
-TEST_PROVENANCE_FILE_ADAPTER_MAX_BYTES = TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES
+TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES = 1024 * 1024
+TEST_PROVENANCE_FILE_ADAPTER_MAX_BYTES = TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES
 # The first few artifact hashes measure the native-app compatibility path
 # without paying the one-time backend compile and retained-session open cost.
 TEST_RESULT_IDENTITY_EMBED_SESSION_AFTER_ARTIFACTS = 3
@@ -4391,6 +4392,30 @@ class ArtifactStore:
             self._identity_hasher = None
             return fallback()
 
+    def _digest_retained_file(self, path: Path) -> str:
+        hasher = self._retained_identity_hasher()
+        if hasher is None:
+            return sha256_file(path)
+        try:
+            with path.open("rb") as handle:
+                return hasher.digest_chunks(
+                    iter(
+                        lambda: handle.read(TEST_RESULT_IDENTITY_STREAM_CHUNK_BYTES),
+                        b"",
+                    ),
+                    max_bytes=TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES,
+                )
+        except (
+            AdapterError,
+            NativeTransportError,
+            NativeBudgetExhaustedError,
+            OSError,
+        ) as error:
+            self._identity_hasher_failure = str(error)
+            hasher.close()
+            self._identity_hasher = None
+            return sha256_file(path)
+
     def digest_payload(self, payload: bytes) -> str:
         """Use MNCS sessions for bounded artifacts after repeated app invocations."""
         if self._closed:
@@ -4417,8 +4442,10 @@ class ArtifactStore:
         if self.cwd is None or self.environment is None:
             raise AdapterError("native artifact hashing context is incomplete")
         file_size = path.stat().st_size
-        if file_size > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+        if file_size > TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES:
             return sha256_file(path)
+        if file_size > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+            return self._digest_retained_file(path)
         if file_size > TEST_RESULT_IDENTITY_NATIVE_STREAM_MAX_BYTES:
             with path.open("rb") as handle:
                 payload = handle.read(TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES + 1)
@@ -4451,7 +4478,7 @@ class ArtifactStore:
         if self.cwd is None or self.environment is None:
             raise AdapterError("native artifact hashing context is incomplete")
         file_size = path.stat().st_size
-        if file_size > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+        if file_size > TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES:
             return sha256_file(path), {
                 "implementation": "host",
                 "fallback_reason": "artifact_file_over_native_bound",
@@ -5047,17 +5074,27 @@ class ResultIdentityEmbedHasher:
         )
         return update, digest
 
-    def digest_chunks(self, source_chunks: Iterable[bytes]) -> str:
+    def digest_chunks(
+        self,
+        source_chunks: Iterable[bytes],
+        *,
+        max_bytes: int = TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES,
+    ) -> str:
         """Hash a byte stream through MNCS with bounded, reusable session calls."""
         if self.session is None or self._closed:
             raise AdapterError("MNCS result identity session is closed")
+        if (
+            type(max_bytes) is not int
+            or not 0 <= max_bytes <= TEST_RESULT_IDENTITY_EMBED_FILE_MAX_BYTES
+        ):
+            raise AdapterError("MNCS result identity stream has an invalid byte bound")
         state: dict[str, Any] | None = None
         total = 0
         pending = bytearray()
         for source_chunk in source_chunks:
             if not isinstance(source_chunk, bytes):
                 raise AdapterError("MNCS result identity stream requires byte chunks")
-            if total + len(pending) + len(source_chunk) > TEST_RESULT_IDENTITY_EMBED_STREAM_MAX_BYTES:
+            if total + len(pending) + len(source_chunk) > max_bytes:
                 raise AdapterError("MNCS retained hash session input exceeds its bounded byte limit")
             offset = 0
             while offset < len(source_chunk):
