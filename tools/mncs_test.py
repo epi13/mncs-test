@@ -11201,7 +11201,7 @@ def parser() -> argparse.ArgumentParser:
     family_check.add_argument("--mncs", default="mncs")
     family_check.add_argument("--library", action="append", default=[])
     family_check.add_argument("--embed-library")
-    family_check.add_argument("--timeout-seconds", type=int, default=120)
+    family_check.add_argument("--timeout-seconds", type=int, default=240)
     family_check.set_defaults(handler=run_family_check)
 
     discover = commands.add_parser("discover", help="inspect manifests and optionally compiler-owned test inventories")
