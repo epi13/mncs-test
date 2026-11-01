@@ -65,6 +65,10 @@ PUBLIC_RESULT_JSON_SOURCE_DIGEST_REQUEST_SCHEMA = "mncs.test.public-json-source-
 PUBLIC_RESULT_JSON_SOURCE_DIGEST_RESULT_SCHEMA = "mncs.test.public-json-source-digest/2"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_REQUEST_SCHEMA = "mncs.test.public-json-token-tape-request/3"
 PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA = "mncs.test.public-json-token-tape/2"
+NATIVE_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test.native-result-projection-request/1"
+NATIVE_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test.native-result-projection/1"
+NATIVE_RESULT_PROJECTION_MAX_ITEMS = 16
+NATIVE_RESULT_PROJECTION_MAX_DOCUMENT_BYTES = 16_384
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-manifest-request/1"
@@ -1922,7 +1926,7 @@ def parse_json_output(stdout: bytes) -> Any:
         return None
 
 
-def native_test_result(execution: dict[str, Any]) -> dict[str, Any] | None:
+def _compatibility_native_test_result(execution: dict[str, Any]) -> dict[str, Any] | None:
     returned = execution.get("returned")
     if not isinstance(returned, list) or len(returned) != 1:
         return None
@@ -1950,7 +1954,7 @@ def native_test_result(execution: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def native_suite_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
+def _compatibility_native_suite_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
     returned = execution.get("returned")
     if not isinstance(returned, list) or len(returned) != 1:
         return None
@@ -1984,6 +1988,188 @@ def native_suite_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
         "verdict_code": integer_value(fields.get("verdict_code")),
         **values,
     }
+
+
+def _native_projection_text(item: dict[str, Any], field: str, length_field: str) -> str | None:
+    value = item.get(field)
+    length = item.get(length_field)
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or type(length) is not int
+        or not 0 <= length <= 64
+        or value[length:] != "\x00" * (64 - length)
+    ):
+        return None
+    text = value[:length]
+    return text if text.isascii() else None
+
+
+def _native_projection_array(
+    item: dict[str, Any], field: str, length: int, *, boolean: bool
+) -> list[int] | list[bool] | None:
+    value = item.get(field)
+    if not isinstance(value, list) or len(value) != length:
+        return None
+    if boolean:
+        return value if all(type(entry) is bool for entry in value) else None
+    return value if all(type(entry) is int for entry in value) else None
+
+
+def _native_result_projection_value(item: Any, kind: int) -> dict[str, Any] | None:
+    if (
+        not isinstance(item, dict)
+        or type(item.get("kind")) is not int
+        or item.get("kind") != kind
+        or item.get("supported") is not True
+    ):
+        return None
+    verdict = _native_projection_text(item, "verdict", "verdict_length")
+    present = _native_projection_array(item, "unsigned_present", 16, boolean=True)
+    values = _native_projection_array(item, "unsigned_values", 16, boolean=False)
+    signed_present = _native_projection_array(item, "signed_present", 2, boolean=True)
+    signed_values = _native_projection_array(item, "signed_values", 2, boolean=False)
+    if None in (verdict, present, values, signed_present, signed_values):
+        return None
+
+    def optional_unsigned(index: int) -> int | None:
+        return values[index] if present[index] else None  # type: ignore[index]
+
+    def optional_signed(index: int) -> int | None:
+        return signed_values[index] if signed_present[index] else None  # type: ignore[index]
+
+    if kind == 1:
+        failure_name = _native_projection_text(
+            item, "failure_kind_name", "failure_kind_name_length"
+        )
+        failure_kind = _native_projection_text(
+            item, "failure_kind", "failure_kind_length"
+        )
+        if (
+            verdict not in {"PASS", "FAIL", "SKIP", "UNSUPPORTED"}
+            or failure_name is None
+            or not failure_name
+            or failure_kind is None
+        ):
+            return None
+        return {
+            "verdict": verdict,
+            "verdict_code": optional_unsigned(0),
+            "failure_kind": "none" if failure_name == "NoFailure" else failure_kind,
+            "failure_kind_name": failure_name,
+            "failure_kind_code": optional_unsigned(1),
+            "failure_code": optional_unsigned(2),
+            "assertions": optional_unsigned(3),
+            "failures": optional_unsigned(4),
+            "expected": optional_signed(0),
+            "actual": optional_signed(1),
+            "assertion_code": optional_unsigned(5),
+        }
+
+    if kind != 2 or verdict not in {"PASS", "FAIL", "UNSUPPORTED"}:
+        return None
+    names = (
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "unsupported",
+        "assertion_failures",
+        "setup_failures",
+        "compile_failures",
+        "runtime_failures",
+        "timeout_failures",
+        "infrastructure_failures",
+        "assertion_count",
+        "failure_count",
+    )
+    if any(not present[index] for index in range(1, 14)):
+        return None
+    return {
+        "verdict": verdict,
+        "verdict_code": optional_unsigned(0),
+        **{name: values[index + 1] for index, name in enumerate(names)},
+    }
+
+
+def native_result_projection_batch(
+    executions: list[dict[str, Any]],
+    *,
+    kind: int,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[list[dict[str, Any] | None], dict[str, int]]:
+    """Project compiler-returned TestResult or SuiteSummary values in MNCS.
+
+    Python only packs each returned ABI value as bounded UTF-8 JSON transport.
+    Record, enum, and integer interpretation belongs to the native app; this
+    compatibility boundary declines unsupported or malformed values.
+    """
+    projected: list[dict[str, Any] | None] = [None] * len(executions)
+    stats = {"calls": 0, "candidates": 0, "projected": 0, "unsupported": 0}
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for index, execution in enumerate(executions):
+        returned = execution.get("returned")
+        if not isinstance(returned, list) or len(returned) != 1:
+            continue
+        try:
+            encoded = compact_json(returned[0], sort_keys=False).encode("utf-8")
+        except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+            continue
+        if not encoded or len(encoded) > NATIVE_RESULT_PROJECTION_MAX_DOCUMENT_BYTES:
+            continue
+        chunks = _public_result_input_chunks(encoded)
+        candidates.append((index, {
+            "kind": kind,
+            "document": {
+                "chunks": [
+                    {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+                    for chunk in chunks
+                ],
+                "byte_length": len(encoded),
+            },
+        }))
+    stats["candidates"] = len(candidates)
+
+    for offset in range(0, len(candidates), NATIVE_RESULT_PROJECTION_MAX_ITEMS):
+        batch = candidates[offset:offset + NATIVE_RESULT_PROJECTION_MAX_ITEMS]
+        request = {
+            "schema_version": NATIVE_RESULT_PROJECTION_REQUEST_SCHEMA,
+            "item_count": len(batch),
+            "items": [item for _index, item in batch],
+        }
+        stats["calls"] += 1
+        try:
+            response = run_native_app(
+                "test-native-result-projection.json",
+                request,
+                request_schema=NATIVE_RESULT_PROJECTION_REQUEST_SCHEMA,
+                result_schema=NATIVE_RESULT_PROJECTION_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=8_000_000,
+            )
+        except (NativeTransportError, OSError, subprocess.TimeoutExpired):
+            continue
+        raw_items = response.get("items")
+        if (
+            response.get("schema_version") != NATIVE_RESULT_PROJECTION_RESULT_SCHEMA
+            or type(response.get("item_count")) is not int
+            or response["item_count"] != len(batch)
+            or not isinstance(raw_items, list)
+            or len(raw_items) != NATIVE_RESULT_PROJECTION_MAX_ITEMS
+        ):
+            continue
+        for (index, _request_item), raw_item in zip(batch, raw_items, strict=False):
+            value = _native_result_projection_value(raw_item, kind)
+            if value is not None:
+                projected[index] = value
+                stats["projected"] += 1
+
+    stats["unsupported"] = stats["candidates"] - stats["projected"]
+    return projected, stats
 
 
 def native_result_summary(
@@ -4831,6 +5017,8 @@ def execution_adjudication_case(
     test: dict[str, Any],
     decoded: dict[str, Any],
     suite: bool,
+    native_projection: dict[str, Any] | None = None,
+    native_projection_attempted: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Project one decoded output into the bounded native policy request."""
     status = decoded.get("status")
@@ -4849,7 +5037,13 @@ def execution_adjudication_case(
     )
     native: dict[str, Any] | None = None
     if status == "returned":
-        native = native_suite_summary(decoded) if suite else native_test_result(decoded)
+        native = native_projection if native_projection_attempted else None
+        if native is None:
+            native = (
+                _compatibility_native_suite_summary(decoded)
+                if suite
+                else _compatibility_native_test_result(decoded)
+            )
     expected_status = expected_status_for(test) or ""
     return {
         "execution_status": native_status,
@@ -4976,6 +5170,8 @@ def execution_result_from_decoded(
     adjudication: dict[str, Any] | None = None,
     suite: bool = False,
     transport: dict[str, Any] | None = None,
+    native_projection: dict[str, Any] | None = None,
+    native_projection_attempted: bool = False,
 ) -> dict[str, Any]:
     """Project one structured MNCS observation into the runner envelope."""
 
@@ -5042,6 +5238,8 @@ def execution_result_from_decoded(
         test=test,
         decoded=decoded,
         suite=suite,
+        native_projection=native_projection,
+        native_projection_attempted=native_projection_attempted,
     )
     if not isinstance(adjudication, dict):
         raise AdapterError("execution result is missing its native adjudication")
@@ -5108,10 +5306,23 @@ def execute_entry(
     test_result["command_artifact"] = process["command_artifact"]
     decoded = parse_json_output(process["stdout"])
     diagnostics = diagnostic_list(decoded)
+    native_projection: dict[str, Any] | None = None
+    projection_attempted = isinstance(decoded, dict) and decoded.get("status") == "returned"
+    if projection_attempted:
+        projected, _projection_stats = native_result_projection_batch(
+            [decoded],
+            kind=2 if suite else 1,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+        native_projection = projected[0]
     case, native = execution_adjudication_case(
         test=test,
         decoded=decoded if isinstance(decoded, dict) else {},
         suite=suite,
+        native_projection=native_projection,
+        native_projection_attempted=projection_attempted,
     )
     try:
         process_decision = run_process_transport_adjudication(
@@ -5315,6 +5526,18 @@ def execute_batch(
     results: list[dict[str, Any]] = []
     adjudication_cases: list[dict[str, Any]] = []
     adjudication_indices: list[int] = []
+    returned_indices = [
+        index for index, value in enumerate(decoded)
+        if index < len(tests) and isinstance(value, dict) and value.get("status") == "returned"
+    ]
+    projected_values, projection_stats = native_result_projection_batch(
+        [decoded[index] for index in returned_indices],
+        kind=2 if suite else 1,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    native_projection_by_index = dict(zip(returned_indices, projected_values, strict=True))
     for index, test in enumerate(tests):
         if index >= len(decoded) or not isinstance(decoded[index], dict):
             continue
@@ -5322,6 +5545,8 @@ def execute_batch(
             test=test,
             decoded=decoded[index],
             suite=suite,
+            native_projection=native_projection_by_index.get(index),
+            native_projection_attempted=decoded[index].get("status") == "returned",
         )
         adjudication_cases.append(case)
         adjudication_indices.append(index)
@@ -5344,6 +5569,10 @@ def execute_batch(
         native_adjudication_summary.update({
             "calls": adjudication_calls,
             "case_count": len(adjudication_cases),
+            "result_projection_calls": projection_stats["calls"],
+            "result_projection_candidates": projection_stats["candidates"],
+            "result_projection_native": projection_stats["projected"],
+            "result_projection_compatibility": projection_stats["unsupported"],
         })
     for index, test in enumerate(tests):
         if index >= len(decoded):
@@ -5364,6 +5593,11 @@ def execute_batch(
                 adjudication=adjudication_by_index.get(index),
                 suite=suite,
                 transport=transport,
+                native_projection=native_projection_by_index.get(index),
+                native_projection_attempted=(
+                    isinstance(decoded[index], dict)
+                    and decoded[index].get("status") == "returned"
+                ),
             )
         result["request"] = request_documents[index]
         result["transport_request"] = transport_requests[index]
@@ -5378,6 +5612,9 @@ def native_suite_fold(
     test_results: list[dict[str, Any]],
     session: EmbedSession,
     step_budget: int,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Fold native TestResult values through the MNCS suite module.
 
@@ -5456,7 +5693,14 @@ def native_suite_fold(
                     "output": summary_output,
                 }
             summary_value = returned[0]
-        summary = native_suite_summary(summary_output)
+        projected_summaries, projection_stats = native_result_projection_batch(
+            [summary_output], kind=2, mncs=mncs, cwd=cwd, environment=environment
+        )
+        summary = projected_summaries[0]
+        projection_authority = "mncs.test.native_result_projection_v1"
+        if summary is None:
+            summary = _compatibility_native_suite_summary(summary_output)
+            projection_authority = "host-compatibility"
         if summary is None:
             return None, {
                 "authority": "mncs.test.suite",
@@ -5470,6 +5714,8 @@ def native_suite_fold(
             "observer": "observe",
             "status": "returned",
             "calls": calls,
+            "summary_projection": projection_authority,
+            "summary_projection_native_calls": projection_stats["calls"],
         }
     except (AdapterError, IndexError) as error:
         return None, {
@@ -9333,6 +9579,9 @@ def run_manifest(args: argparse.Namespace) -> int:
                             test_results=test_results,
                             session=session,
                             step_budget=args.step_budget or manifest["step_budget"],
+                            mncs=mncs,
+                            cwd=cwd,
+                            environment=environment,
                         )
                         execution["native_aggregation"] = native_aggregation
                         execution["session_timings"] = list(session.timings)

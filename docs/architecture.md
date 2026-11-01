@@ -949,3 +949,17 @@ and SHA-256 comparisons cover large integers, finite floats, Unicode and
 control text, large objects and arrays, and expanded output. The complete
 public-result JSON suite passes all 56 tests with the release MNCS binary and
 integrated Stdlib JSON cursor provider.
+
+P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
+record projection into `mncs.test.native_result_projection_v1`. Python packs each
+bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing
+Test JSON cursor, resolves fields by name, and validates finite variant and
+integer representations before returning bounded scalar slots. The native
+projection now feeds single-test and batch execution adjudication and the final
+native suite fold. Differential fixtures compare its projected records with the
+compatibility interpretation, including signed values, failure variants, and
+suite counters. Unsupported or malformed records retain the exact prior host
+compatibility route, and host aggregation policy remains in its existing owner.
+The 16-record batch and 16,384-byte per-document bounds keep transport and native
+work finite. The parser already serves this Test consumer, so P-045 did not add a
+Stdlib API.

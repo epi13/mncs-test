@@ -655,6 +655,10 @@ class RunnerTests(unittest.TestCase):
                     "status": "returned",
                     "calls": 1,
                     "case_count": 7,
+                    "result_projection_calls": 1,
+                    "result_projection_candidates": 7,
+                    "result_projection_native": 7,
+                    "result_projection_compatibility": 0,
                 },
             )
             self.assertEqual(
@@ -662,6 +666,14 @@ class RunnerTests(unittest.TestCase):
                 "mncs.test.suite",
             )
             self.assertEqual(document["execution"]["native_aggregation"]["calls"], 8)
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["summary_projection"],
+                "mncs.test.native_result_projection_v1",
+            )
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["summary_projection_native_calls"],
+                1,
+            )
             self.assertEqual(document["native_suite_summary"]["total"], 7)
             self.assertEqual(document["test_inventory"]["test_count"], 7)
             self.assertEqual(len(document["experiment"]["definition"]["test_cases"]), 7)

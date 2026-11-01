@@ -1,0 +1,633 @@
+mncs 0.18;
+
+// Project the compiler's serialized native TestResult and SuiteSummary values
+// in MNCS before the Test adapter supplies them to native adjudication.
+module mncs.test.native_result_projection_v1;
+
+use mncs.std.application.v1;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+
+record NativeResultProjectionItemV1 {
+    kind: byte,
+    document: json_order.JsonTokenDocumentV1
+}
+
+record NativeResultProjectionRequestV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    items: [NativeResultProjectionItemV1; up_to 16]
+}
+
+record NativeResultProjectionV1 {
+    kind: byte,
+    supported: bool,
+    verdict: [byte; 64],
+    verdict_length: u64,
+    failure_kind: [byte; 64],
+    failure_kind_length: u64,
+    failure_kind_name: [byte; 64],
+    failure_kind_name_length: u64,
+    unsigned_present: [bool; 16],
+    unsigned_values: [u64; 16],
+    signed_present: [bool; 2],
+    signed_values: [i64; 2]
+}
+
+record NativeResultProjectionResultV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    items: [NativeResultProjectionV1; 16]
+}
+
+record FieldLookupV1 { found: bool, value: json_order.JsonValueV1 }
+record TextValueV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
+record DecimalV1 { negative: bool, magnitude: u64, valid: bool }
+record IntegerV1 { negative: bool, magnitude: u64, valid: bool }
+record FieldValuesV1 {
+    remaining: json_order.JsonValueV1,
+    values: [json_order.JsonValueV1; 16],
+    present: [bool; 16],
+    valid: bool
+}
+record VariantV1 { bytes: [byte; up_to 64], length: u64, valid: bool }
+record MarkerV1 { offset: u64, found: bool }
+record ArrayStepV1 { head: json_order.JsonValueV1, tail: json_order.JsonValueV1, has_head: bool, is_nil: bool }
+record UnsignedSlotsV1 { values: [u64; 16], present: [bool; 16] }
+record SignedSlotsV1 { values: [i64; 2], present: [bool; 2] }
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,110,97,116,105,118,101,45,114,101,115,117,108,116,45,112,114,111,106,101,99,116,105,111,110,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,110,97,116,105,118,101,45,114,101,115,117,108,116,45,112,114,111,106,101,99,116,105,111,110,47,49];
+}
+
+fn empty_lookup() -> (result: FieldLookupV1) {
+    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0, raw_length: 0, ordered: name,
+        ordered_length: name.len, json_escaped: false, valid: true
+    };
+}
+
+fn key_record() -> (result: json_order.KeyV1) { return static_key([114,101,99,111,114,100]); }
+fn key_fields() -> (result: json_order.KeyV1) { return static_key([102,105,101,108,100,115]); }
+fn key_finite() -> (result: json_order.KeyV1) { return static_key([102,105,110,105,116,101]); }
+fn key_integer() -> (result: json_order.KeyV1) { return static_key([105,110,116,101,103,101,114]); }
+fn key_value() -> (result: json_order.KeyV1) { return static_key([118,97,108,117,101]); }
+fn key_discriminant() -> (result: json_order.KeyV1) { return static_key([100,105,115,99,114,105,109,105,110,97,110,116]); }
+fn key_type_identity() -> (result: json_order.KeyV1) { return static_key([116,121,112,101,95,105,100,101,110,116,105,116,121]); }
+fn key_variant_identity() -> (result: json_order.KeyV1) { return static_key([118,97,114,105,97,110,116,95,105,100,101,110,116,105,116,121]); }
+fn key_legacy_type() -> (result: json_order.KeyV1) { return static_key([116,121,112,101]); }
+fn key_legacy_variant() -> (result: json_order.KeyV1) { return static_key([118,97,114,105,97,110,116]); }
+
+fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: FieldLookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } =>
+            match json_order.compare_key(wanted, current) {
+                json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
+                json_order.KeyOrderV1.Before => empty_lookup(),
+                json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+            },
+        ObjectNil => empty_lookup(), Empty => empty_lookup(), Null => empty_lookup(),
+        Raw { start: start, length: length } => empty_lookup(),
+        Boolean { value: boolean_value } => empty_lookup(),
+        Integer { negative: negative, magnitude: magnitude } => empty_lookup(),
+        Utf8String { start: start, length: length } => empty_lookup(),
+        String { start: start, length: length } => empty_lookup(),
+        Array { items: items } => empty_lookup(), Object { fields: nested } => empty_lookup(),
+        ArrayNil => empty_lookup(), ArrayCons { head: head, tail: tail } => empty_lookup()
+    };
+}
+
+fn text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextValueV1) {
+    return match value {
+        json_order.JsonValueV1.String { start: start, length: length } => decoded_text(document, start, length),
+        Utf8String { start: start, length: length } => decoded_text(document, start, length),
+        Empty => TextValueV1 { bytes: [], length: 0, valid: false }, Null => TextValueV1 { bytes: [], length: 0, valid: false },
+        Raw { start: start, length: length } => TextValueV1 { bytes: [], length: 0, valid: false },
+        Boolean { value: boolean_value } => TextValueV1 { bytes: [], length: 0, valid: false },
+        Integer { negative: negative, magnitude: magnitude } => TextValueV1 { bytes: [], length: 0, valid: false },
+        Array { items: items } => TextValueV1 { bytes: [], length: 0, valid: false },
+        Object { fields: fields } => TextValueV1 { bytes: [], length: 0, valid: false },
+        ArrayNil => TextValueV1 { bytes: [], length: 0, valid: false },
+        ArrayCons { head: head, tail: tail } => TextValueV1 { bytes: [], length: 0, valid: false },
+        ObjectNil => TextValueV1 { bytes: [], length: 0, valid: false },
+        ObjectCons { key: key, value: inner, tail: tail } => TextValueV1 { bytes: [], length: 0, valid: false }
+    };
+}
+
+fn decoded_text(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextValueV1) {
+    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(document, start, length);
+    return TextValueV1 { bytes: decoded.bytes, length: decoded.length, valid: decoded.valid };
+}
+
+fn same_text(left: TextValueV1, right: TextValueV1) -> (result: bool) {
+    if !left.valid || left.length != right.length { return false; }
+    iterate i up_to 512 carrying equal: bool = true {
+        next equal = same_text_step(equal, left, right, i);
+    }
+    return equal;
+}
+
+fn same_text_step(equal: bool, left: TextValueV1, right: TextValueV1, index: u64) -> (result: bool) {
+    if !equal || index >= left.length { return equal; }
+    return left.bytes[index] == right.bytes[index];
+}
+
+fn field_number(name: TextValueV1, kind: byte) -> (result: u64) {
+    if same_text(name, TextValueV1 { bytes: [118,101,114,100,105,99,116], length: 7, valid: true }) { return 0; }
+    if same_text(name, TextValueV1 { bytes: [118,101,114,100,105,99,116,95,99,111,100,101], length: 12, valid: true }) { return 1; }
+    if kind == 1 {
+        if same_text(name, TextValueV1 { bytes: [102,97,105,108,117,114,101,95,107,105,110,100], length: 12, valid: true }) { return 2; }
+        if same_text(name, TextValueV1 { bytes: [102,97,105,108,117,114,101,95,99,111,100,101], length: 12, valid: true }) { return 3; }
+        if same_text(name, TextValueV1 { bytes: [97,115,115,101,114,116,105,111,110,115], length: 10, valid: true }) { return 4; }
+        if same_text(name, TextValueV1 { bytes: [102,97,105,108,117,114,101,115], length: 8, valid: true }) { return 5; }
+        if same_text(name, TextValueV1 { bytes: [101,120,112,101,99,116,101,100], length: 8, valid: true }) { return 6; }
+        if same_text(name, TextValueV1 { bytes: [97,99,116,117,97,108], length: 6, valid: true }) { return 7; }
+        if same_text(name, TextValueV1 { bytes: [97,115,115,101,114,116,105,111,110,95,99,111,100,101], length: 14, valid: true }) { return 8; }
+        return 255;
+    }
+    if same_text(name, TextValueV1 { bytes: [116,111,116,97,108], length: 5, valid: true }) { return 2; }
+    if same_text(name, TextValueV1 { bytes: [112,97,115,115,101,100], length: 6, valid: true }) { return 3; }
+    if same_text(name, TextValueV1 { bytes: [102,97,105,108,101,100], length: 6, valid: true }) { return 4; }
+    if same_text(name, TextValueV1 { bytes: [115,107,105,112,112,101,100], length: 7, valid: true }) { return 5; }
+    if same_text(name, TextValueV1 { bytes: [117,110,115,117,112,112,111,114,116,101,100], length: 11, valid: true }) { return 6; }
+    if same_text(name, TextValueV1 { bytes: [97,115,115,101,114,116,105,111,110,95,102,97,105,108,117,114,101,115], length: 18, valid: true }) { return 7; }
+    if same_text(name, TextValueV1 { bytes: [115,101,116,117,112,95,102,97,105,108,117,114,101,115], length: 14, valid: true }) { return 8; }
+    if same_text(name, TextValueV1 { bytes: [99,111,109,112,105,108,101,95,102,97,105,108,117,114,101,115], length: 16, valid: true }) { return 9; }
+    if same_text(name, TextValueV1 { bytes: [114,117,110,116,105,109,101,95,102,97,105,108,117,114,101,115], length: 16, valid: true }) { return 10; }
+    if same_text(name, TextValueV1 { bytes: [116,105,109,101,111,117,116,95,102,97,105,108,117,114,101,115], length: 16, valid: true }) { return 11; }
+    if same_text(name, TextValueV1 { bytes: [105,110,102,114,97,115,116,114,117,99,116,117,114,101,95,102,97,105,108,117,114,101,115], length: 23, valid: true }) { return 12; }
+    if same_text(name, TextValueV1 { bytes: [97,115,115,101,114,116,105,111,110,95,99,111,117,110,116], length: 15, valid: true }) { return 13; }
+    if same_text(name, TextValueV1 { bytes: [102,97,105,108,117,114,101,95,99,111,117,110,116], length: 13, valid: true }) { return 14; }
+    return 255;
+}
+
+fn array_items(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
+    return match value {
+        json_order.JsonValueV1.Array { items: items } => items,
+        ArrayCons { head: head, tail: tail } => value,
+        ArrayNil => value,
+        Empty => json_order.JsonValueV1.Empty, Null => json_order.JsonValueV1.Empty,
+        Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Boolean { value: flag } => json_order.JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => json_order.JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Object { fields: fields } => json_order.JsonValueV1.Empty,
+        ObjectNil => json_order.JsonValueV1.Empty,
+        ObjectCons { key: key, value: inner, tail: tail } => json_order.JsonValueV1.Empty
+    };
+}
+
+fn array_step(value: json_order.JsonValueV1) -> (result: ArrayStepV1) {
+    return match value {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => ArrayStepV1 { head: head, tail: tail, has_head: true, is_nil: false },
+        ArrayNil => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.ArrayNil, has_head: false, is_nil: true },
+        Empty => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Null => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Boolean { value: flag } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Integer { negative: negative, magnitude: magnitude } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Raw { start: start, length: length } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        String { start: start, length: length } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Utf8String { start: start, length: length } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Array { items: items } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        Object { fields: fields } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        ObjectNil => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false },
+        ObjectCons { key: key, value: inner, tail: tail } => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: json_order.JsonValueV1.Empty, has_head: false, is_nil: false }
+    };
+}
+
+fn empty_field_values(remaining: json_order.JsonValueV1) -> (result: FieldValuesV1) {
+    return FieldValuesV1 {
+        remaining: remaining,
+        values: [json_order.JsonValueV1.Empty; 16],
+        present: [false; 16], valid: true
+    };
+}
+
+fn field_pair(state: FieldValuesV1, pair: json_order.JsonValueV1, tail: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1, kind: byte) -> (result: FieldValuesV1) {
+    let first: ArrayStepV1 = array_step(array_items(pair));
+    if !first.has_head { return FieldValuesV1 { ..state, remaining: tail, valid: false }; }
+    let second: ArrayStepV1 = array_step(first.tail);
+    if !second.has_head { return FieldValuesV1 { ..state, remaining: tail, valid: false }; }
+    return store_field_value(state, tail, second.tail, first.head, second.head, document, kind);
+}
+
+fn store_field_value(state: FieldValuesV1, tail: json_order.JsonValueV1, after_value: json_order.JsonValueV1, name_value: json_order.JsonValueV1, field_value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1, kind: byte) -> (result: FieldValuesV1) {
+    if !json_order.is_array_nil(after_value) {
+        return FieldValuesV1 { ..state, remaining: tail, valid: false };
+    }
+    let name: TextValueV1 = text_value(name_value, document);
+    let index: u64 = field_number(name, kind);
+    if index >= 16 { return FieldValuesV1 { ..state, remaining: tail }; }
+    return FieldValuesV1 {
+        ..state,
+        remaining: tail,
+        values: replace(state.values, index, field_value),
+        present: replace(state.present, index, true)
+    };
+}
+
+fn field_step(state: FieldValuesV1, document: json_order.JsonTokenDocumentV1, kind: byte) -> (result: FieldValuesV1) {
+    if !state.valid { return state; }
+    let step: ArrayStepV1 = array_step(state.remaining);
+    if step.has_head { return field_pair(state, step.head, step.tail, document, kind); }
+    if step.is_nil { return state; }
+    return FieldValuesV1 { ..state, valid: false };
+}
+
+fn collect_field_values(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1, kind: byte) -> (result: FieldValuesV1) {
+    let initial: FieldValuesV1 = empty_field_values(array_items(value));
+    iterate i up_to 16 carrying state: FieldValuesV1 = initial {
+        next state = field_step(state, document, kind);
+    }
+    return FieldValuesV1 {
+        ..state,
+        valid: state.valid && json_order.is_array_nil(state.remaining)
+    };
+}
+
+fn decimal_step(state: DecimalV1, document: json_order.JsonTokenDocumentV1, start: u64, length: u64, index: u64) -> (result: DecimalV1) {
+    if !state.valid || index >= length { return state; }
+    let current: byte = json_order.located_byte(document, start +% index);
+    if index == 0 && current == 45 {
+        return DecimalV1 { ..state, negative: true };
+    }
+    if current < 48 || current > 57 { return DecimalV1 { ..state, valid: false }; }
+    let digit: u64 = (current as u64) -% 48;
+    if state.magnitude > 1844674407370955161
+        || (state.magnitude == 1844674407370955161 && digit > 5) {
+        return DecimalV1 { ..state, valid: false };
+    }
+    return DecimalV1 { ..state, magnitude: state.magnitude *% 10 +% digit };
+}
+
+fn decimal_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DecimalV1) {
+    return match value {
+        json_order.JsonValueV1.Raw { start: start, length: length } => decimal_span(document, start, length),
+        Integer { negative: negative, magnitude: magnitude } => DecimalV1 { negative: negative, magnitude: magnitude, valid: true },
+        Empty => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Null => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Boolean { value: flag } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        String { start: start, length: length } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Utf8String { start: start, length: length } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Array { items: items } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Object { fields: fields } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ArrayNil => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ArrayCons { head: head, tail: tail } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ObjectNil => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ObjectCons { key: key, value: inner, tail: tail } => DecimalV1 { negative: false, magnitude: 0, valid: false }
+    };
+}
+
+fn decimal_span(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: DecimalV1) {
+    let initial: DecimalV1 = DecimalV1 { negative: false, magnitude: 0, valid: length > 0 };
+    iterate i up_to 32 carrying current: DecimalV1 = initial {
+        next current = decimal_step(current, document, start, length, i);
+    }
+    return DecimalV1 { ..current, valid: current.valid && length <= 32 && length > (current.negative as u64) };
+}
+
+fn integer_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: IntegerV1) {
+    let direct: DecimalV1 = decimal_value(value, document);
+    if direct.valid { return IntegerV1 { negative: direct.negative, magnitude: direct.magnitude, valid: true }; }
+    let outer: json_order.JsonValueV1 = object_fields(value);
+    let wrapper: FieldLookupV1 = lookup_field(outer, key_integer());
+    let inner: json_order.JsonValueV1 = object_fields(wrapper.value);
+    let wrapped_value: FieldLookupV1 = lookup_field(inner, key_value());
+    let parsed: DecimalV1 = decimal_value(wrapped_value.value, document);
+    return IntegerV1 { negative: parsed.negative, magnitude: parsed.magnitude, valid: wrapper.found && wrapped_value.found && parsed.valid };
+}
+
+fn signed_number(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: IntegerV1) {
+    let parsed: IntegerV1 = integer_value(value, document);
+    if !parsed.valid { return parsed; }
+    if parsed.negative && parsed.magnitude > 9223372036854775808 { return IntegerV1 { ..parsed, valid: false }; }
+    if !parsed.negative && parsed.magnitude > 9223372036854775807 { return IntegerV1 { ..parsed, valid: false }; }
+    return parsed;
+}
+
+fn unsigned_slot(slots: UnsignedSlotsV1, output_index: u64, value: IntegerV1) -> (result: UnsignedSlotsV1) {
+    if !value.valid || value.negative { return slots; }
+    return UnsignedSlotsV1 {
+        values: replace(slots.values, output_index, value.magnitude),
+        present: replace(slots.present, output_index, true)
+    };
+}
+
+fn signed_slot(slots: SignedSlotsV1, output_index: u64, value: IntegerV1) -> (result: SignedSlotsV1) {
+    if !value.valid { return slots; }
+    if value.negative && value.magnitude == 9223372036854775808 {
+        return SignedSlotsV1 {
+            values: replace(slots.values, output_index, -9223372036854775808),
+            present: replace(slots.present, output_index, true)
+        };
+    }
+    let magnitude: i64 = value.magnitude as i64;
+    let signed: i64 = select(value.negative, 0 -% magnitude, magnitude);
+    return SignedSlotsV1 {
+        values: replace(slots.values, output_index, signed),
+        present: replace(slots.present, output_index, true)
+    };
+}
+
+fn same_bytes(left: [byte; up_to 512], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over right carrying equal: bool = true {
+        next equal = equal && left[i] == right[i];
+    }
+    return equal;
+}
+
+fn ends_with(value: TextValueV1, suffix: [byte; up_to 64]) -> (result: bool) {
+    if !value.valid || suffix.len > value.length { return false; }
+    let start: u64 = value.length -% suffix.len;
+    iterate i over suffix carrying equal: bool = true {
+        next equal = equal && value.bytes[start +% i] == suffix[i];
+    }
+    return equal;
+}
+
+fn marker_at(value: TextValueV1, marker: [byte; up_to 64], offset: u64) -> (result: bool) {
+    if offset +% marker.len > value.length { return false; }
+    iterate i over marker carrying equal: bool = true {
+        next equal = equal && value.bytes[offset +% i] == marker[i];
+    }
+    return equal;
+}
+
+fn find_last_marker_step(state: MarkerV1, value: TextValueV1, marker: [byte; up_to 64], offset: u64) -> (result: MarkerV1) {
+    if offset +% marker.len > value.length { return state; }
+    if marker_at(value, marker, offset) {
+        return MarkerV1 { offset: offset, found: true };
+    }
+    return state;
+}
+
+fn last_marker(value: TextValueV1, marker: [byte; up_to 64]) -> (result: MarkerV1) {
+    let initial: MarkerV1 = MarkerV1 { offset: 0, found: false };
+    iterate i up_to 512 carrying state: MarkerV1 = initial {
+        next state = find_last_marker_step(state, value, marker, i);
+    }
+    return state;
+}
+
+fn suffix_after_marker(value: TextValueV1, marker: [byte; up_to 64]) -> (result: VariantV1) {
+    let found: MarkerV1 = last_marker(value, marker);
+    let start: u64 = found.offset +% marker.len;
+    let length: u64 = value.length -% start;
+    if !found.found || length == 0 || length > 64 {
+        return VariantV1 { bytes: [], length: 0, valid: false };
+    }
+    return VariantV1 { bytes: value.bytes[start..value.length], length: length, valid: true };
+}
+
+fn verdict_variant(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: VariantV1) {
+    let finite_lookup: FieldLookupV1 = lookup_field(object_fields(value), key_finite());
+    let finite_fields: json_order.JsonValueV1 = object_fields(finite_lookup.value);
+    let type_value: TextValueV1 = text_value(lookup_field(finite_fields, key_type_identity()).value, document);
+    let identity_value: TextValueV1 = text_value(lookup_field(finite_fields, key_variant_identity()).value, document);
+    let modern: VariantV1 = suffix_after_marker(identity_value, [58,58,86,101,114,100,105,99,116,58,58]);
+    let legacy_type: TextValueV1 = text_value(lookup_field(finite_fields, key_legacy_type()).value, document);
+    let legacy_variant: TextValueV1 = text_value(lookup_field(finite_fields, key_legacy_variant()).value, document);
+    let variant: VariantV1 = choose_variant(modern, legacy_variant, legacy_type, [86,101,114,100,105,99,116]);
+    let correct_type: bool = ends_with(type_value, [58,58,86,101,114,100,105,99,116])
+        || same_bytes(legacy_type.bytes, [86,101,114,100,105,99,116]);
+    let allowed: bool = same_bytes(variant.bytes, [80,65,83,83])
+        || same_bytes(variant.bytes, [70,65,73,76])
+        || same_bytes(variant.bytes, [83,75,73,80])
+        || same_bytes(variant.bytes, [85,78,83,85,80,80,79,82,84,69,68]);
+    return VariantV1 { ..variant, valid: finite_lookup.found && correct_type && allowed };
+}
+
+fn failure_kind_variant(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: VariantV1) {
+    let finite_lookup: FieldLookupV1 = lookup_field(object_fields(value), key_finite());
+    let finite_fields: json_order.JsonValueV1 = object_fields(finite_lookup.value);
+    let type_value: TextValueV1 = text_value(lookup_field(finite_fields, key_type_identity()).value, document);
+    let identity_value: TextValueV1 = text_value(lookup_field(finite_fields, key_variant_identity()).value, document);
+    let modern: VariantV1 = suffix_after_marker(identity_value, [58,58,70,97,105,108,117,114,101,75,105,110,100,58,58]);
+    let legacy_type: TextValueV1 = text_value(lookup_field(finite_fields, key_legacy_type()).value, document);
+    let legacy_variant: TextValueV1 = text_value(lookup_field(finite_fields, key_legacy_variant()).value, document);
+    let variant: VariantV1 = choose_variant(modern, legacy_variant, legacy_type, [70,97,105,108,117,114,101,75,105,110,100]);
+    let correct_type: bool = ends_with(type_value, [58,58,70,97,105,108,117,114,101,75,105,110,100])
+        || same_bytes(legacy_type.bytes, [70,97,105,108,117,114,101,75,105,110,100]);
+    return VariantV1 { ..variant, valid: finite_lookup.found && correct_type };
+}
+
+fn choose_variant(modern: VariantV1, legacy: TextValueV1, legacy_type: TextValueV1, type_name: [byte; up_to 64]) -> (result: VariantV1) {
+    if modern.valid { return modern; }
+    let name_matches: bool = same_bytes(legacy_type.bytes, type_name);
+    let copied: [byte; up_to 64] = legacy.bytes[0..legacy.length];
+    return VariantV1 { bytes: copied, length: legacy.length, valid: name_matches && legacy.valid && legacy.length <= 64 };
+}
+
+fn object_fields(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => fields,
+        Empty => json_order.JsonValueV1.Empty, Null => json_order.JsonValueV1.Empty,
+        Boolean { value: flag } => json_order.JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => json_order.JsonValueV1.Empty,
+        Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
+        String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Array { items: items } => json_order.JsonValueV1.Empty,
+        ArrayNil => json_order.JsonValueV1.Empty,
+        ArrayCons { head: head, tail: tail } => json_order.JsonValueV1.Empty,
+        ObjectNil => json_order.JsonValueV1.Empty,
+        ObjectCons { key: key, value: inner, tail: tail } => json_order.JsonValueV1.Empty
+    };
+}
+
+fn lowercase_step(output: [byte; 64], value: [byte; up_to 64], length: u64, index: u64) -> (result: [byte; 64]) {
+    if index >= length { return output; }
+    let current: byte = value[index];
+    let lower: byte = select(current >= 65 && current <= 90, ((current as u64) +% 32) as byte, current);
+    return replace(output, index, lower);
+}
+
+fn lowercase_ascii(value: [byte; up_to 64], length: u64) -> (result: [byte; 64]) {
+    let initial: [byte; 64] = [0; 64];
+    iterate i up_to 64 carrying output: [byte; 64] = initial {
+        next output = lowercase_step(output, value, length, i);
+    }
+    return output;
+}
+
+fn copy_variant_step(output: [byte; 64], value: [byte; up_to 64], length: u64, index: u64) -> (result: [byte; 64]) {
+    if index >= length { return output; }
+    return replace(output, index, value[index]);
+}
+
+fn copy_variant_bytes(value: VariantV1) -> (result: [byte; 64]) {
+    let initial: [byte; 64] = [0; 64];
+    iterate i up_to 64 carrying output: [byte; 64] = initial {
+        next output = copy_variant_step(output, value.bytes, value.length, i);
+    }
+    return output;
+}
+
+fn finite_discriminant(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: IntegerV1) {
+    let finite_fields: json_order.JsonValueV1 = object_fields(lookup_field(object_fields(value), key_finite()).value);
+    let found: FieldLookupV1 = lookup_field(finite_fields, key_discriminant());
+    let parsed: IntegerV1 = integer_value(found.value, document);
+    return IntegerV1 { ..parsed, valid: found.found && parsed.valid && !parsed.negative };
+}
+
+fn empty_projection(kind: byte) -> (result: NativeResultProjectionV1) {
+    return NativeResultProjectionV1 {
+        kind: kind, supported: false, verdict: [0;64], verdict_length: 0,
+        failure_kind: [0;64], failure_kind_length: 0,
+        failure_kind_name: [0;64], failure_kind_name_length: 0,
+        unsigned_present: [false; 16], unsigned_values: [0; 16],
+        signed_present: [false; 2], signed_values: [0; 2]
+    };
+}
+
+fn make_projection(
+    kind: byte, supported: bool,
+    verdict: [byte; 64], verdict_length: u64,
+    failure_kind: [byte; 64], failure_kind_length: u64,
+    failure_kind_name: [byte; 64], failure_kind_name_length: u64,
+    unsigned_slots: UnsignedSlotsV1, signed_slots: SignedSlotsV1
+) -> (result: NativeResultProjectionV1) {
+    return NativeResultProjectionV1 {
+        kind: kind, supported: supported,
+        verdict: verdict, verdict_length: verdict_length,
+        failure_kind: failure_kind, failure_kind_length: failure_kind_length,
+        failure_kind_name: failure_kind_name, failure_kind_name_length: failure_kind_name_length,
+        unsigned_present: unsigned_slots.present, unsigned_values: unsigned_slots.values,
+        signed_present: signed_slots.present, signed_values: signed_slots.values
+    };
+}
+
+fn project_parsed_value(kind: byte, document: json_order.JsonTokenDocumentV1, root: json_order.JsonValueV1) -> (result: NativeResultProjectionV1) {
+    if kind != 1 && kind != 2 { return empty_projection(kind); }
+    let root_fields: json_order.JsonValueV1 = object_fields(root);
+    let record_lookup: FieldLookupV1 = lookup_field(root_fields, key_record());
+    let record_fields: json_order.JsonValueV1 = object_fields(record_lookup.value);
+    let native_fields: FieldLookupV1 = lookup_field(record_fields, key_fields());
+    let values: FieldValuesV1 = collect_field_values(native_fields.value, document, kind);
+    if !record_lookup.found || !native_fields.found || !values.valid || !values.present[0] {
+        return empty_projection(kind);
+    }
+    let verdict_value: VariantV1 = verdict_variant(values.values[0], document);
+    if !verdict_value.valid { return empty_projection(kind); }
+    let verdict: [byte; 64] = copy_variant_bytes(verdict_value);
+    let initial_unsigned_values: [u64; 16] = [0; 16];
+    let initial_unsigned_present: [bool; 16] = [false; 16];
+    if kind == 1 {
+        if !values.present[2] { return empty_projection(kind); }
+        let failure_variant: VariantV1 = failure_kind_variant(values.values[2], document);
+        if !failure_variant.valid { return empty_projection(kind); }
+        let failure_kind: [byte; 64] = lowercase_ascii(failure_variant.bytes, failure_variant.length);
+        let failure_name: [byte; 64] = copy_variant_bytes(failure_variant);
+        let verdict_code: IntegerV1 = integer_value(values.values[1], document);
+        let failure_code: IntegerV1 = integer_value(values.values[3], document);
+        let assertion_count: IntegerV1 = integer_value(values.values[4], document);
+        let failure_count: IntegerV1 = integer_value(values.values[5], document);
+        let failure_discriminant: IntegerV1 = finite_discriminant(values.values[2], document);
+        let assertion_code: IntegerV1 = integer_value(values.values[8], document);
+        let u0: UnsignedSlotsV1 = unsigned_slot(UnsignedSlotsV1 { values: initial_unsigned_values, present: initial_unsigned_present }, 0, verdict_code);
+        let u1: UnsignedSlotsV1 = unsigned_slot(u0, 1, failure_discriminant);
+        let u2: UnsignedSlotsV1 = unsigned_slot(u1, 2, failure_code);
+        let u3: UnsignedSlotsV1 = unsigned_slot(u2, 3, assertion_count);
+        let u4: UnsignedSlotsV1 = unsigned_slot(u3, 4, failure_count);
+        let u5: UnsignedSlotsV1 = unsigned_slot(u4, 5, assertion_code);
+        let expected: IntegerV1 = signed_number(values.values[6], document);
+        let actual: IntegerV1 = signed_number(values.values[7], document);
+        let s0: SignedSlotsV1 = signed_slot(SignedSlotsV1 { values: [0;2], present: [false;2] }, 0, expected);
+        let s1: SignedSlotsV1 = signed_slot(s0, 1, actual);
+        return make_projection(
+            kind, true, verdict, verdict_value.length,
+            failure_kind, failure_variant.length, failure_name, failure_variant.length,
+            u5, s1
+        );
+    }
+    if !values.present[2] || !values.present[3] || !values.present[4] || !values.present[5]
+        || !values.present[6] || !values.present[7] || !values.present[8] || !values.present[9]
+        || !values.present[10] || !values.present[11] || !values.present[12] || !values.present[13]
+        || !values.present[14] {
+        return empty_projection(kind);
+    }
+    if !same_bytes(verdict_value.bytes, [80,65,83,83])
+        && !same_bytes(verdict_value.bytes, [70,65,73,76])
+        && !same_bytes(verdict_value.bytes, [85,78,83,85,80,80,79,82,84,69,68]) {
+        return empty_projection(kind);
+    }
+    let values_list: [u64; 13] = [2,3,4,5,6,7,8,9,10,11,12,13,14];
+    let initial_slots: UnsignedSlotsV1 = UnsignedSlotsV1 { values: [0;16], present: [false;16] };
+    iterate i over values_list carrying folded: UnsignedSlotsV1 = initial_slots {
+        let field_index: u64 = values_list[i];
+        let output_index: u64 = i +% 1;
+        let field_value: IntegerV1 = integer_value(values.values[field_index], document);
+        next folded = unsigned_slot(folded, output_index, field_value);
+    }
+    let verdict_code: IntegerV1 = integer_value(values.values[1], document);
+    let final_slots: UnsignedSlotsV1 = unsigned_slot(folded, 0, verdict_code);
+    if !final_slots.present[1] || !final_slots.present[2] || !final_slots.present[3]
+        || !final_slots.present[4] || !final_slots.present[5] || !final_slots.present[6]
+        || !final_slots.present[7] || !final_slots.present[8] || !final_slots.present[9]
+        || !final_slots.present[10] || !final_slots.present[11] || !final_slots.present[12]
+        || !final_slots.present[13] {
+        return empty_projection(kind);
+    }
+    return make_projection(
+        kind, true, verdict, verdict_value.length, [0;64], 0, [0;64], 0,
+        final_slots, SignedSlotsV1 { values: [0;2], present: [false;2] }
+    );
+}
+
+fn project_item(item: NativeResultProjectionItemV1) -> (result: NativeResultProjectionV1) {
+    if item.document.byte_length == 0 || item.document.byte_length > 16384 {
+        return empty_projection(item.kind);
+    }
+    let parsed: json_order.ParseStateV1 = json_order.parse_document(item.document);
+    if !parsed.valid || !parsed.has_root { return empty_projection(item.kind); }
+    return project_parsed_value(item.kind, item.document, parsed.root);
+}
+
+fn valid_request(request: NativeResultProjectionRequestV1) -> (result: bool) {
+    if !same_bytes(request.schema_version, request_schema()) || request.item_count != request.items.len || request.item_count > 16 {
+        return false;
+    }
+    iterate i over request.items carrying valid: bool = true {
+        let item: NativeResultProjectionItemV1 = request.items[i];
+        next valid = valid && (item.kind == 1 || item.kind == 2)
+            && item.document.byte_length > 0 && item.document.byte_length <= 16384;
+    }
+    return valid;
+}
+
+fn native_result_projection_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97,114,103,118,32,114,101,113,117,105,114,101,115,32,50,32,110,97,116,105,118,101,32,114,101,115,117,108,116,32,112,114,111,106,101,99,116,105,111,110,32,112,97,116,104,115], 2);
+    }
+    let request: NativeResultProjectionRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105,110,118,97,108,105,100,32,110,97,116,105,118,101,32,114,101,115,117,108,116,32,112,114,111,106,101,99,116,105,111,110,32,114,101,113,117,101,115,116], 4);
+    }
+    let initial: NativeResultProjectionResultV1 = NativeResultProjectionResultV1 {
+        schema_version: result_schema(), item_count: request.item_count,
+        items: [empty_projection(0); 16]
+    };
+    iterate i over request.items carrying built: NativeResultProjectionResultV1 = initial {
+        next built = NativeResultProjectionResultV1 {
+            ..built, items: replace(built.items, i, project_item(request.items[i]))
+        };
+    }
+    let published: u64 = structured_write(context.argv[1], result_schema(), built);
+    if published == 0 {
+        return failure([110,97,116,105,118,101,32,114,101,115,117,108,116,32,112,114,111,106,101,99,116,105,111,110,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+    }
+    return success([]);
+}
