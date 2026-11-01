@@ -137,6 +137,10 @@ VERIFICATION_COHERENCE_MAX_IDENTITIES = 64
 VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
+COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-diagnostic-verdict-request/1"
+COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/1"
+COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 16_384
+COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES = 16
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
 TEST_RESULT_SUMMARY_RESULT_SCHEMA = "mncs.test-result-summary/1"
 TEST_RESULT_IDENTITY_REQUEST_SCHEMA = "mncs.test-result-identity-request/1"
@@ -1797,6 +1801,94 @@ def diagnostic_list(value: Any) -> list[dict[str, Any]]:
         if isinstance(errors, list):
             return [item for item in errors if isinstance(item, dict)]
     return []
+
+
+def native_compile_diagnostic_document_verdict(
+    document: bytes,
+    expected: list[str],
+    *,
+    compiler_exit_code: int,
+    expects_failure: bool,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str | None:
+    """Project a bounded compiler diagnostic JSON document in MNCS.
+
+    ``None`` selects the established code-list adapter when the source document,
+    expected prefix list, or native execution budget is outside this app's
+    bounds. The public TestResult may still retain the decoded diagnostics for
+    output; this path removes their separate host code projection for verdicts.
+    """
+    if type(compiler_exit_code) is not int or type(expects_failure) is not bool:
+        raise AdapterError("compiler result metadata is malformed")
+    if len(expected) > MAX_DIAGNOSTIC_EXPECTATIONS:
+        raise AdapterError("compile verdict exceeds the bounded native invocation limit")
+    expected_codes: list[str] = []
+    for item in (expected if expects_failure else []):
+        if not isinstance(item, str):
+            raise ManifestError("diagnostic expectations must be text prefixes")
+        try:
+            if len(item.encode("utf-8")) > MAX_DIAGNOSTIC_CODE_BYTES:
+                raise ManifestError(
+                    "diagnostic expectation exceeds the native 512-byte prefix bound"
+                )
+        except UnicodeEncodeError as error:
+            raise ManifestError("diagnostic expectations must be valid UTF-8") from error
+        expected_codes.append(item)
+    if len(expected_codes) > COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES:
+        return None
+    if (
+        not isinstance(document, bytes)
+        or not document
+        or len(document) > COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES
+    ):
+        return None
+    try:
+        chunks = _public_result_input_chunks(document)
+        chunk_records = [
+            {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+            for chunk in chunks
+        ]
+    except (AdapterError, UnicodeDecodeError):
+        return None
+    request = {
+        "schema_version": COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA,
+        "document": {"chunks": chunk_records, "byte_length": len(document)},
+        "compiler_exit_code": compiler_exit_code,
+        "expects_failure": expects_failure,
+        "expected_count": len(expected_codes),
+        "expected": [{"value": code} for code in expected_codes],
+    }
+    try:
+        result = run_native_app(
+            "test-compile-diagnostic-verdict.json",
+            request,
+            request_schema=COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA,
+            result_schema=COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeBudgetExhaustedError, NativeInputBoundError):
+        return None
+    except NativeTransportError as error:
+        raise AdapterError(f"native compiler diagnostic projection failed: {error}") from error
+    if result.get("schema_version") != COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA:
+        raise AdapterError("MNCS compiler diagnostic app returned an unsupported result schema")
+    supported = result.get("supported")
+    if type(supported) is not bool:
+        raise AdapterError("MNCS compiler diagnostic app returned malformed support metadata")
+    if not supported:
+        return None
+    verdict = result.get("verdict")
+    if not isinstance(verdict, str) or verdict not in {
+        "compile_pass", "expected_failure", "compile_expectation_mismatch",
+        "diagnostic_mismatch", "compile_failure",
+    }:
+        raise AdapterError("MNCS compiler diagnostic app returned an unknown verdict")
+    return verdict
 
 
 def native_compile_verdict(
@@ -6369,18 +6461,28 @@ def compile_entry(
     compiler_result_is_object = isinstance(decoded, dict)
     valid_field_present = compiler_result_is_object and "valid" in decoded
     valid_field_is_true = compiler_result_is_object and decoded.get("valid") is True
-    native_verdict = native_compile_verdict(
-        diagnostics,
+    native_verdict = native_compile_diagnostic_document_verdict(
+        process["stdout"],
         expected_codes,
         compiler_exit_code=process["returncode"],
-        compiler_result_is_object=compiler_result_is_object,
-        valid_field_present=valid_field_present,
-        valid_field_is_true=valid_field_is_true,
         expects_failure=expects_failure,
         mncs=mncs,
         cwd=cwd,
         environment=environment,
     )
+    if native_verdict is None:
+        native_verdict = native_compile_verdict(
+            diagnostics,
+            expected_codes,
+            compiler_exit_code=process["returncode"],
+            compiler_result_is_object=compiler_result_is_object,
+            valid_field_present=valid_field_present,
+            valid_field_is_true=valid_field_is_true,
+            expects_failure=expects_failure,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
     test_result["compile_verdict"] = native_verdict
     if native_verdict == "expected_failure":
         test_result["status"] = "expected_failure"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 from pathlib import Path
 
@@ -61,6 +62,24 @@ def _verdict(
     )
 
 
+def _document_verdict(
+    document: bytes,
+    expected: list[str],
+    *,
+    compiler_exit_code: int = 1,
+    expects_failure: bool = True,
+) -> str | None:
+    return mncs_test.native_compile_diagnostic_document_verdict(
+        document,
+        expected,
+        compiler_exit_code=compiler_exit_code,
+        expects_failure=expects_failure,
+        mncs=str(MNCS),
+        cwd=ROOT,
+        environment=_environment(),
+    )
+
+
 def _reference_verdict(
     actual: list[str],
     expected: list[str],
@@ -114,6 +133,91 @@ def test_native_compile_verdict_matches_independent_contract() -> None:
             expected,
             **kwargs,
         )
+
+
+def _reference_document_verdict(
+    document: bytes,
+    expected: list[str],
+    *,
+    compiler_exit_code: int,
+    expects_failure: bool,
+) -> str:
+    decoded = json.loads(document)
+    if isinstance(decoded, list):
+        diagnostics = [item for item in decoded if isinstance(item, dict)]
+    elif isinstance(decoded, dict):
+        items = decoded.get("errors")
+        if not isinstance(items, list):
+            items = decoded.get("diagnostics")
+        diagnostics = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    else:
+        diagnostics = []
+    actual = [str(item.get("code", "")) for item in diagnostics]
+    return _reference_verdict(
+        actual,
+        expected,
+        compiler_exit_code=compiler_exit_code,
+        compiler_result_is_object=isinstance(decoded, dict),
+        valid_field_present=isinstance(decoded, dict) and "valid" in decoded,
+        valid_field_is_true=isinstance(decoded, dict) and decoded.get("valid") is True,
+        expects_failure=expects_failure,
+    )
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "exit_code", "expects_failure"),
+    [
+        (b'[{"code":"MNE041"},null,{"code":"MNE122"}]', ["MNE04", "MNE1"], 2, True),
+        (
+            b'{"valid":false,"errors":[{"code":"MNE\\u0031"}],"diagnostics":[{"code":"wrong"}]}',
+            ["MNE1"],
+            2,
+            True,
+        ),
+        (b'{"valid":false,"errors":7,"diagnostics":[{"code":"MNE041"}]}', ["MNE04"], 2, True),
+        (b'{"valid":true,"errors":[]}', ["MNE"], 0, True),
+        (b'{"valid":false,"errors":[]}', [], 2, True),
+        (b'{"valid":true}', [], 0, False),
+        (b'[{"code":"MNE041"}]', [], 2, True),
+    ],
+)
+def test_native_diagnostic_document_verdict_matches_independent_json_expectations(
+    document: bytes,
+    expected: list[str],
+    exit_code: int,
+    expects_failure: bool,
+) -> None:
+    actual = _document_verdict(
+        document,
+        expected,
+        compiler_exit_code=exit_code,
+        expects_failure=expects_failure,
+    )
+
+    assert actual is not None
+    assert actual == _reference_document_verdict(
+        document,
+        expected,
+        compiler_exit_code=exit_code,
+        expects_failure=expects_failure,
+    )
+
+
+def test_native_diagnostic_document_declines_out_of_bound_or_unsupported_inputs() -> None:
+    large = b'{"valid":false,"errors":[],"padding":"' + b"x" * 16_400 + b'"}'
+    too_many_diagnostics = json.dumps([
+        {"code": f"MNE{index:03d}"} for index in range(33)
+    ]).encode()
+    too_many_expected = [f"MNE{index:03d}" for index in range(17)]
+    wide_result = {f"other_{index:02d}": index for index in range(32)}
+    wide_result.update({"valid": False, "errors": []})
+
+    assert _document_verdict(large, ["MNE"]) is None
+    assert _document_verdict(too_many_diagnostics, ["MNE"]) is None
+    assert _document_verdict(b"[", ["MNE"]) is None
+    assert _document_verdict(b'{"valid":false}', too_many_expected) is None
+    assert _document_verdict(json.dumps(wide_result).encode(), []) is None
+    assert _document_verdict(b'[{"code":7}]', ["7"]) is None
 
 
 def test_maximum_supported_prefix_uses_the_native_byte_contract() -> None:
