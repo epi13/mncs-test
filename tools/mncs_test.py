@@ -1989,13 +1989,12 @@ def native_compile_diagnostic_records(
         diagnostics = json.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AdapterError("MNCS selected a malformed compiler diagnostic JSON span") from error
-    if (
-        not isinstance(diagnostics, list)
-        or len(diagnostics) != count
-        or any(not isinstance(item, dict) for item in diagnostics)
-    ):
+    if not isinstance(diagnostics, list) or len(diagnostics) > 32:
+        raise AdapterError("MNCS selected a malformed compiler diagnostic JSON span")
+    records = [item for item in diagnostics if isinstance(item, dict)]
+    if len(records) != count:
         raise AdapterError("MNCS compiler diagnostic JSON span disagrees with its count")
-    return diagnostics
+    return records
 
 
 def native_compile_verdict(

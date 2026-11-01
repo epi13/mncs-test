@@ -106,7 +106,7 @@ def test_native_diagnostic_span_matches_independent_json_values() -> None:
         },
     ]
     document = json.dumps(
-        {"valid": False, "errors": diagnostics, "diagnostics": [{"wrong": True}]},
+        {"valid": False, "diagnostics": [{"wrong": True}], "errors": diagnostics},
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -202,20 +202,55 @@ def test_native_projection_without_a_diagnostic_array_returns_empty_list() -> No
         },
     ],
 )
-def test_native_projection_declines_shapes_that_need_compatibility_fallback(
+def test_native_span_preserves_extended_json_diagnostic_values(
     diagnostic: dict,
 ) -> None:
     document = json.dumps([diagnostic], separators=(",", ":")).encode("utf-8")
 
     native = _document_result(document)
 
-    # A document that crosses the native execution budget also takes the
-    # established host compatibility path without publishing partial records.
-    assert native is None or (
-        native["supported"] is True
-        and native["projection_supported"] is False
-        and native["verdict"] == "expected_failure"
-    )
+    assert native is not None
+    assert native["projection_supported"] is True
+    assert mncs_test.native_compile_diagnostic_records(native, document) == [diagnostic]
+
+
+def test_native_span_filters_non_object_diagnostic_array_entries() -> None:
+    diagnostic = {
+        "code": "MNE041",
+        "stage": "elaboration",
+        "severity": "error",
+        "message": "kept object",
+        "span": {"start": 1, "end": 2, "line": 1, "column": 1},
+        "expected": ["type"],
+        "found": None,
+    }
+    document = json.dumps(
+        [None, diagnostic, "ignored scalar", [diagnostic]], separators=(",", ":")
+    ).encode("utf-8")
+
+    native = _document_result(document)
+
+    assert native is not None
+    assert native["projection_supported"] is True
+    assert native["diagnostic_count"] == 1
+    assert mncs_test.native_compile_diagnostic_records(native, document) == [diagnostic]
+
+
+def test_native_span_declines_selected_arrays_over_its_item_bound() -> None:
+    diagnostic = {
+        "code": "MNE041",
+        "stage": "elaboration",
+        "severity": "error",
+        "message": "bounded item",
+        "span": {"start": 1, "end": 2, "line": 1, "column": 1},
+        "expected": [],
+        "found": None,
+    }
+    document = json.dumps([diagnostic] * 65, separators=(",", ":")).encode("utf-8")
+
+    native = _document_result(document)
+
+    assert native is None or native["projection_supported"] is False
 
 
 def test_compile_entry_decodes_only_native_diagnostic_span(

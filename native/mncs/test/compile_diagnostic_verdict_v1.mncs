@@ -630,7 +630,10 @@ fn result(
     supported: bool,
     verdict: [byte; up_to 64],
     projected: projection.DiagnosticProjectionV1,
-    projection_supported: bool
+    projection_supported: bool,
+    root_is_object: bool,
+    valid_field_present: bool,
+    valid_field_is_true: bool
 ) -> (result: CompileDiagnosticVerdictResultV1) {
     let safe_projection: projection.DiagnosticProjectionV1 = select(
         projection_supported, projected, empty_projection()
@@ -639,9 +642,9 @@ fn result(
         schema_version: result_schema(),
         supported: supported,
         projection_supported: projection_supported,
-        root_is_object: safe_projection.root_is_object,
-        valid_field_present: safe_projection.valid_field_present,
-        valid_field_is_true: safe_projection.valid_field_is_true,
+        root_is_object: root_is_object,
+        valid_field_present: valid_field_present,
+        valid_field_is_true: valid_field_is_true,
         diagnostic_count: safe_projection.count,
         diagnostics_json_present: safe_projection.diagnostics_json_present,
         diagnostics_json_start: safe_projection.diagnostics_json_start,
@@ -670,7 +673,9 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
         && shape.valid
         && shape.total == request.document.byte_length
         && request.document.byte_length <= 16384;
-    let empty: CompileDiagnosticVerdictResultV1 = result(false, [], empty_projection(), false);
+    let empty: CompileDiagnosticVerdictResultV1 = result(
+        false, [], empty_projection(), false, false, false, false
+    );
     let scanned: DiagnosticScanV1 = scan_request(
         request_valid, request.document, request.expects_failure
     );
@@ -712,13 +717,11 @@ fn compile_diagnostic_verdict_app_v1(context: ApplicationContext) -> (result: Ap
     let projected: projection.DiagnosticProjectionV1 = projection.project(
         request.document, request_valid
     );
-    let projection_supported: bool = projected.supported
-        && projected.root_is_object == scanned.root_is_object
-        && projected.valid_field_present == scanned.valid_field_present
-        && projected.valid_field_is_true == scanned.valid_field_is_true
-        && projected.count <= 32;
+    let projection_supported: bool = projected.supported && projected.count <= 32;
     let ready: CompileDiagnosticVerdictResultV1 = result(
-        true, decision.verdict, projected, projection_supported
+        true, decision.verdict, projected, projection_supported,
+        scanned.root_is_object, scanned.valid_field_present,
+        scanned.valid_field_is_true
     );
     let published: u64 = structured_write(context.argv[1], result_schema(), ready);
     if published == 0 {

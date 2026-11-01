@@ -1,81 +1,16 @@
 mncs 0.18;
 
-// Project compiler diagnostics directly from bounded cursor events. JSON bytes
-// remain in their input chunks; this module never builds a JsonValue tree.
-// Unsupported typed shapes decline atomically so Test can use its compatibility
-// parser without losing compiler output.
+// Validate compiler JSON with bounded MNCS cursors and return only the selected
+// diagnostic-array span. Diagnostic values stay in the original byte chunks;
+// Test decodes that selected public-value fragment once at its API boundary.
 module mncs.test.compile_diagnostic_projection_v1;
 
 use mncs.std.json.v1 as json;
 use mncs.std.json_cursor.v1 as json_cursor;
 use mncs.test.public_result_json_key_order_v1 as json_order;
 
-record TextReadV1 {
-    value: [byte; up_to 512],
-    valid: bool
-}
-
-record FoundValueV1 {
-    kind: byte,
-    text: [byte; up_to 512],
-    negative: bool,
-    magnitude: u64,
-    boolean: bool
-}
-
-record UnsignedScanV1 {
-    value: u64,
-    digits: u64,
-    valid: bool
-}
-
-record RelatedDiagnosticRecordV1 {
-    code: [byte; up_to 512],
-    stage: [byte; up_to 512],
-    severity: [byte; up_to 512],
-    message: [byte; up_to 512],
-    span_start: u64,
-    span_end: u64,
-    span_line: u64,
-    span_column: u64,
-    expected_count: u64,
-    expected_values: [[byte; up_to 128]; 8],
-    found_kind: byte,
-    found_text: [byte; up_to 512],
-    found_negative: bool,
-    found_magnitude: u64,
-    found_boolean: bool,
-    related_field_present: bool,
-    valid: bool
-}
-
-record DiagnosticRecordV1 {
-    code: [byte; up_to 512],
-    stage: [byte; up_to 512],
-    severity: [byte; up_to 512],
-    message: [byte; up_to 512],
-    span_start: u64,
-    span_end: u64,
-    span_line: u64,
-    span_column: u64,
-    expected_count: u64,
-    expected_values: [[byte; up_to 128]; 8],
-    found_kind: byte,
-    found_text: [byte; up_to 512],
-    found_negative: bool,
-    found_magnitude: u64,
-    found_boolean: bool,
-    related_field_present: bool,
-    related_count: u64,
-    related: [RelatedDiagnosticRecordV1; 4],
-    valid: bool
-}
-
 record DiagnosticProjectionV1 {
     supported: bool,
-    root_is_object: bool,
-    valid_field_present: bool,
-    valid_field_is_true: bool,
     diagnostics_json_present: bool,
     diagnostics_json_start: u64,
     diagnostics_json_length: u64,
@@ -87,8 +22,7 @@ record ProjectionFrameV1 {
     role: byte,
     key: byte,
     member_count: u64,
-    seen: [bool; 16],
-    related_owner: bool
+    seen: [bool; 3]
 }
 
 record ProjectionScanV1 {
@@ -96,49 +30,14 @@ record ProjectionScanV1 {
     syntax: json.ScanState,
     frames: [ProjectionFrameV1; 12],
     projection: DiagnosticProjectionV1,
-    current: DiagnosticRecordV1,
-    current_related: RelatedDiagnosticRecordV1,
     supported: bool,
-    selected_kind: byte,
-    scalar_active: bool,
-    scalar_target: byte,
-    scalar_key: byte,
-    scalar_related_owner: bool,
-    scalar_start: u64
+    selected_kind: byte
 }
 
-// Container roles: 1 root object, 2 selected diagnostic array, 3 main
-// diagnostic, 4 related diagnostic, 5 span object, 6 expected array,
-// 7 main related array, 8 related-child related array. Role 0 is ignored.
-fn empty_related_diagnostic() -> (result: RelatedDiagnosticRecordV1) {
-    return RelatedDiagnosticRecordV1 {
-        code: [], stage: [], severity: [], message: [],
-        span_start: 0, span_end: 0, span_line: 0, span_column: 0,
-        expected_count: 0, expected_values: [[]; 8],
-        found_kind: 0, found_text: [], found_negative: false,
-        found_magnitude: 0, found_boolean: false,
-        related_field_present: false, valid: false
-    };
-}
-
-fn empty_diagnostic() -> (result: DiagnosticRecordV1) {
-    return DiagnosticRecordV1 {
-        code: [], stage: [], severity: [], message: [],
-        span_start: 0, span_end: 0, span_line: 0, span_column: 0,
-        expected_count: 0, expected_values: [[]; 8],
-        found_kind: 0, found_text: [], found_negative: false,
-        found_magnitude: 0, found_boolean: false,
-        related_field_present: false, related_count: 0,
-        related: [empty_related_diagnostic(); 4], valid: false
-    };
-}
-
+// Root object key tags: errors=1, diagnostics=2.
 fn empty_projection() -> (result: DiagnosticProjectionV1) {
     return DiagnosticProjectionV1 {
         supported: false,
-        root_is_object: false,
-        valid_field_present: false,
-        valid_field_is_true: false,
         diagnostics_json_present: false,
         diagnostics_json_start: 0,
         diagnostics_json_length: 0,
@@ -149,7 +48,7 @@ fn empty_projection() -> (result: DiagnosticProjectionV1) {
 fn empty_frame() -> (result: ProjectionFrameV1) {
     return ProjectionFrameV1 {
         kind: 0, role: 0, key: 0, member_count: 0,
-        seen: [false; 16], related_owner: false
+        seen: [false; 3]
     };
 }
 
@@ -169,19 +68,12 @@ fn initial_projection_scan() -> (result: ProjectionScanV1) {
         projection: DiagnosticProjectionV1 {
             ..empty_projection(), supported: true
         },
-        current: empty_diagnostic(),
-        current_related: empty_related_diagnostic(),
         supported: true,
-        selected_kind: 0,
-        scalar_active: false,
-        scalar_target: 0,
-        scalar_key: 0,
-        scalar_related_owner: false,
-        scalar_start: 0
+        selected_kind: 0
     };
 }
 
-fn same_key(cursor: json_cursor.Cursor, expected: [byte; up_to 32]) -> (result: bool) {
+fn same_key(cursor: json_cursor.Cursor, expected: [byte; up_to 16]) -> (result: bool) {
     if cursor.key_length != expected.len { return false; }
     iterate i over expected carrying same: bool = true {
         next same = same && cursor.key[i] == expected[i];
@@ -189,7 +81,13 @@ fn same_key(cursor: json_cursor.Cursor, expected: [byte; up_to 32]) -> (result: 
     return same;
 }
 
-fn key_bytes_are_plain_step(
+fn root_key_tag(cursor: json_cursor.Cursor) -> (result: byte) {
+    if same_key(cursor, [101,114,114,111,114,115]) { return 1; }
+    if same_key(cursor, [100,105,97,103,110,111,115,116,105,99,115]) { return 2; }
+    return 0;
+}
+
+fn root_key_bytes_are_plain_step(
     document: json_order.JsonTokenDocumentV1,
     start: u64,
     length: u64,
@@ -200,52 +98,18 @@ fn key_bytes_are_plain_step(
     return plain && json_order.located_byte(document, start +% index) != 92;
 }
 
-fn key_bytes_are_plain(
+fn root_key_bytes_are_plain(
     document: json_order.JsonTokenDocumentV1,
     cursor: json_cursor.Cursor
 ) -> (result: bool) {
     let length: u64 = cursor.string_end -% cursor.string_start;
     if length > 64 { return false; }
     iterate i up_to 64 carrying plain: bool = true {
-        next plain = key_bytes_are_plain_step(
+        next plain = root_key_bytes_are_plain_step(
             document, cursor.string_start, length, i, plain
         );
     }
     return plain;
-}
-
-fn root_key_tag(cursor: json_cursor.Cursor) -> (result: byte) {
-    if same_key(cursor, [118,97,108,105,100]) { return 1; }
-    if same_key(cursor, [101,114,114,111,114,115]) { return 2; }
-    if same_key(cursor, [100,105,97,103,110,111,115,116,105,99,115]) { return 3; }
-    return 0;
-}
-
-fn diagnostic_key_tag(cursor: json_cursor.Cursor) -> (result: byte) {
-    if same_key(cursor, [99,111,100,101]) { return 4; }
-    if same_key(cursor, [115,116,97,103,101]) { return 5; }
-    if same_key(cursor, [115,101,118,101,114,105,116,121]) { return 6; }
-    if same_key(cursor, [109,101,115,115,97,103,101]) { return 7; }
-    if same_key(cursor, [115,112,97,110]) { return 8; }
-    if same_key(cursor, [101,120,112,101,99,116,101,100]) { return 9; }
-    if same_key(cursor, [102,111,117,110,100]) { return 10; }
-    if same_key(cursor, [114,101,108,97,116,101,100]) { return 11; }
-    return 0;
-}
-
-fn span_key_tag(cursor: json_cursor.Cursor) -> (result: byte) {
-    if same_key(cursor, [115,116,97,114,116]) { return 12; }
-    if same_key(cursor, [101,110,100]) { return 13; }
-    if same_key(cursor, [108,105,110,101]) { return 14; }
-    if same_key(cursor, [99,111,108,117,109,110]) { return 15; }
-    return 0;
-}
-
-fn key_tag(cursor: json_cursor.Cursor, role: byte) -> (result: byte) {
-    if role == 1 { return root_key_tag(cursor); }
-    if role == 3 || role == 4 { return diagnostic_key_tag(cursor); }
-    if role == 5 { return span_key_tag(cursor); }
-    return 0;
 }
 
 fn key_closed(
@@ -256,60 +120,41 @@ fn key_closed(
     if depth == 0 { return ProjectionScanV1 { ..state, supported: false }; }
     let index: u64 = depth -% 1;
     let frame: ProjectionFrameV1 = state.frames[index];
-    let tag: byte = key_tag(state.cursor, frame.role);
-    let supported_object: bool = frame.role == 1 || frame.role == 3
-        || frame.role == 4 || frame.role == 5;
-    let plain: bool = !supported_object || key_bytes_are_plain(document, state.cursor);
+    if frame.role != 1 { return state; }
+    let tag: byte = root_key_tag(state.cursor);
     let duplicate: bool = tag != 0 && frame.seen[tag as u64];
+    let plain: bool = tag == 0 || root_key_bytes_are_plain(document, state.cursor);
     let updated_frame: ProjectionFrameV1 = ProjectionFrameV1 {
         ..frame,
         key: tag,
-        seen: select(
-            tag == 0,
-            frame.seen,
-            replace(frame.seen, tag as u64, true)
-        )
-    };
-    let updated_projection: DiagnosticProjectionV1 = DiagnosticProjectionV1 {
-        ..state.projection,
-        valid_field_present: state.projection.valid_field_present
-            || (frame.role == 1 && tag == 1)
-    };
-    let updated_main: DiagnosticRecordV1 = DiagnosticRecordV1 {
-        ..state.current,
-        related_field_present: state.current.related_field_present
-            || (frame.role == 3 && tag == 11)
-    };
-    let updated_related: RelatedDiagnosticRecordV1 = RelatedDiagnosticRecordV1 {
-        ..state.current_related,
-        related_field_present: state.current_related.related_field_present
-            || (frame.role == 4 && tag == 11)
+        seen: select(tag == 0, frame.seen, replace(frame.seen, tag as u64, true))
     };
     return ProjectionScanV1 {
         ..state,
         frames: replace(state.frames, index, updated_frame),
-        projection: updated_projection,
-        current: updated_main,
-        current_related: updated_related,
         supported: state.supported && plain && !duplicate
     };
 }
 
-fn select_diagnostic_array(state: ProjectionScanV1, kind: byte) -> (result: ProjectionScanV1) {
-    let choose_errors: bool = kind == 2;
-    let choose_diagnostics: bool = kind == 3 && state.selected_kind != 2;
-    if !choose_errors && !choose_diagnostics { return state; }
-    return ProjectionScanV1 {
-        ..state,
-        selected_kind: kind,
-        projection: DiagnosticProjectionV1 {
-            ..state.projection,
-            diagnostics_json_present: false,
-            diagnostics_json_start: 0,
-            diagnostics_json_length: 0,
-            count: 0
-        }
-    };
+fn select_diagnostic_array(
+    state: ProjectionScanV1,
+    kind: byte
+) -> (result: ProjectionScanV1) {
+    if kind == 1 || kind == 2
+        || (kind == 3 && state.selected_kind != 2) {
+        return ProjectionScanV1 {
+            ..state,
+            selected_kind: kind,
+            projection: DiagnosticProjectionV1 {
+                ..state.projection,
+                diagnostics_json_present: false,
+                diagnostics_json_start: 0,
+                diagnostics_json_length: 0,
+                count: 0
+            }
+        };
+    }
+    return state;
 }
 
 fn is_json_value_start(value: byte) -> (result: bool) {
@@ -320,153 +165,87 @@ fn is_json_value_start(value: byte) -> (result: bool) {
 
 fn begins_value(state: ProjectionScanV1, value: byte) -> (result: bool) {
     let expected: bool = state.syntax.expect == 0
-        || state.syntax.expect == 3
-        || state.syntax.expect == 5;
-    // Empty arrays expect a value syntactically, but their closing bracket is
-    // not an element and must not advance the bounded projection count.
+        || state.syntax.expect == 3 || state.syntax.expect == 5;
     return state.syntax.mode == 0 && expected && is_json_value_start(value);
 }
 
-fn start_scalar(
-    state: ProjectionScanV1,
-    target: byte,
-    key: byte,
-    related_owner: bool
-) -> (result: ProjectionScanV1) {
-    return ProjectionScanV1 {
-        ..state,
-        scalar_active: true,
-        scalar_target: target,
-        scalar_key: key,
-        scalar_related_owner: related_owner,
-        scalar_start: state.cursor.position
-    };
-}
-
-fn require_field_type(
+fn select_root_array_value(
     state: ProjectionScanV1,
     parent: ProjectionFrameV1,
     value: byte
 ) -> (result: ProjectionScanV1) {
-    let text_field: bool = (parent.role == 3 || parent.role == 4)
-        && (parent.key == 4 || parent.key == 5 || parent.key == 6 || parent.key == 7);
-    let span_object: bool = (parent.role == 3 || parent.role == 4) && parent.key == 8;
-    let expected_array: bool = (parent.role == 3 || parent.role == 4) && parent.key == 9;
-    let found_value: bool = (parent.role == 3 || parent.role == 4) && parent.key == 10;
-    let related_array: bool = parent.role == 3 && parent.key == 11;
-    let nested_related_array: bool = parent.role == 4 && parent.key == 11;
-    let span_number: bool = parent.role == 5
-        && (parent.key == 12 || parent.key == 13 || parent.key == 14 || parent.key == 15);
-    let invalid_text: bool = text_field && value != 34;
-    let invalid_span: bool = span_object && value != 123;
-    let invalid_expected: bool = expected_array && value != 91;
-    let invalid_found: bool = found_value && value != 34 && value != 110
-        && value != 116 && value != 102 && value != 45
-        && !(value >= 48 && value <= 57);
-    let invalid_related: bool = (related_array || nested_related_array) && value != 91;
-    let invalid_span_number: bool = span_number
-        && value != 45 && !(value >= 48 && value <= 57);
-    return ProjectionScanV1 {
-        ..state,
-        supported: state.supported && !invalid_text && !invalid_span
-            && !invalid_expected && !invalid_found && !invalid_related
-            && !invalid_span_number
-    };
+    let errors_array: bool = parent.role == 1 && parent.key == 1 && value == 91;
+    if errors_array { return select_diagnostic_array(state, 2); }
+    let diagnostics_array: bool = parent.role == 1 && parent.key == 2 && value == 91;
+    if diagnostics_array { return select_diagnostic_array(state, 3); }
+    return state;
 }
 
-fn increment_array_parent(state: ProjectionScanV1, parent_index: u64, value: byte) -> (result: ProjectionScanV1) {
-    let parent: ProjectionFrameV1 = state.frames[parent_index];
-    let count: u64 = parent.member_count +% 1;
-    let limited: bool = select(
-        parent.role == 2, count <= 64,
-        select(
-            parent.role == 6, count <= 8,
-            select(parent.role == 7, count <= 4,
-                select(parent.role == 8, count == 0, true))
-        )
-    );
-    let expected_item: bool = parent.role != 6 || value == 34;
-    let related_item: bool = parent.role != 7 || value == 123;
-    let child_related_empty: bool = parent.role != 8;
-    let updated: ProjectionFrameV1 = ProjectionFrameV1 {
-        ..parent, member_count: count
-    };
-    return ProjectionScanV1 {
-        ..state,
-        frames: replace(state.frames, parent_index, updated),
-        supported: state.supported && limited && expected_item
-            && related_item && child_related_empty
-    };
-}
-
-fn count_and_validate_parent_value(
+fn count_object_member(
     state: ProjectionScanV1,
-    value: byte,
-    parent_index: u64
+    parent_index: u64,
+    parent: ProjectionFrameV1,
+    value: byte
 ) -> (result: ProjectionScanV1) {
-    let parent: ProjectionFrameV1 = state.frames[parent_index];
-    if parent.kind == 1 {
-        let counted: ProjectionScanV1 = ProjectionScanV1 {
-            ..state,
-            frames: replace(state.frames, parent_index, ProjectionFrameV1 {
-                ..parent, member_count: parent.member_count +% 1
-            })
-        };
-        let selected: ProjectionScanV1 = select(
-            parent.role == 1 && parent.key == 2 && value == 91,
-            select_diagnostic_array(counted, 2),
-            select(
-                parent.role == 1 && parent.key == 3 && value == 91,
-                select_diagnostic_array(counted, 3),
-                counted
-            )
-        );
-        let typed: ProjectionScanV1 = require_field_type(selected, parent, value);
-        let target: byte = select(
-            parent.role == 1 && parent.key == 1 && value != 34
-                && value != 123 && value != 91,
-            1,
-            select(
-                (parent.role == 3 || parent.role == 4) && parent.key == 10
-                    && value != 34 && value != 123 && value != 91,
-                2,
-                select(
-                    parent.role == 5 && parent.key >= 12 && parent.key <= 15
-                        && value != 34 && value != 123 && value != 91,
-                    3, 0
-                )
-            )
-        );
-        return select(
-            target != 0,
-            start_scalar(typed, target, parent.key,
-                parent.role == 4 || parent.related_owner),
-            typed
-        );
-    }
-    return increment_array_parent(state, parent_index, value);
+    let updated_parent: ProjectionFrameV1 = ProjectionFrameV1 {
+        ..parent, member_count: parent.member_count +% 1
+    };
+    let counted: ProjectionScanV1 = ProjectionScanV1 {
+        ..state, frames: replace(state.frames, parent_index, updated_parent)
+    };
+    return select_root_array_value(counted, parent, value);
+}
+
+fn increment_array_parent(
+    state: ProjectionScanV1,
+    parent_index: u64,
+    parent: ProjectionFrameV1,
+    value: byte
+) -> (result: ProjectionScanV1) {
+    let item_count: u64 = parent.member_count +% 1;
+    let diagnostic_object: bool = parent.role == 2 && value == 123;
+    let diagnostic_count: u64 = state.projection.count +% (diagnostic_object as u64);
+    let within_bounds: bool = parent.role != 2
+        || (item_count <= 32 && diagnostic_count <= 32);
+    let updated_parent: ProjectionFrameV1 = ProjectionFrameV1 {
+        ..parent, member_count: item_count
+    };
+    let updated_projection: DiagnosticProjectionV1 = note_diagnostic_object(
+        state.projection, diagnostic_object, diagnostic_count
+    );
+    return ProjectionScanV1 {
+        ..state,
+        frames: replace(state.frames, parent_index, updated_parent),
+        projection: updated_projection,
+        supported: state.supported && within_bounds
+    };
+}
+
+fn note_diagnostic_object(
+    projection: DiagnosticProjectionV1,
+    included: bool,
+    count: u64
+) -> (result: DiagnosticProjectionV1) {
+    if included { return DiagnosticProjectionV1 { ..projection, count: count }; }
+    return projection;
 }
 
 fn begin_value(state: ProjectionScanV1, value: byte) -> (result: ProjectionScanV1) {
     if !begins_value(state, value) { return state; }
     let depth: u64 = state.cursor.depth as u64;
     if depth == 0 {
-        if value == 123 {
-            return ProjectionScanV1 {
-                ..state,
-                projection: DiagnosticProjectionV1 {
-                    ..state.projection, root_is_object: true
-                }
-            };
-        }
+        if value == 123 { return state; }
         if value == 91 {
-            let selected: ProjectionScanV1 = select_diagnostic_array(state, 1);
-            return ProjectionScanV1 { ..selected, selected_kind: 1 };
+            return select_diagnostic_array(state, 1);
         }
         return ProjectionScanV1 { ..state, supported: false };
     }
     let parent_index: u64 = depth -% 1;
-    return count_and_validate_parent_value(state, value, parent_index);
+    let parent: ProjectionFrameV1 = state.frames[parent_index];
+    if parent.kind == 1 {
+        return count_object_member(state, parent_index, parent, value);
+    }
+    return increment_array_parent(state, parent_index, parent, value);
 }
 
 fn role_for_container(
@@ -476,35 +255,16 @@ fn role_for_container(
 ) -> (result: byte) {
     if parent_depth == 0 {
         if value == 123 { return 1; }
-        if value == 91 { return 2; }
+        if value == 91 && state.selected_kind == 1 { return 2; }
         return 0;
     }
     let parent: ProjectionFrameV1 = state.frames[parent_depth -% 1];
-    if value == 123 {
-        if parent.role == 2 { return 3; }
-        if parent.role == 7 { return 4; }
-        if parent.key == 8 && (parent.role == 3 || parent.role == 4) { return 5; }
-        return 0;
-    }
-    if value == 91 {
-        if parent.role == 3 && parent.key == 9 { return 6; }
-        if parent.role == 3 && parent.key == 11 { return 7; }
-        if parent.role == 4 && parent.key == 9 { return 6; }
-        if parent.role == 4 && parent.key == 11 { return 8; }
-        let selected_errors: bool = parent.key == 2 && state.selected_kind == 2;
-        let selected_diagnostics: bool = parent.key == 3 && state.selected_kind == 3;
-        if parent.role == 1 && (selected_errors || selected_diagnostics) {
-            return 2;
-        }
-    }
+    if value == 123 && parent.role == 2 { return 3; }
+    if value == 91 && parent.role == 1 && parent.key == 1
+        && state.selected_kind == 2 { return 2; }
+    if value == 91 && parent.role == 1 && parent.key == 2
+        && state.selected_kind == 3 { return 2; }
     return 0;
-}
-
-fn container_related_owner(state: ProjectionScanV1, parent_depth: u64) -> (result: bool) {
-    // Keep this depth-zero case as control flow: `select` evaluates both arms.
-    if parent_depth == 0 { return false; }
-    let parent: ProjectionFrameV1 = state.frames[parent_depth -% 1];
-    return parent.role == 4 || parent.role == 7 || parent.related_owner;
 }
 
 fn begin_diagnostics_span(
@@ -536,428 +296,14 @@ fn push_container(
         role: role_for_container(state, parent_depth, value),
         key: 0,
         member_count: 0,
-        seen: [false; 16],
-        related_owner: container_related_owner(state, parent_depth)
+        seen: [false; 3]
     };
     return ProjectionScanV1 {
         ..state,
         frames: replace(state.frames, parent_depth, frame),
         projection: begin_diagnostics_span(
-            state.projection,
-            frame.role,
-            state.cursor.position -% 1
+            state.projection, frame.role, state.cursor.position -% 1
         )
-    };
-}
-
-fn decode_text_span(
-    document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64
-) -> (result: TextReadV1) {
-    let decoded: json_order.JsonDecodedStringV1 =
-        json_order.decode_string(document, start, length);
-    if !decoded.valid || decoded.length > 512 {
-        return TextReadV1 { value: [], valid: false };
-    }
-    return TextReadV1 { value: decoded.bytes[0..decoded.length], valid: true };
-}
-
-fn copy_expected_text_step(
-    values: [byte; 128],
-    source: [byte; up_to 512],
-    index: u64
-) -> (result: [byte; 128]) {
-    if index >= source.len || index >= 128 { return values; }
-    return replace(values, index, source[index]);
-}
-
-fn expected_text_value(source: [byte; up_to 512]) -> (result: [byte; up_to 128]) {
-    iterate i up_to 128 carrying values: [byte; 128] = [0; 128] {
-        next values = copy_expected_text_step(values, source, i);
-    }
-    return values[0..source.len];
-}
-
-fn set_main_text(
-    diagnostic: DiagnosticRecordV1,
-    key: byte,
-    value: [byte; up_to 512]
-) -> (result: DiagnosticRecordV1) {
-    if key == 4 { return DiagnosticRecordV1 { ..diagnostic, code: value }; }
-    if key == 5 { return DiagnosticRecordV1 { ..diagnostic, stage: value }; }
-    if key == 6 { return DiagnosticRecordV1 { ..diagnostic, severity: value }; }
-    if key == 7 { return DiagnosticRecordV1 { ..diagnostic, message: value }; }
-    return diagnostic;
-}
-
-fn set_related_text(
-    diagnostic: RelatedDiagnosticRecordV1,
-    key: byte,
-    value: [byte; up_to 512]
-) -> (result: RelatedDiagnosticRecordV1) {
-    if key == 4 { return RelatedDiagnosticRecordV1 { ..diagnostic, code: value }; }
-    if key == 5 { return RelatedDiagnosticRecordV1 { ..diagnostic, stage: value }; }
-    if key == 6 { return RelatedDiagnosticRecordV1 { ..diagnostic, severity: value }; }
-    if key == 7 { return RelatedDiagnosticRecordV1 { ..diagnostic, message: value }; }
-    return diagnostic;
-}
-
-fn set_main_found(
-    diagnostic: DiagnosticRecordV1,
-    value: FoundValueV1
-) -> (result: DiagnosticRecordV1) {
-    return DiagnosticRecordV1 {
-        ..diagnostic,
-        found_kind: value.kind,
-        found_text: value.text,
-        found_negative: value.negative,
-        found_magnitude: value.magnitude,
-        found_boolean: value.boolean
-    };
-}
-
-fn set_related_found(
-    diagnostic: RelatedDiagnosticRecordV1,
-    value: FoundValueV1
-) -> (result: RelatedDiagnosticRecordV1) {
-    return RelatedDiagnosticRecordV1 {
-        ..diagnostic,
-        found_kind: value.kind,
-        found_text: value.text,
-        found_negative: value.negative,
-        found_magnitude: value.magnitude,
-        found_boolean: value.boolean
-    };
-}
-
-fn set_main_span(
-    diagnostic: DiagnosticRecordV1,
-    key: byte,
-    value: u64
-) -> (result: DiagnosticRecordV1) {
-    if key == 12 { return DiagnosticRecordV1 { ..diagnostic, span_start: value }; }
-    if key == 13 { return DiagnosticRecordV1 { ..diagnostic, span_end: value }; }
-    if key == 14 { return DiagnosticRecordV1 { ..diagnostic, span_line: value }; }
-    if key == 15 { return DiagnosticRecordV1 { ..diagnostic, span_column: value }; }
-    return diagnostic;
-}
-
-fn set_related_span(
-    diagnostic: RelatedDiagnosticRecordV1,
-    key: byte,
-    value: u64
-) -> (result: RelatedDiagnosticRecordV1) {
-    if key == 12 { return RelatedDiagnosticRecordV1 { ..diagnostic, span_start: value }; }
-    if key == 13 { return RelatedDiagnosticRecordV1 { ..diagnostic, span_end: value }; }
-    if key == 14 { return RelatedDiagnosticRecordV1 { ..diagnostic, span_line: value }; }
-    if key == 15 { return RelatedDiagnosticRecordV1 { ..diagnostic, span_column: value }; }
-    return diagnostic;
-}
-
-fn append_main_expected(
-    state: ProjectionScanV1,
-    value: TextReadV1
-) -> (result: ProjectionScanV1) {
-    let count: u64 = state.current.expected_count;
-    if !value.valid || value.value.len > 128 || count >= 8 {
-        return ProjectionScanV1 { ..state, supported: false };
-    }
-    let updated: DiagnosticRecordV1 = DiagnosticRecordV1 {
-        ..state.current,
-        expected_values: replace(
-            state.current.expected_values, count, expected_text_value(value.value)
-        ),
-        expected_count: count +% 1
-    };
-    return ProjectionScanV1 { ..state, current: updated };
-}
-
-fn append_related_expected(
-    state: ProjectionScanV1,
-    value: TextReadV1
-) -> (result: ProjectionScanV1) {
-    let count: u64 = state.current_related.expected_count;
-    if !value.valid || value.value.len > 128 || count >= 8 {
-        return ProjectionScanV1 { ..state, supported: false };
-    }
-    let updated: RelatedDiagnosticRecordV1 = RelatedDiagnosticRecordV1 {
-        ..state.current_related,
-        expected_values: replace(
-            state.current_related.expected_values, count,
-            expected_text_value(value.value)
-        ),
-        expected_count: count +% 1
-    };
-    return ProjectionScanV1 { ..state, current_related: updated };
-}
-
-fn string_closed(
-    state: ProjectionScanV1,
-    document: json_order.JsonTokenDocumentV1
-) -> (result: ProjectionScanV1) {
-    let depth: u64 = state.cursor.depth as u64;
-    if depth == 0 { return state; }
-    let index: u64 = depth -% 1;
-    let parent: ProjectionFrameV1 = state.frames[index];
-    let length: u64 = state.cursor.string_end -% state.cursor.string_start;
-    let text: TextReadV1 = decode_text_span(
-        document, state.cursor.string_start, length
-    );
-    if parent.role == 6 {
-        return select(
-            parent.related_owner,
-            append_related_expected(state, text),
-            append_main_expected(state, text)
-        );
-    }
-    if parent.role == 3 || parent.role == 4 {
-        if parent.key >= 4 && parent.key <= 7 {
-            if !text.valid {
-                return ProjectionScanV1 { ..state, supported: false };
-            }
-            if parent.role == 3 {
-                return ProjectionScanV1 {
-                    ..state, current: set_main_text(state.current, parent.key, text.value)
-                };
-            }
-            return ProjectionScanV1 {
-                ..state,
-                current_related: set_related_text(
-                    state.current_related, parent.key, text.value
-                )
-            };
-        }
-        if parent.key == 10 {
-            let found: FoundValueV1 = FoundValueV1 {
-                kind: 2, text: text.value, negative: false,
-                magnitude: 0, boolean: text.valid
-            };
-            return select(
-                text.valid,
-                select(
-                    parent.role == 3,
-                    ProjectionScanV1 { ..state, current: set_main_found(state.current, found) },
-                    ProjectionScanV1 {
-                        ..state,
-                        current_related: set_related_found(state.current_related, found)
-                    }
-                ),
-                ProjectionScanV1 { ..state, supported: false }
-            );
-        }
-    }
-    return state;
-}
-
-fn unsigned_byte(state: UnsignedScanV1, value: byte) -> (result: UnsignedScanV1) {
-    let digit: u64 = (value as u64) -% 48;
-    let digit_valid: bool = value >= 48 && value <= 57;
-    let safe: bool = state.value < 1844674407370955161
-        || (state.value == 1844674407370955161 && digit <= 5);
-    if !digit_valid || !safe || state.digits >= 20 {
-        return UnsignedScanV1 { ..state, valid: false };
-    }
-    return UnsignedScanV1 {
-        value: state.value *% 10 +% digit,
-        digits: state.digits +% 1,
-        valid: state.valid
-    };
-}
-
-fn unsigned_raw_step(
-    state: UnsignedScanV1,
-    document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64,
-    index: u64
-) -> (result: UnsignedScanV1) {
-    if index >= length { return state; }
-    return unsigned_byte(state, json_order.located_byte(document, start +% index));
-}
-
-fn unsigned_raw(
-    document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64
-) -> (result: UnsignedScanV1) {
-    let initial: UnsignedScanV1 = UnsignedScanV1 {
-        value: 0, digits: 0, valid: length > 0 && length <= 20
-    };
-    iterate i up_to 20 carrying scanned: UnsignedScanV1 = initial {
-        next scanned = unsigned_raw_step(scanned, document, start, length, i);
-    }
-    return UnsignedScanV1 {
-        ..scanned, valid: scanned.valid && scanned.digits == length
-    };
-}
-
-fn raw_token_is(
-    document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64,
-    expected: [byte; up_to 8]
-) -> (result: bool) {
-    if length != expected.len { return false; }
-    iterate i over expected carrying equal: bool = true {
-        next equal = equal && json_order.located_byte(document, start +% i) == expected[i];
-    }
-    return equal;
-}
-
-fn found_raw_token(
-    document: json_order.JsonTokenDocumentV1,
-    start: u64,
-    length: u64
-) -> (result: FoundValueV1) {
-    if raw_token_is(document, start, length, [110,117,108,108]) {
-        return FoundValueV1 {
-            kind: 1, text: [], negative: false, magnitude: 0, boolean: false
-        };
-    }
-    if raw_token_is(document, start, length, [116,114,117,101]) {
-        return FoundValueV1 {
-            kind: 3, text: [], negative: false, magnitude: 0, boolean: true
-        };
-    }
-    if raw_token_is(document, start, length, [102,97,108,115,101]) {
-        return FoundValueV1 {
-            kind: 3, text: [], negative: false, magnitude: 0, boolean: false
-        };
-    }
-    let negative: bool = length > 1 && json_order.located_byte(document, start) == 45;
-    let sign_width: u64 = select(negative, 1, 0);
-    let number: UnsignedScanV1 = unsigned_raw(
-        document, start +% sign_width, length -% sign_width
-    );
-    if number.valid {
-        return FoundValueV1 {
-            kind: 4, text: [], negative: negative,
-            magnitude: number.value, boolean: false
-        };
-    }
-    return FoundValueV1 {
-        kind: 0, text: [], negative: false, magnitude: 0, boolean: false
-    };
-}
-
-fn scalar_finished(
-    state: ProjectionScanV1,
-    document: json_order.JsonTokenDocumentV1,
-    end: u64
-) -> (result: ProjectionScanV1) {
-    if !state.scalar_active { return state; }
-    let length: u64 = end -% state.scalar_start;
-    let raw: ProjectionScanV1 = ProjectionScanV1 {
-        ..state, scalar_active: false, scalar_target: 0
-    };
-    if state.scalar_target == 1 {
-        let is_true: bool = raw_token_is(
-            document, state.scalar_start, length, [116,114,117,101]
-        );
-        return ProjectionScanV1 {
-            ..raw,
-            projection: DiagnosticProjectionV1 {
-                ..raw.projection, valid_field_is_true: is_true
-            }
-        };
-    }
-    if state.scalar_target == 2 {
-        let found: FoundValueV1 = found_raw_token(
-            document, state.scalar_start, length
-        );
-        let updated: ProjectionScanV1 = select(
-            state.scalar_related_owner,
-            ProjectionScanV1 {
-                ..raw,
-                current_related: set_related_found(state.current_related, found)
-            },
-            ProjectionScanV1 {
-                ..raw, current: set_main_found(state.current, found)
-            }
-        );
-        return ProjectionScanV1 {
-            ..updated,
-            supported: updated.supported && found.kind != 0
-        };
-    }
-    if state.scalar_target == 3 {
-        let number: UnsignedScanV1 = unsigned_raw(
-            document, state.scalar_start, length
-        );
-        if !number.valid { return ProjectionScanV1 { ..raw, supported: false }; }
-        let updated: ProjectionScanV1 = select(
-            state.scalar_related_owner,
-            ProjectionScanV1 {
-                ..raw,
-                current_related: set_related_span(
-                    state.current_related, state.scalar_key, number.value
-                )
-            },
-            ProjectionScanV1 {
-                ..raw,
-                current: set_main_span(state.current, state.scalar_key, number.value)
-            }
-        );
-        return updated;
-    }
-    return raw;
-}
-
-fn scalar_boundary(value: byte) -> (result: bool) {
-    return json.is_space(value) || value == 44 || value == 93 || value == 125;
-}
-
-fn all_diagnostic_fields_seen(frame: ProjectionFrameV1) -> (result: bool) {
-    return frame.seen[4] && frame.seen[5] && frame.seen[6] && frame.seen[7]
-        && frame.seen[8] && frame.seen[9] && frame.seen[10];
-}
-
-fn append_main_diagnostic(
-    state: ProjectionScanV1,
-    frame: ProjectionFrameV1
-) -> (result: ProjectionScanV1) {
-    let related_present: bool = frame.seen[11];
-    let field_count_valid: bool = frame.member_count == 7 +% (related_present as u64);
-    let valid: bool = all_diagnostic_fields_seen(frame) && field_count_valid
-        && state.current.related_field_present == related_present;
-    if !valid || state.projection.count >= 32 {
-        return ProjectionScanV1 { ..state, supported: false };
-    }
-    return ProjectionScanV1 {
-        ..state,
-        projection: DiagnosticProjectionV1 {
-            ..state.projection,
-            count: state.projection.count +% 1
-        },
-        current: empty_diagnostic()
-    };
-}
-
-fn append_related_diagnostic(
-    state: ProjectionScanV1,
-    frame: ProjectionFrameV1
-) -> (result: ProjectionScanV1) {
-    let related_present: bool = frame.seen[11];
-    let field_count_valid: bool = frame.member_count == 7 +% (related_present as u64);
-    let valid: bool = all_diagnostic_fields_seen(frame) && field_count_valid
-        && state.current_related.related_field_present == related_present;
-    if !valid || state.current.related_count >= 4 {
-        return ProjectionScanV1 { ..state, supported: false };
-    }
-    let diagnostic: RelatedDiagnosticRecordV1 = RelatedDiagnosticRecordV1 {
-        ..state.current_related, valid: true
-    };
-    return ProjectionScanV1 {
-        ..state,
-        current: DiagnosticRecordV1 {
-            ..state.current,
-            related: replace(
-                state.current.related, state.current.related_count, diagnostic
-            ),
-            related_count: state.current.related_count +% 1
-        },
-        current_related: empty_related_diagnostic()
     };
 }
 
@@ -967,39 +313,7 @@ fn close_frame(
     event: byte
 ) -> (result: ProjectionScanV1) {
     if parent_depth == 0 { return ProjectionScanV1 { ..state, supported: false }; }
-    let index: u64 = parent_depth -% 1;
-    let frame: ProjectionFrameV1 = state.frames[index];
-    if event == 7 && frame.role == 3 {
-        return append_main_diagnostic(state, frame);
-    }
-    if event == 7 && frame.role == 4 {
-        return append_related_diagnostic(state, frame);
-    }
-    if event == 7 && frame.role == 5 {
-        let valid: bool = frame.member_count == 4 && frame.seen[12]
-            && frame.seen[13] && frame.seen[14] && frame.seen[15];
-        return ProjectionScanV1 {
-            ..state, supported: state.supported && valid
-        };
-    }
-    if event == 8 && frame.role == 8 && frame.member_count != 0 {
-        return ProjectionScanV1 { ..state, supported: false };
-    }
-    if event == 8 && frame.role == 6 {
-        let count: u64 = select(frame.related_owner,
-            state.current_related.expected_count, state.current.expected_count);
-        return ProjectionScanV1 {
-            ..state,
-            supported: state.supported && count == frame.member_count
-        };
-    }
-    if event == 8 && frame.role == 7 {
-        let valid: bool = frame.member_count <= 4
-            && state.current.related_count == frame.member_count;
-        return ProjectionScanV1 {
-            ..state, supported: state.supported && valid
-        };
-    }
+    let frame: ProjectionFrameV1 = state.frames[parent_depth -% 1];
     if event == 8 && frame.role == 2 {
         return ProjectionScanV1 {
             ..state,
@@ -1008,7 +322,8 @@ fn close_frame(
                 diagnostics_json_length: state.cursor.position
                     -% state.projection.diagnostics_json_start
             },
-            supported: state.supported && frame.member_count <= 64
+            supported: state.supported && frame.member_count <= 32
+                && state.projection.count <= 32
         };
     }
     return state;
@@ -1020,7 +335,6 @@ fn observe_event(
     document: json_order.JsonTokenDocumentV1
 ) -> (result: ProjectionScanV1) {
     if state.cursor.event == 2 { return key_closed(state, document); }
-    if state.cursor.event == 4 { return string_closed(state, document); }
     if state.cursor.event == 5 || state.cursor.event == 6 {
         return push_container(state, parent_depth, json_order.located_byte(
             document, state.cursor.position -% 1
@@ -1037,13 +351,8 @@ fn scan_byte(
     value: byte,
     document: json_order.JsonTokenDocumentV1
 ) -> (result: ProjectionScanV1) {
-    let finished: ProjectionScanV1 = select(
-        state.scalar_active && scalar_boundary(value),
-        scalar_finished(state, document, state.cursor.position),
-        state
-    );
-    let parent_depth: u64 = finished.cursor.depth as u64;
-    let started: ProjectionScanV1 = begin_value(finished, value);
+    let parent_depth: u64 = state.cursor.depth as u64;
+    let started: ProjectionScanV1 = begin_value(state, value);
     let cursor: json_cursor.Cursor = json_cursor.feed_byte(started.cursor, value);
     let syntax: json.ScanState = json.scan_step(started.syntax, value);
     let advanced: ProjectionScanV1 = ProjectionScanV1 {
@@ -1086,10 +395,7 @@ fn scan_document(
     iterate i over document.chunks carrying scanned: ProjectionScanV1 = initial_projection_scan() {
         next scanned = scan_chunk(scanned, document.chunks[i], document);
     }
-    let finished: ProjectionScanV1 = scalar_finished(
-        scanned, document, document.byte_length
-    );
-    return finished;
+    return scanned;
 }
 
 fn projection_is_valid(
@@ -1105,7 +411,7 @@ fn projection_is_valid(
     let span_valid: bool = select(
         scanned.selected_kind == 0,
         !scanned.projection.diagnostics_json_present && scanned.projection.count == 0,
-        span_in_bounds
+        span_in_bounds && scanned.projection.count <= 32
     );
     return scanned.supported && syntax.valid && syntax.depth == 0
         && syntax.mode == 0 && syntax.expect == 7

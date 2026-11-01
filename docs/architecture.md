@@ -160,6 +160,16 @@ budget declines still use the compatibility parser. Differential checks cover
 Unicode, related diagnostics, empty arrays, no-array objects, and preservation
 of unsupported values through fallback.
 
+P-068 removes the now-redundant per-field typed pass from the span projector.
+The native scanner validates JSON syntax and root selection metadata, counts
+at most 32 direct object entries across at most 32 selected-array items, and
+returns the same bounded source span. Arbitrary valid JSON values inside a
+diagnostic object now stay intact for the one public-value decode; mixed arrays
+retain the previous behavior of returning object entries only. The native
+scanner no longer stores decoded diagnostic strings, span fields, expected
+tokens, or related-record arrays. Invalid documents, excessive nesting, and
+over-bound arrays still decline atomically to the compatibility parser.
+
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite
 result policy. Retained-session batches are projected into bounded cases and
