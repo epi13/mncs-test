@@ -1025,3 +1025,18 @@ the existing compatibility path. Independent nested-value expectations,
 transport and projection regressions, the live self-suite, and the expected
 runtime-failure runner case verify the new path and its fallback-facing
 semantics.
+
+P-050 batches retained `TestResult` values through the Test-owned
+`mncs.test.suite::observe_many` function. Python groups at most 16 values and
+keeps each group within the 65,536-byte input bound, then splices the original
+native JSON value fragments inside the MNCS typed sequence representation.
+The native suite reducer folds the group without rebuilding the TestResult
+trees in Python, reducing the seven-result self-suite from eight aggregation
+calls to two (the empty summary initializer and one `observe_many` call).
+The first live attempt exposed that a plain JSON list is not an
+`ExecutionValue` sequence; the adapter now uses the same `sequence.values`
+shape as the MNCS ABI. A transport test checks the typed shape and exact raw
+fragment preservation, while live self-suite and first-class assertion-failure
+regressions verify native counters and summary authority. The changed suite
+interface identity is reflected in the dependent result-summary application
+descriptor.

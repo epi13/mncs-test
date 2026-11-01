@@ -33,6 +33,7 @@ from family_contract import (
     validate_plan,
 )
 from mncs_test_native import (
+    EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES,
     EXECUTION_ADJUDICATION_MAX_CASES,
     EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES,
     EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS,
@@ -6069,43 +6070,61 @@ def execute_batch(
     return results
 
 
-def _suite_observe_with_raw_value(
+def _suite_observe_many_with_values(
     *,
     session: EmbedSession,
     summary_value: dict[str, Any],
-    returned_value_json: bytes,
+    values: list[Any],
     step_budget: int,
     index: int,
 ) -> dict[str, Any]:
+    if not 1 <= len(values) <= 16:
+        raise AdapterError("native suite.observe_many accepts one through 16 TestResult values")
+    request_values: list[Any] = []
+    fragments: list[tuple[str, bytes]] = []
+    for offset, value in enumerate(values):
+        if isinstance(value, bytes):
+            marker = _native_json_fragment_marker(value, index + offset)
+            request_values.append(marker)
+            fragments.append((marker, value))
+        else:
+            request_values.append(value)
     request = {
         "module": "mncs.test.suite",
-        "function": "observe",
-        "args": [summary_value, _native_json_fragment_marker(returned_value_json, index)],
+        "function": "observe_many",
+        "args": [summary_value, _host_sequence(request_values)],
         "step_budget": step_budget,
     }
-    marker = request["args"][1]
     if callable(getattr(session, "call_batch_request_document", None)):
-        request_document = _compact_json_with_raw_fragments(
-            [request], [(marker, returned_value_json)]
+        request_document = (
+            _compact_json_with_raw_fragments([request], fragments)
+            if fragments else compact_json([request]).encode("utf-8")
         )
+        if len(request_document) > EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES + 4096:
+            raise AdapterError("native suite.observe_many request exceeds its bounded document")
         response_document = session.call_batch_request_document(
             request_document, request_count=1
         )
         try:
             outputs = json.loads(response_document.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AdapterError(f"mncs-embed suite.observe response is invalid JSON: {error}") from error
+            raise AdapterError(f"mncs-embed suite.observe_many response is invalid JSON: {error}") from error
         if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict):
-            raise AdapterError("mncs-embed suite.observe response is not one call output")
+            raise AdapterError("mncs-embed suite.observe_many response is not one call output")
         return outputs[0]
-    try:
-        returned_value = json.loads(returned_value_json.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AdapterError(f"native returned value fragment is invalid JSON: {error}") from error
-    request["args"][1] = returned_value
+    for offset, value in enumerate(values):
+        if not isinstance(value, bytes):
+            continue
+        try:
+            request_values[offset] = json.loads(value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterError(f"native returned value fragment is invalid JSON: {error}") from error
+    request_document = compact_json([request]).encode("utf-8")
+    if len(request_document) > EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES + 4096:
+        raise AdapterError("native suite.observe_many request exceeds its bounded document")
     outputs = session.call_batch([request])
     if len(outputs) != 1 or not isinstance(outputs[0], dict):
-        raise AdapterError("retained MNCS suite.observe returned an invalid output count")
+        raise AdapterError("retained MNCS suite.observe_many returned an invalid output count")
     return outputs[0]
 
 
@@ -6120,11 +6139,10 @@ def native_suite_fold(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Fold native TestResult values through the MNCS suite module.
 
-    The host carries returned ABI values between retained-session calls but
-    never recomputes the suite verdict or failure counters.  A missing native
-    value is a transport/compatibility condition: callers may retain the
-    legacy adapter projection for external fixtures, but a normal
-    first-class declaration path should have a complete native fold.
+    The host sends up to 16 returned values to each retained-session call but
+    never recomputes the suite verdict or failure counters. Raw native values
+    stay JSON fragments between the embed ABI and MNCS. Compatibility values
+    can share the same bounded native fold after normal typed-value transport.
     """
 
     if not test_results:
@@ -6177,37 +6195,48 @@ def native_suite_fold(
         summary_value = empty_returned[0]
         summary_output = empty_output
         calls = 1
-        for index, value in enumerate(native_values):
-            if isinstance(value, bytes):
-                summary_output = _suite_observe_with_raw_value(
-                    session=session,
-                    summary_value=summary_value,
-                    returned_value_json=value,
-                    step_budget=step_budget,
-                    index=index,
-                )
-            else:
-                summary_output = session.call_batch(
-                    [
-                        {
-                            "module": "mncs.test.suite",
-                            "function": "observe",
-                            "args": [summary_value, value],
-                            "step_budget": step_budget,
-                        }
-                    ]
-                )[0]
+        batch_count = 0
+        start = 0
+        while start < len(native_values):
+            values: list[Any] = []
+            value_bytes = 0
+            while start + len(values) < len(native_values) and len(values) < 16:
+                candidate = native_values[start + len(values)]
+                if isinstance(candidate, bytes):
+                    candidate_size = len(candidate)
+                else:
+                    try:
+                        candidate_size = len(compact_json(candidate).encode("utf-8"))
+                    except (RecursionError, TypeError, ValueError, UnicodeEncodeError) as error:
+                        raise AdapterError(f"native suite value cannot be transported: {error}") from error
+                if candidate_size > EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES:
+                    raise AdapterError("native suite value exceeds its bounded input document")
+                if values and value_bytes + candidate_size > EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES:
+                    break
+                values.append(candidate)
+                value_bytes += candidate_size
+            summary_output = _suite_observe_many_with_values(
+                session=session,
+                summary_value=summary_value,
+                values=values,
+                step_budget=step_budget,
+                index=start,
+            )
             calls += 1
             returned = summary_output.get("returned") if isinstance(summary_output, dict) else None
             if summary_output.get("status") != "returned" or not isinstance(returned, list) or len(returned) != 1:
                 return None, {
                     "authority": "mncs.test.suite",
                     "status": "unavailable",
-                    "reason": "suite.observe did not return a native SuiteSummary value",
+                    "reason": "suite.observe_many did not return a native SuiteSummary value",
                     "call_index": calls - 1,
+                    "batch_start": start,
+                    "batch_count": len(values),
                     "output": summary_output,
                 }
             summary_value = returned[0]
+            start += len(values)
+            batch_count += 1
         projected_summaries, projection_stats = native_result_projection_batch(
             [summary_output], kind=2, mncs=mncs, cwd=cwd, environment=environment
         )
@@ -6226,9 +6255,11 @@ def native_suite_fold(
             "authority": "mncs.test.suite",
             "module": "mncs.test.suite",
             "initializer": "empty",
-            "observer": "observe",
+            "observer": "observe_many",
             "status": "returned",
             "calls": calls,
+            "batch_size": 16,
+            "batches": batch_count,
             "summary_projection": projection_authority,
             "summary_projection_native_calls": projection_stats["calls"],
         }

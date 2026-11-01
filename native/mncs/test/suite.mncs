@@ -108,6 +108,18 @@ fn observe(summary: SuiteSummary, test: TestResult) -> (result: SuiteSummary) {
     };
 }
 
+// Retained-session consumers fold bounded groups to avoid one host-visible
+// SuiteSummary round trip for every TestResult value.
+fn observe_many(
+    summary: SuiteSummary,
+    tests: [TestResult; up_to 16]
+) -> (result: SuiteSummary) {
+    iterate i over tests carrying current: SuiteSummary = summary {
+        next current = observe(current, tests[i]);
+    }
+    return current;
+}
+
 fn observe_failure(summary: SuiteSummary, kind: FailureKind, test: TestResult) -> (result: SuiteSummary) {
     let failed: SuiteSummary = SuiteSummary { ..summary, failed: summary.failed +% 1 };
     return match kind {

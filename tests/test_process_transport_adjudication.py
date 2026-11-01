@@ -253,6 +253,44 @@ def test_raw_result_json_fragment_splice_preserves_nested_value() -> None:
     }
 
 
+def test_suite_observe_many_sends_raw_returned_values_in_one_request() -> None:
+    class RawDocumentSession:
+        timings: list[dict[str, object]] = []
+        request_document: bytes | None = None
+        request_count = 0
+
+        def call_batch_request_document(
+            self, request_document: bytes, *, request_count: int = 1
+        ) -> bytes:
+            self.request_document = request_document
+            self.request_count = request_count
+            return b'[{"status":"returned","returned":[{"summary":"next"}]}]'
+
+    values = [
+        json.dumps(_returned_pass_result(), separators=(",", ":")).encode(),
+        json.dumps(_returned_pass_result(), separators=(",", ":")).encode(),
+    ]
+    session = RawDocumentSession()
+    output = mncs_test._suite_observe_many_with_values(
+        session=session,  # type: ignore[arg-type]
+        summary_value={"summary": "before"},
+        values=values,
+        step_budget=4096,
+        index=0,
+    )
+
+    assert session.request_count == 1
+    assert output == {"status": "returned", "returned": [{"summary": "next"}]}
+    request = json.loads(session.request_document or b"")[0]
+    assert request["function"] == "observe_many"
+    assert request["args"][0] == {"summary": "before"}
+    assert request["args"][1] == {
+        "sequence": {"values": [_returned_pass_result(), _returned_pass_result()]}
+    }
+    for value in values:
+        assert value in (session.request_document or b"")
+
+
 @pytest.mark.parametrize(
     ("process", "expected_class", "expected_message"),
     [

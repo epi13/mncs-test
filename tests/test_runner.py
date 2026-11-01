@@ -665,7 +665,13 @@ class RunnerTests(unittest.TestCase):
                 document["execution"]["native_aggregation"]["authority"],
                 "mncs.test.suite",
             )
-            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 8)
+            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 2)
+            self.assertEqual(
+                document["execution"]["native_aggregation"]["observer"],
+                "observe_many",
+            )
+            self.assertEqual(document["execution"]["native_aggregation"]["batch_size"], 16)
+            self.assertEqual(document["execution"]["native_aggregation"]["batches"], 1)
             self.assertEqual(
                 document["execution"]["native_aggregation"]["summary_projection"],
                 "mncs.test.native_result_projection_v1",
@@ -1382,6 +1388,8 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(document["summary"]["authority"], "native_suite")
             self.assertEqual(document["native_suite_summary"]["failed"], 1)
             self.assertEqual(document["native_suite_summary"]["assertion_failures"], 1)
+            self.assertEqual(document["execution"]["native_aggregation"]["observer"], "observe_many")
+            self.assertEqual(document["execution"]["native_aggregation"]["calls"], 2)
             self.assertEqual(
                 document["execution"]["native_aggregation"]["status"],
                 "returned",
