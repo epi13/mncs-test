@@ -39,8 +39,10 @@ from mncs_test_native import (
     NativeBudgetExhaustedError,
     NativeInputBoundError,
     NativeTransportError,
+    normalize_native_result_projection,
     run_exact_test_identity_selection,
     run_execution_adjudication,
+    run_execution_batch_envelope_adjudication,
     run_execution_envelope_adjudication,
     run_execution_result_adjudication,
     run_native_app,
@@ -1370,6 +1372,31 @@ def compact_json(value: Any, *, sort_keys: bool = True) -> str:
     return json.dumps(value, sort_keys=sort_keys, separators=(",", ":"), ensure_ascii=False)
 
 
+def _native_json_fragment_marker(fragment: bytes, index: int) -> str:
+    nonce = os.urandom(16).hex()
+    digest = hashlib.sha256(fragment).hexdigest()
+    return f"\x00mncs.test.raw-json:{index}:{digest}:{nonce}\x00"
+
+
+def _compact_json_with_raw_fragments(
+    value: Any,
+    fragments: list[tuple[str, bytes]],
+) -> bytes:
+    """Compact ordinary fields and splice trusted native JSON spans verbatim."""
+    try:
+        source = compact_json(value).encode("utf-8")
+    except (RecursionError, TypeError, ValueError, UnicodeEncodeError) as error:
+        raise AdapterError(f"cannot encode public result around native JSON fragments: {error}") from error
+    for marker, fragment in fragments:
+        if not isinstance(fragment, bytes) or not fragment:
+            raise AdapterError("native JSON fragment is empty or not bytes")
+        needle = json.dumps(marker, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if source.count(needle) != 1:
+            raise AdapterError("native JSON fragment marker is missing or ambiguous")
+        source = source.replace(needle, fragment, 1)
+    return source
+
+
 def compiler_inventory_identity(inventory: dict[str, Any]) -> str:
     """Bind the compiler inventory without transport/path metadata.
 
@@ -2001,106 +2028,8 @@ def _compatibility_native_suite_summary(execution: dict[str, Any]) -> dict[str, 
     }
 
 
-def _native_projection_text(item: dict[str, Any], field: str, length_field: str) -> str | None:
-    value = item.get(field)
-    length = item.get(length_field)
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or type(length) is not int
-        or not 0 <= length <= 64
-        or value[length:] != "\x00" * (64 - length)
-    ):
-        return None
-    text = value[:length]
-    return text if text.isascii() else None
-
-
-def _native_projection_array(
-    item: dict[str, Any], field: str, length: int, *, boolean: bool
-) -> list[int] | list[bool] | None:
-    value = item.get(field)
-    if not isinstance(value, list) or len(value) != length:
-        return None
-    if boolean:
-        return value if all(type(entry) is bool for entry in value) else None
-    return value if all(type(entry) is int for entry in value) else None
-
-
 def _native_result_projection_value(item: Any, kind: int) -> dict[str, Any] | None:
-    if (
-        not isinstance(item, dict)
-        or type(item.get("kind")) is not int
-        or item.get("kind") != kind
-        or item.get("supported") is not True
-    ):
-        return None
-    verdict = _native_projection_text(item, "verdict", "verdict_length")
-    present = _native_projection_array(item, "unsigned_present", 16, boolean=True)
-    values = _native_projection_array(item, "unsigned_values", 16, boolean=False)
-    signed_present = _native_projection_array(item, "signed_present", 2, boolean=True)
-    signed_values = _native_projection_array(item, "signed_values", 2, boolean=False)
-    if None in (verdict, present, values, signed_present, signed_values):
-        return None
-
-    def optional_unsigned(index: int) -> int | None:
-        return values[index] if present[index] else None  # type: ignore[index]
-
-    def optional_signed(index: int) -> int | None:
-        return signed_values[index] if signed_present[index] else None  # type: ignore[index]
-
-    if kind == 1:
-        failure_name = _native_projection_text(
-            item, "failure_kind_name", "failure_kind_name_length"
-        )
-        failure_kind = _native_projection_text(
-            item, "failure_kind", "failure_kind_length"
-        )
-        if (
-            verdict not in {"PASS", "FAIL", "SKIP", "UNSUPPORTED"}
-            or failure_name is None
-            or not failure_name
-            or failure_kind is None
-        ):
-            return None
-        return {
-            "verdict": verdict,
-            "verdict_code": optional_unsigned(0),
-            "failure_kind": "none" if failure_name == "NoFailure" else failure_kind,
-            "failure_kind_name": failure_name,
-            "failure_kind_code": optional_unsigned(1),
-            "failure_code": optional_unsigned(2),
-            "assertions": optional_unsigned(3),
-            "failures": optional_unsigned(4),
-            "expected": optional_signed(0),
-            "actual": optional_signed(1),
-            "assertion_code": optional_unsigned(5),
-        }
-
-    if kind != 2 or verdict not in {"PASS", "FAIL", "UNSUPPORTED"}:
-        return None
-    names = (
-        "total",
-        "passed",
-        "failed",
-        "skipped",
-        "unsupported",
-        "assertion_failures",
-        "setup_failures",
-        "compile_failures",
-        "runtime_failures",
-        "timeout_failures",
-        "infrastructure_failures",
-        "assertion_count",
-        "failure_count",
-    )
-    if any(not present[index] for index in range(1, 14)):
-        return None
-    return {
-        "verdict": verdict,
-        "verdict_code": optional_unsigned(0),
-        **{name: values[index + 1] for index, name in enumerate(names)},
-    }
+    return normalize_native_result_projection(item, kind)
 
 
 def native_result_projection_batch(
@@ -4756,6 +4685,22 @@ class EmbedSession:
         finally:
             self.library.mncs_response_free(handle)
 
+    def _response_document(self, handle: Any) -> bytes:
+        """Copy one UTF-8 C ABI response without building a host JSON tree."""
+        if not handle:
+            raise AdapterError(self.last_error())
+        try:
+            payload = self.library.mncs_response_text(handle)
+            if not payload:
+                raise AdapterError("mncs-embed returned an empty response")
+            try:
+                payload.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise AdapterError(f"mncs-embed returned invalid UTF-8: {error}") from error
+            return bytes(payload)
+        finally:
+            self.library.mncs_response_free(handle)
+
     def info(self) -> dict[str, Any]:
         started = time.perf_counter()
         value = self._response(self.library.mncs_session_info(self.handle))
@@ -4788,6 +4733,37 @@ class EmbedSession:
             "request_bytes": len(encoded),
         })
         return value
+
+    def call_batch_document(self, requests: list[dict[str, Any]]) -> bytes:
+        """Return the native batch response bytes for MNCS-side projection."""
+        encoded = compact_json(requests).encode("utf-8")
+        return self.call_batch_request_document(encoded, request_count=len(requests))
+
+    def call_batch_request_document(
+        self,
+        request_document: bytes,
+        *,
+        request_count: int = 1,
+    ) -> bytes:
+        """Call the retained session with a JSON request containing raw value spans."""
+        started = time.perf_counter()
+        if not isinstance(request_document, bytes):
+            raise AdapterError("mncs-embed batch request document must be UTF-8 bytes")
+        try:
+            request_document.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AdapterError(f"mncs-embed batch request is invalid UTF-8: {error}") from error
+        response = self.library.mncs_session_call_batch(self.handle, request_document)
+        document = self._response_document(response)
+        self.timings.append({
+            "phase": "native_call_batch",
+            "wall_time_ms": round((time.perf_counter() - started) * 1000, 3),
+            "request_count": request_count,
+            "request_bytes": len(request_document),
+            "response_bytes": len(document),
+            "response_decoded": False,
+        })
+        return document
 
     def close(self) -> None:
         if self.handle:
@@ -5870,8 +5846,65 @@ def execute_batch(
         }
         artifacts.items.append(request_artifact)
         request_artifacts.append(request_artifact)
+    native_batch_rows: list[dict[str, Any]] | None = None
+    raw_fragments_by_index: dict[int, tuple[str, bytes, bytes | None]] = {}
     try:
-        decoded = session.call_batch(transport_requests)
+        call_batch_document = getattr(session, "call_batch_document", None)
+        if callable(call_batch_document):
+            response_document = call_batch_document(transport_requests)
+            batch_cases = [
+                {
+                    "expected_status": expected_status_for(test) or "",
+                    "suite": suite,
+                    "kind": 2 if suite else 1,
+                }
+                for test in tests
+            ]
+            try:
+                native_batch_rows = run_execution_batch_envelope_adjudication(
+                    response_document,
+                    batch_cases,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                )
+            except (NativeTransportError, OSError, subprocess.TimeoutExpired):
+                native_batch_rows = None
+            if native_batch_rows is not None:
+                decoded = []
+                for index, row in enumerate(native_batch_rows):
+                    returned_json = row["returned_json"]
+                    if not isinstance(returned_json, bytes):
+                        raise AdapterError("native batch envelope omitted its returned JSON fragment")
+                    marker = _native_json_fragment_marker(returned_json, index)
+                    decoded.append({
+                        "status": row["status"],
+                        **row["execution"],
+                        "returned": marker,
+                    })
+                    returned_value_json = None
+                    if row["projection_attempted"]:
+                        if (not returned_json.startswith(b"[")
+                                or not returned_json.endswith(b"]")
+                                or returned_json[1:-1] == b""):
+                            raise AdapterError(
+                                "native batch envelope returned an invalid single-value JSON array"
+                            )
+                        returned_value_json = returned_json[1:-1]
+                    raw_fragments_by_index[index] = (
+                        marker,
+                        returned_json,
+                        returned_value_json,
+                    )
+            else:
+                try:
+                    decoded = json.loads(response_document.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise AdapterError(f"mncs-embed batch response is invalid JSON: {error}") from error
+                if not isinstance(decoded, list) or not all(isinstance(item, dict) for item in decoded):
+                    raise AdapterError("mncs-embed batch response is not an array of call outputs")
+        else:
+            decoded = session.call_batch(transport_requests)
         transport["timing"] = session.timings[-1] if session.timings else None
     except AdapterError as error:
         results = []
@@ -5897,30 +5930,52 @@ def execute_batch(
     native_projection_by_index: dict[int, dict[str, Any] | None] = {}
     native_projection_attempted_by_index: dict[int, bool] = {}
     adjudication_by_index: dict[int, dict[str, Any]] = {}
-    combined_results, combined_stats = native_execution_result_adjudication_batch(
-        [decoded[index] for index in adjudication_indices],
-        [tests[index] for index in adjudication_indices],
-        suite=suite,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )
+    if native_batch_rows is not None:
+        returned_candidates = 0
+        for index, row in enumerate(native_batch_rows):
+            process_result = row["process"]
+            outcome = process_result.get("execution") if isinstance(process_result, dict) else None
+            if not isinstance(outcome, dict):
+                raise AdapterError("native batch envelope omitted execution adjudication")
+            adjudication_by_index[index] = outcome
+            native_projection_by_index[index] = row["native_result"]
+            native_projection_attempted_by_index[index] = row["projection_attempted"]
+            returned_candidates += int(row["projection_attempted"] is True)
+        combined_results: list[dict[str, Any] | None] = []
+        combined_stats = {
+            "calls": 1,
+            "case_count": len(adjudication_indices),
+            "projection_calls": int(returned_candidates > 0),
+            "projection_candidates": returned_candidates,
+            "projection_native": returned_candidates,
+            "projection_unsupported": 0,
+        }
+    else:
+        combined_results, combined_stats = native_execution_result_adjudication_batch(
+            [decoded[index] for index in adjudication_indices],
+            [tests[index] for index in adjudication_indices],
+            suite=suite,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
     legacy_projection_stats = {"calls": 0, "candidates": 0, "projected": 0, "unsupported": 0}
     legacy_adjudication_calls = 0
     legacy_indices: list[int] = []
-    for index, row in zip(adjudication_indices, combined_results, strict=True):
-        if row is None:
-            legacy_indices.append(index)
-            continue
-        process_decision = row["process"]
-        if process_decision["terminal"] or process_decision["decision"] != "continue":
-            raise AdapterError("retained MNCS result was unexpectedly classified as a process failure")
-        outcome = process_decision["execution"]
-        if not isinstance(outcome, dict):
-            raise AdapterError("native execution result adjudication omitted its outcome")
-        adjudication_by_index[index] = outcome
-        native_projection_by_index[index] = row["native_projection"]
-        native_projection_attempted_by_index[index] = row["native_projection_attempted"]
+    if native_batch_rows is None:
+        for index, row in zip(adjudication_indices, combined_results, strict=True):
+            if row is None:
+                legacy_indices.append(index)
+                continue
+            process_decision = row["process"]
+            if process_decision["terminal"] or process_decision["decision"] != "continue":
+                raise AdapterError("retained MNCS result was unexpectedly classified as a process failure")
+            outcome = process_decision["execution"]
+            if not isinstance(outcome, dict):
+                raise AdapterError("native execution result adjudication omitted its outcome")
+            adjudication_by_index[index] = outcome
+            native_projection_by_index[index] = row["native_projection"]
+            native_projection_attempted_by_index[index] = row["native_projection_attempted"]
     if legacy_indices:
         returned_indices = [
             index for index in legacy_indices
@@ -6001,12 +6056,57 @@ def execute_batch(
                 native_projection=native_projection_by_index.get(index),
                 native_projection_attempted=native_projection_attempted_by_index.get(index, False),
             )
+            if index in raw_fragments_by_index:
+                marker, returned_json, returned_value_json = raw_fragments_by_index[index]
+                result["_mncs_raw_json_fragments"] = [(marker, returned_json)]
+                if returned_value_json is not None:
+                    result["_mncs_returned_value_json"] = returned_value_json
         result["request"] = request_documents[index]
         result["transport_request"] = transport_requests[index]
         result["request_artifact"] = request_artifacts[index]["path"]
         result["request_artifact_ref"] = dict(request_artifacts[index])
         results.append(result)
     return results
+
+
+def _suite_observe_with_raw_value(
+    *,
+    session: EmbedSession,
+    summary_value: dict[str, Any],
+    returned_value_json: bytes,
+    step_budget: int,
+    index: int,
+) -> dict[str, Any]:
+    request = {
+        "module": "mncs.test.suite",
+        "function": "observe",
+        "args": [summary_value, _native_json_fragment_marker(returned_value_json, index)],
+        "step_budget": step_budget,
+    }
+    marker = request["args"][1]
+    if callable(getattr(session, "call_batch_request_document", None)):
+        request_document = _compact_json_with_raw_fragments(
+            [request], [(marker, returned_value_json)]
+        )
+        response_document = session.call_batch_request_document(
+            request_document, request_count=1
+        )
+        try:
+            outputs = json.loads(response_document.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterError(f"mncs-embed suite.observe response is invalid JSON: {error}") from error
+        if not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict):
+            raise AdapterError("mncs-embed suite.observe response is not one call output")
+        return outputs[0]
+    try:
+        returned_value = json.loads(returned_value_json.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError(f"native returned value fragment is invalid JSON: {error}") from error
+    request["args"][1] = returned_value
+    outputs = session.call_batch([request])
+    if len(outputs) != 1 or not isinstance(outputs[0], dict):
+        raise AdapterError("retained MNCS suite.observe returned an invalid output count")
+    return outputs[0]
 
 
 def native_suite_fold(
@@ -6041,6 +6141,10 @@ def native_suite_fold(
                 "status": "unavailable",
                 "reason": f"test result {index} did not return a native TestResult value",
             }
+        raw_returned_value = item.get("_mncs_returned_value_json")
+        if isinstance(raw_returned_value, bytes):
+            native_values.append(raw_returned_value)
+            continue
         execution = item.get("execution")
         returned = execution.get("returned") if isinstance(execution, dict) else None
         if not isinstance(returned, list) or len(returned) != 1:
@@ -6073,17 +6177,26 @@ def native_suite_fold(
         summary_value = empty_returned[0]
         summary_output = empty_output
         calls = 1
-        for value in native_values:
-            summary_output = session.call_batch(
-                [
-                    {
-                        "module": "mncs.test.suite",
-                        "function": "observe",
-                        "args": [summary_value, value],
-                        "step_budget": step_budget,
-                    }
-                ]
-            )[0]
+        for index, value in enumerate(native_values):
+            if isinstance(value, bytes):
+                summary_output = _suite_observe_with_raw_value(
+                    session=session,
+                    summary_value=summary_value,
+                    returned_value_json=value,
+                    step_budget=step_budget,
+                    index=index,
+                )
+            else:
+                summary_output = session.call_batch(
+                    [
+                        {
+                            "module": "mncs.test.suite",
+                            "function": "observe",
+                            "args": [summary_value, value],
+                            "step_budget": step_budget,
+                        }
+                    ]
+                )[0]
             calls += 1
             returned = summary_output.get("returned") if isinstance(summary_output, dict) else None
             if summary_output.get("status") != "returned" or not isinstance(returned, list) or len(returned) != 1:
@@ -9254,6 +9367,33 @@ def _public_result_json_payload(
     return payload, sha256_bytes(payload)
 
 
+def _public_result_json_payload_with_raw_fragments(
+    value: dict[str, Any],
+    fragments: list[tuple[str, bytes]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str]:
+    """Serialize native returned values as source fragments without host trees."""
+    source = _compact_json_with_raw_fragments(value, fragments)
+    native = _native_public_result_document_payload(
+        source,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if native is not None:
+        return native
+    # Only native declines enter the compatibility materialization path.
+    try:
+        materialized = json.loads(source.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError(f"native public-result JSON fragments are invalid: {error}") from error
+    payload = json_bytes(materialized)
+    return payload, sha256_bytes(payload)
+
+
 def _public_result_json_payload_with_raw_selection(
     value: dict[str, Any] | None,
     selection_json: bytes,
@@ -9761,6 +9901,7 @@ def run_manifest(args: argparse.Namespace) -> int:
         suite_result: dict[str, Any] | None = None
         suite_summary: dict[str, Any] | None = None
         test_results: list[dict[str, Any]] = []
+        raw_result_fragments: list[tuple[str, bytes]] = []
         test_inventory: dict[str, Any] | None = None
         execution: dict[str, Any] | None = None
         native_selection_summary: dict[str, Any] | None = None
@@ -10229,6 +10370,15 @@ def run_manifest(args: argparse.Namespace) -> int:
                 **(execution or {}),
                 "native_selection": native_selection_summary,
             }
+        for item in test_results:
+            private_fragments = item.pop("_mncs_raw_json_fragments", [])
+            if isinstance(private_fragments, list):
+                raw_result_fragments.extend(
+                    pair for pair in private_fragments
+                    if isinstance(pair, tuple) and len(pair) == 2
+                    and isinstance(pair[0], str) and isinstance(pair[1], bytes)
+                )
+            item.pop("_mncs_returned_value_json", None)
         result = make_result(
             manifest=manifest_for_run,
             source_text=source_text,
@@ -10269,12 +10419,21 @@ def run_manifest(args: argparse.Namespace) -> int:
         "transport": "transport.timing on each native execution result",
         "unattributed": "total minus recorded phase observations",
     }
-    result_payload, result_digest = _public_result_json_payload(
-        result,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )
+    if raw_result_fragments:
+        result_payload, result_digest = _public_result_json_payload_with_raw_fragments(
+            result,
+            raw_result_fragments,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+    else:
+        result_payload, result_digest = _public_result_json_payload(
+            result,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
     if result_path:
         result_path = result_path.resolve()
         result_path.parent.mkdir(parents=True, exist_ok=True)

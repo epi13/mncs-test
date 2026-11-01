@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.execution-batch-envelope-adjudication",
+  "source": "../native/mncs/test/execution_batch_envelope_adjudication_v1.mncs",
+  "module": "mncs.test.execution_batch_envelope_adjudication_v1",
+  "entry_function": "execution_batch_envelope_adjudication_app_v1",
+  "profile": "0.18",
+  "interface_identity": "69ec74dbd3a3f9109d31dfedb2abebc98557ba6aab9988c82b3747a08f7dca37",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

@@ -23,6 +23,7 @@ import mncs_test  # noqa: E402
 import mncs_test_native  # noqa: E402
 from mncs_test_native import (  # noqa: E402
     NativeTransportError,
+    run_execution_batch_envelope_adjudication,
     run_process_transport_adjudication,
 )
 
@@ -181,6 +182,75 @@ def test_native_transport_adapter_rejects_invalid_execution_case(tmp_path: Path)
             cwd=tmp_path,
             environment=_environment(),
         )
+
+
+def test_native_batch_envelope_projects_results_and_preserves_returned_json(
+    tmp_path: Path,
+) -> None:
+    returned = _returned_pass_result()
+    returned["record"]["fields"].append(["detail", {"text": "λ" * 5000}])
+    call_output = {
+        "schema_version": "mncs.execution/1",
+        "target": "canonical-vm",
+        "program_identity": "program:batch-case",
+        "program_fingerprint": "fingerprint:batch-case",
+        "function_identity": "function:exercise",
+        "artifact_identity": "artifact:batch-case",
+        "artifact_sha256": "a" * 64,
+        "backend": {"identity": "backend:canonical-vm"},
+        "failure": None,
+        "failure_reason": "",
+        "invoked_callable": {"callable_identity": "function:exercise"},
+        "reused_session": True,
+        "steps": 17,
+        "effects": [],
+        "vm_record": {"identity": "vm-record:batch-case"},
+        "execution_provenance": {"identity": "provenance:batch-case"},
+        "status": "returned",
+        "returned": [returned],
+    }
+    document = json.dumps([call_output], ensure_ascii=False, separators=(",", ":")).encode()
+
+    rows = run_execution_batch_envelope_adjudication(
+        document,
+        [{"expected_status": "", "suite": False, "kind": 1}],
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+    )
+
+    assert rows is not None and len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "returned"
+    assert row["native_result"]["verdict"] == "PASS"
+    assert row["projection_attempted"] is True
+    assert row["process"]["decision"] == "continue"
+    assert row["execution"] == {
+        key: value for key, value in call_output.items()
+        if key in {
+            "schema_version", "target", "program_identity", "program_fingerprint",
+            "function_identity", "artifact_identity", "artifact_sha256", "backend",
+            "failure", "failure_reason", "invoked_callable", "reused_session", "steps",
+            "effects", "vm_record", "execution_provenance",
+        }
+    }
+    assert json.loads(row["returned_json"]) == [returned]
+    assert len(row["returned_json"]) > 10_000
+
+
+def test_raw_result_json_fragment_splice_preserves_nested_value() -> None:
+    marker = mncs_test._native_json_fragment_marker(b"opaque", 0)
+    fragment = b'{"record":{"fields":[["payload",[1,true,null]]],"name":"Nested"}}'
+    payload = mncs_test._compact_json_with_raw_fragments(
+        {"execution": {"returned": marker}, "status": "passed"},
+        [(marker, fragment)],
+    )
+
+    assert b'"returned":' + fragment in payload
+    assert json.loads(payload) == {
+        "execution": {"returned": json.loads(fragment)},
+        "status": "passed",
+    }
 
 
 @pytest.mark.parametrize(

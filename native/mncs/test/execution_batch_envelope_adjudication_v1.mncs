@@ -1,0 +1,349 @@
+mncs 0.18;
+
+// Parse one retained mncs-embed batch response in MNCS. Returned Test ABI
+// values and their public JSON fragments stay native until final serialization.
+module mncs.test.execution_batch_envelope_adjudication_v1;
+
+use mncs.std.application.v1;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+use mncs.test.native_result_projection_v1 as projection;
+use mncs.test.execution_envelope_adjudication_v1 as envelope;
+use mncs.test.execution_result_adjudication_v1 as execution_result;
+use mncs.test.process_transport_adjudication_v1 as process;
+
+record ExecutionBatchEnvelopeCaseV1 {
+    expected_status: [byte; up_to 64],
+    suite: bool,
+    kind: byte
+}
+
+record ExecutionBatchEnvelopeRequestV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    document: json_order.JsonTokenDocumentV1,
+    items: [ExecutionBatchEnvelopeCaseV1; up_to 16]
+}
+
+record RawJsonChunkV1 { bytes: [byte; up_to 1024], length: u64 }
+record RawJsonDocumentV1 {
+    chunks: [RawJsonChunkV1; up_to 64],
+    byte_length: u64,
+    valid: bool
+}
+
+record CompletedRawChunksV1 {
+    chunks: [RawJsonChunkV1; 64],
+    count: u64,
+    valid: bool
+}
+
+record ExecutionBatchEnvelopeRowV1 {
+    supported: bool,
+    projection_attempted: bool,
+    status: [byte; up_to 64],
+    native_result: projection.NativeResultProjectionV1,
+    process_result: process.ProcessTransportResultV1,
+    execution_json: envelope.ExecutionJsonDocumentV1,
+    returned_json: RawJsonDocumentV1
+}
+
+record ExecutionBatchEnvelopeResultV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    rows: [ExecutionBatchEnvelopeRowV1; 16]
+}
+
+record BatchBuildStateV1 {
+    rows: [ExecutionBatchEnvelopeRowV1; 16],
+    remaining: json_order.JsonValueV1,
+    valid: bool
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,101,120,101,99,117,116,105,111,110,45,98,97,116,99,104,45,101,110,118,101,108,111,112,101,45,97,100,106,117,100,105,99,97,116,105,111,110,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,101,120,101,99,117,116,105,111,110,45,98,97,116,99,104,45,101,110,118,101,108,111,112,101,45,97,100,106,117,100,105,99,97,116,105,111,110,47,49];
+}
+
+fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: name,
+        ordered_length: name.len,
+        json_escaped: false,
+        valid: true
+    };
+}
+
+fn key_status() -> (result: json_order.KeyV1) { return static_key([115,116,97,116,117,115]); }
+fn key_returned() -> (result: json_order.KeyV1) { return static_key([114,101,116,117,114,110,101,100]); }
+fn key_schema_version() -> (result: json_order.KeyV1) { return static_key([115,99,104,101,109,97,95,118,101,114,115,105,111,110]); }
+fn key_target() -> (result: json_order.KeyV1) { return static_key([116,97,114,103,101,116]); }
+fn key_program_identity() -> (result: json_order.KeyV1) { return static_key([112,114,111,103,114,97,109,95,105,100,101,110,116,105,116,121]); }
+fn key_program_fingerprint() -> (result: json_order.KeyV1) { return static_key([112,114,111,103,114,97,109,95,102,105,110,103,101,114,112,114,105,110,116]); }
+fn key_function_identity() -> (result: json_order.KeyV1) { return static_key([102,117,110,99,116,105,111,110,95,105,100,101,110,116,105,116,121]); }
+fn key_artifact_identity() -> (result: json_order.KeyV1) { return static_key([97,114,116,105,102,97,99,116,95,105,100,101,110,116,105,116,121]); }
+fn key_artifact_sha256() -> (result: json_order.KeyV1) { return static_key([97,114,116,105,102,97,99,116,95,115,104,97,50,53,54]); }
+fn key_backend() -> (result: json_order.KeyV1) { return static_key([98,97,99,107,101,110,100]); }
+fn key_failure_reason() -> (result: json_order.KeyV1) { return static_key([102,97,105,108,117,114,101,95,114,101,97,115,111,110]); }
+fn key_failure() -> (result: json_order.KeyV1) { return static_key([102,97,105,108,117,114,101]); }
+fn key_invoked_callable() -> (result: json_order.KeyV1) { return static_key([105,110,118,111,107,101,100,95,99,97,108,108,97,98,108,101]); }
+fn key_reused_session() -> (result: json_order.KeyV1) { return static_key([114,101,117,115,101,100,95,115,101,115,115,105,111,110]); }
+fn key_steps() -> (result: json_order.KeyV1) { return static_key([115,116,101,112,115]); }
+fn key_effects() -> (result: json_order.KeyV1) { return static_key([101,102,102,101,99,116,115]); }
+fn key_vm_record() -> (result: json_order.KeyV1) { return static_key([118,109,95,114,101,99,111,114,100]); }
+fn key_execution_provenance() -> (result: json_order.KeyV1) { return static_key([101,120,101,99,117,116,105,111,110,95,112,114,111,118,101,110,97,110,99,101]); }
+
+fn add_field(
+    fields: json_order.JsonValueV1,
+    key: json_order.KeyV1,
+    lookup: projection.FieldLookupV1
+) -> (result: json_order.JsonValueV1) {
+    if !lookup.found { return fields; }
+    return json_order.JsonValueV1.ObjectCons { key: key, value: lookup.value, tail: fields };
+}
+
+fn metadata_fields(fields: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
+    let empty: json_order.JsonValueV1 = json_order.JsonValueV1.ObjectNil;
+    let f0: json_order.JsonValueV1 = add_field(empty, key_schema_version(), projection.lookup_field(fields, key_schema_version()));
+    let f1: json_order.JsonValueV1 = add_field(f0, key_target(), projection.lookup_field(fields, key_target()));
+    let f2: json_order.JsonValueV1 = add_field(f1, key_program_identity(), projection.lookup_field(fields, key_program_identity()));
+    let f3: json_order.JsonValueV1 = add_field(f2, key_program_fingerprint(), projection.lookup_field(fields, key_program_fingerprint()));
+    let f4: json_order.JsonValueV1 = add_field(f3, key_function_identity(), projection.lookup_field(fields, key_function_identity()));
+    let f5: json_order.JsonValueV1 = add_field(f4, key_artifact_identity(), projection.lookup_field(fields, key_artifact_identity()));
+    let f6: json_order.JsonValueV1 = add_field(f5, key_artifact_sha256(), projection.lookup_field(fields, key_artifact_sha256()));
+    let f7: json_order.JsonValueV1 = add_field(f6, key_backend(), projection.lookup_field(fields, key_backend()));
+    let f8: json_order.JsonValueV1 = add_field(f7, key_failure(), projection.lookup_field(fields, key_failure()));
+    let f9: json_order.JsonValueV1 = add_field(f8, key_failure_reason(), projection.lookup_field(fields, key_failure_reason()));
+    let f10: json_order.JsonValueV1 = add_field(f9, key_invoked_callable(), projection.lookup_field(fields, key_invoked_callable()));
+    let f11: json_order.JsonValueV1 = add_field(f10, key_reused_session(), projection.lookup_field(fields, key_reused_session()));
+    let f12: json_order.JsonValueV1 = add_field(f11, key_steps(), projection.lookup_field(fields, key_steps()));
+    let f13: json_order.JsonValueV1 = add_field(f12, key_effects(), projection.lookup_field(fields, key_effects()));
+    let f14: json_order.JsonValueV1 = add_field(f13, key_vm_record(), projection.lookup_field(fields, key_vm_record()));
+    let f15: json_order.JsonValueV1 = add_field(f14, key_execution_provenance(), projection.lookup_field(fields, key_execution_provenance()));
+    return json_order.JsonValueV1.Object { fields: f15 };
+}
+
+fn empty_raw_chunks() -> (result: CompletedRawChunksV1) {
+    return CompletedRawChunksV1 {
+        chunks: [RawJsonChunkV1 { bytes: [], length: 0 }; 64],
+        count: 0,
+        valid: true
+    };
+}
+
+fn append_raw_chunk(
+    state: CompletedRawChunksV1,
+    chunk: json_order.JsonOrderChunkV1
+) -> (result: CompletedRawChunksV1) {
+    if !state.valid || state.count >= 64 || chunk.length > 1024 {
+        return CompletedRawChunksV1 { ..state, valid: false };
+    }
+    let stored: RawJsonChunkV1 = RawJsonChunkV1 {
+        bytes: chunk.bytes[0..chunk.length],
+        length: chunk.length
+    };
+    return CompletedRawChunksV1 {
+        chunks: replace(state.chunks, state.count, stored),
+        count: state.count +% 1,
+        valid: true
+    };
+}
+
+fn collect_raw_chunks(value: json_order.JsonOrderChunkListV1) -> (result: CompletedRawChunksV1) {
+    return match value {
+        json_order.JsonOrderChunkListV1.ChunkNil => empty_raw_chunks(),
+        ChunkCons { head: head, tail: tail } => append_raw_chunk(collect_raw_chunks(tail), head)
+    };
+}
+
+fn raw_document(writer: json_order.JsonOrderWriterV1) -> (result: RawJsonDocumentV1) {
+    if !writer.ok || writer.length > 65536 {
+        return RawJsonDocumentV1 { chunks: [], byte_length: 0, valid: false };
+    }
+    let completed: CompletedRawChunksV1 = collect_raw_chunks(writer.completed);
+    if !completed.valid { return RawJsonDocumentV1 { chunks: [], byte_length: 0, valid: false }; }
+    if writer.current_length > 0 {
+        if completed.count >= 64 || writer.current_length > 1024 {
+            return RawJsonDocumentV1 { chunks: [], byte_length: 0, valid: false };
+        }
+        let current: RawJsonChunkV1 = RawJsonChunkV1 {
+            bytes: writer.current_bytes[0..writer.current_length],
+            length: writer.current_length
+        };
+        let with_current: CompletedRawChunksV1 = CompletedRawChunksV1 {
+            chunks: replace(completed.chunks, completed.count, current),
+            count: completed.count +% 1,
+            valid: true
+        };
+        return RawJsonDocumentV1 {
+            chunks: with_current.chunks[0..with_current.count],
+            byte_length: writer.length,
+            valid: true
+        };
+    }
+    return RawJsonDocumentV1 {
+        chunks: completed.chunks[0..completed.count],
+        byte_length: writer.length,
+        valid: completed.valid
+    };
+}
+
+fn empty_raw_document() -> (result: RawJsonDocumentV1) {
+    return RawJsonDocumentV1 { chunks: [], byte_length: 0, valid: false };
+}
+
+fn empty_row(kind: byte) -> (result: ExecutionBatchEnvelopeRowV1) {
+    return ExecutionBatchEnvelopeRowV1 {
+        supported: false,
+        projection_attempted: false,
+        status: [],
+        native_result: projection.empty_projection(kind),
+        process_result: execution_result.empty_process_result(),
+        execution_json: envelope.empty_execution_json(),
+        returned_json: empty_raw_document()
+    };
+}
+
+fn project_call_output(
+    document: json_order.JsonTokenDocumentV1,
+    value: json_order.JsonValueV1,
+    case: ExecutionBatchEnvelopeCaseV1,
+    root_writer_steps: u64
+) -> (result: ExecutionBatchEnvelopeRowV1) {
+    if case.kind != 1 && case.kind != 2 || case.suite != (case.kind == 2) {
+        return empty_row(case.kind);
+    }
+    let fields: json_order.JsonValueV1 = projection.object_fields(value);
+    let status_lookup: projection.FieldLookupV1 = projection.lookup_field(fields, key_status());
+    let status_value: projection.TextValueV1 = projection.text_value(status_lookup.value, document);
+    let status: [byte; up_to 64] = envelope.bounded_status(status_value);
+    let attempted: bool = status_lookup.found && envelope.status_is_returned(status_value);
+    let returned_lookup: projection.FieldLookupV1 = projection.lookup_field(fields, key_returned());
+    let returned_value: json_order.JsonValueV1 = projection.array_items(returned_lookup.value);
+    let first: projection.ArrayStepV1 = projection.array_step(returned_value);
+    let tail: projection.ArrayStepV1 = projection.array_step(first.tail);
+    let one_returned: bool = returned_lookup.found && first.has_head && tail.is_nil;
+    let projected: projection.NativeResultProjectionV1 = envelope.projected_returned_value(
+        case.kind, document, attempted, one_returned, first.head
+    );
+    let metadata: json_order.JsonValueV1 = metadata_fields(fields);
+    let metadata_writer: json_order.JsonOrderWriterV1 = json_order.write_json(
+        metadata, json_order.writer_empty(), document, root_writer_steps
+    );
+    let metadata_document: envelope.ExecutionJsonDocumentV1 = envelope.collect_writer_document(metadata_writer);
+    let returned_writer: json_order.JsonOrderWriterV1 = json_order.write_json(
+        returned_lookup.value, json_order.writer_empty(), document, root_writer_steps
+    );
+    let returned_document: RawJsonDocumentV1 = raw_document(returned_writer);
+    let policy_case: execution_result.ExecutionResultAdjudicationCaseV1 = execution_result.ExecutionResultAdjudicationCaseV1 {
+        process_start_failed: false,
+        timed_out: false,
+        structured_result_present: true,
+        nonzero_exit: false,
+        diagnostics_present: false,
+        execution_status: status,
+        expected_status: case.expected_status,
+        suite: case.suite,
+        kind: case.kind,
+        document: json_order.JsonTokenDocumentV1 { chunks: [], byte_length: 0 }
+    };
+    let adjudicated: execution_result.ExecutionResultAdjudicationRowV1 = execution_result.adjudicate_projected_item(
+        policy_case, attempted && one_returned, projected
+    );
+    let supported: bool = envelope.is_object(value)
+        && status_lookup.found && status_value.valid && status_value.length <= 64
+        && returned_lookup.found && returned_document.valid
+        && metadata_document.valid
+        && (!attempted || one_returned && projected.supported);
+    return ExecutionBatchEnvelopeRowV1 {
+        supported: supported,
+        projection_attempted: attempted && one_returned,
+        status: status,
+        native_result: projected,
+        process_result: adjudicated.process_result,
+        execution_json: metadata_document,
+        returned_json: returned_document
+    };
+}
+
+fn valid_request(value: ExecutionBatchEnvelopeRequestV1) -> (result: bool) {
+    let shape: json_order.DocumentShapeV1 = json_order.document_shape(value.document);
+    if !execution_result.same_bytes(value.schema_version, request_schema())
+        || value.item_count != value.items.len || value.item_count == 0 || value.item_count > 16
+        || !shape.valid || value.document.byte_length == 0 || value.document.byte_length > 65536 {
+        return false;
+    }
+    iterate i over value.items carrying valid: bool = true {
+        let item: ExecutionBatchEnvelopeCaseV1 = value.items[i];
+        next valid = valid && (item.kind == 1 || item.kind == 2)
+            && (item.suite == (item.kind == 2))
+            && item.expected_status.len <= 64;
+    }
+    return valid;
+}
+
+fn advance_build(
+    built: BatchBuildStateV1,
+    request: ExecutionBatchEnvelopeRequestV1,
+    index: u64,
+    root_writer_steps: u64
+) -> (result: BatchBuildStateV1) {
+    let step: projection.ArrayStepV1 = projection.array_step(built.remaining);
+    if !step.has_head { return BatchBuildStateV1 { ..built, valid: false }; }
+    let row: ExecutionBatchEnvelopeRowV1 = project_call_output(
+        request.document, step.head, request.items[index], root_writer_steps
+    );
+    return BatchBuildStateV1 {
+        rows: replace(built.rows, index, row),
+        remaining: step.tail,
+        valid: built.valid && row.supported
+    };
+}
+
+fn execution_batch_envelope_adjudication_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97,114,103,118,32,114,101,113,117,105,114,101,115,32,50,32,101,120,101,99,117,116,105,111,110,32,98,97,116,99,104,32,101,110,118,101,108,111,112,101,32,97,100,106,117,100,105,99,97,116,105,111,110,32,112,97,116,104,115], 2);
+    }
+    let request: ExecutionBatchEnvelopeRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105,110,118,97,108,105,100,32,84,101,115,116,32,101,120,101,99,117,116,105,111,110,32,98,97,116,99,104,32,101,110,118,101,108,111,112,101,32,97,100,106,117,100,105,99,97,116,105,111,110,32,114,101,113,117,101,115,116], 4);
+    }
+    let parsed: json_order.ParseStateV1 = json_order.parse_checked(request.document, true);
+    if !parsed.valid || !parsed.has_root {
+        return failure([105,110,118,97,108,105,100,32,109,110,99,115,45,101,109,98,101,100,32,98,97,116,99,104,32,114,101,115,112,111,110,115,101], 4);
+    }
+    let items: json_order.JsonValueV1 = projection.array_items(parsed.root);
+    let initial: BatchBuildStateV1 = BatchBuildStateV1 {
+        rows: [empty_row(0); 16],
+        remaining: items,
+        valid: true
+    };
+    iterate i over request.items carrying built: BatchBuildStateV1 = initial {
+        next built = advance_build(built, request, i, parsed.root_writer_steps);
+    }
+    let trailing: projection.ArrayStepV1 = projection.array_step(built.remaining);
+    if !built.valid || !trailing.is_nil {
+        let published_invalid: u64 = structured_write(context.argv[1], result_schema(), ExecutionBatchEnvelopeResultV1 {
+            schema_version: result_schema(), item_count: request.item_count, rows: built.rows
+        });
+        if published_invalid == 0 {
+            return failure([101,120,101,99,117,116,105,111,110,32,98,97,116,99,104,32,101,110,118,101,108,111,112,101,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+        }
+        return success([]);
+    }
+    let published: u64 = structured_write(context.argv[1], result_schema(), ExecutionBatchEnvelopeResultV1 {
+        schema_version: result_schema(), item_count: request.item_count, rows: built.rows
+    });
+    if published == 0 {
+        return failure([101,120,101,99,117,116,105,111,110,32,98,97,116,99,104,32,101,110,118,101,108,111,112,101,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+    }
+    return success([]);
+}

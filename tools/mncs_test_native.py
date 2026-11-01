@@ -359,6 +359,14 @@ EXECUTION_ENVELOPE_ADJUDICATION_RESULT_SCHEMA = (
 )
 EXECUTION_ENVELOPE_ADJUDICATION_MAX_ITEMS = 16
 EXECUTION_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES = 32768
+EXECUTION_BATCH_ENVELOPE_ADJUDICATION_REQUEST_SCHEMA = (
+    "mncs.test.execution-batch-envelope-adjudication-request/1"
+)
+EXECUTION_BATCH_ENVELOPE_ADJUDICATION_RESULT_SCHEMA = (
+    "mncs.test.execution-batch-envelope-adjudication/1"
+)
+EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_ITEMS = 16
+EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES = 65536
 PROCESS_TRANSPORT_DECISIONS = {
     "start_failure": ("infrastructure_failure", True),
     "timeout": ("timeout", True),
@@ -1098,6 +1106,78 @@ def _process_transport_result(result: object) -> dict[str, object]:
     }
 
 
+def _batch_projection_text(value: object, length: object) -> str | None:
+    if (not isinstance(value, str) or len(value) != 64
+            or type(length) is not int or not 0 <= length <= 64
+            or value[length:] != "\x00" * (64 - length)):
+        return None
+    text = value[:length]
+    return text if text.isascii() else None
+
+
+def normalize_native_result_projection(value: object, kind: int) -> dict[str, object] | None:
+    if (not isinstance(value, dict) or value.get("kind") != kind
+            or type(value.get("kind")) is not int or value.get("supported") is not True):
+        return None
+    unsigned_present = value.get("unsigned_present")
+    unsigned_values = value.get("unsigned_values")
+    signed_present = value.get("signed_present")
+    signed_values = value.get("signed_values")
+    if (not isinstance(unsigned_present, list) or len(unsigned_present) != 16
+            or not all(type(item) is bool for item in unsigned_present)
+            or not isinstance(unsigned_values, list) or len(unsigned_values) != 16
+            or not all(type(item) is int for item in unsigned_values)
+            or not isinstance(signed_present, list) or len(signed_present) != 2
+            or not all(type(item) is bool for item in signed_present)
+            or not isinstance(signed_values, list) or len(signed_values) != 2
+            or not all(type(item) is int for item in signed_values)):
+        return None
+    verdict = _batch_projection_text(value.get("verdict"), value.get("verdict_length"))
+    if verdict is None:
+        return None
+
+    def optional_unsigned(index: int) -> int | None:
+        return unsigned_values[index] if unsigned_present[index] else None
+
+    if kind == 1:
+        failure_name = _batch_projection_text(
+            value.get("failure_kind_name"), value.get("failure_kind_name_length")
+        )
+        failure_kind = _batch_projection_text(
+            value.get("failure_kind"), value.get("failure_kind_length")
+        )
+        if (verdict not in {"PASS", "FAIL", "SKIP", "UNSUPPORTED"}
+                or not failure_name or failure_kind is None):
+            return None
+        return {
+            "verdict": verdict,
+            "verdict_code": optional_unsigned(0),
+            "failure_kind": "none" if failure_name == "NoFailure" else failure_kind,
+            "failure_kind_name": failure_name,
+            "failure_kind_code": optional_unsigned(1),
+            "failure_code": optional_unsigned(2),
+            "assertions": optional_unsigned(3),
+            "failures": optional_unsigned(4),
+            "expected": signed_values[0] if signed_present[0] else None,
+            "actual": signed_values[1] if signed_present[1] else None,
+            "assertion_code": optional_unsigned(5),
+        }
+    if kind != 2 or verdict not in {"PASS", "FAIL", "UNSUPPORTED"}:
+        return None
+    names = (
+        "total", "passed", "failed", "skipped", "unsupported",
+        "assertion_failures", "setup_failures", "compile_failures", "runtime_failures",
+        "timeout_failures", "infrastructure_failures", "assertion_count", "failure_count",
+    )
+    if any(not unsigned_present[index] for index in range(1, 14)):
+        return None
+    return {
+        "verdict": verdict,
+        "verdict_code": optional_unsigned(0),
+        **{name: unsigned_values[index + 1] for index, name in enumerate(names)},
+    }
+
+
 def run_execution_result_adjudication(
     cases: list[dict],
     *,
@@ -1354,6 +1434,206 @@ def run_execution_envelope_adjudication(
             "native_result": projection,
             "process": process_result,
             "execution_json": execution_json,
+        })
+    return validated
+
+
+def run_execution_batch_envelope_adjudication(
+    document: bytes,
+    cases: list[dict],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> list[dict[str, object]] | None:
+    """Project a retained embed batch response without decoding returned trees in Python."""
+    if (not isinstance(document, bytes) or not document
+            or len(document) > EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES
+            or not isinstance(cases, list)
+            or not 1 <= len(cases) <= EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_ITEMS):
+        return None
+    chunks: list[dict[str, object]] = []
+    start = 0
+    while start < len(document):
+        end = min(start + 1024, len(document))
+        while end < len(document) and document[end] & 0xC0 == 0x80:
+            end -= 1
+        if end <= start:
+            return None
+        chunk = document[start:end]
+        try:
+            text = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        chunks.append({"bytes": text, "length": len(chunk)})
+        start = end
+    if not 1 <= len(chunks) <= 64:
+        return None
+
+    normalized: list[dict[str, object]] = []
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict) or set(case) != {"expected_status", "suite", "kind"}:
+            raise NativeTransportError(
+                f"execution batch envelope case {index} has an invalid field set"
+            )
+        if type(case["suite"]) is not bool:
+            raise NativeTransportError(
+                f"execution batch envelope case {index} has an invalid suite flag"
+            )
+        kind = case["kind"]
+        if (type(kind) is not int or kind not in (1, 2)
+                or case["suite"] is not (kind == 2)):
+            raise NativeTransportError(
+                f"execution batch envelope case {index} has an invalid result kind"
+            )
+        expected_status = _bounded_adjudication_text(case["expected_status"], "expected_status")
+        if expected_status and expected_status not in EXECUTION_STATUS_VALUES:
+            raise NativeTransportError(
+                f"execution batch envelope case {index} has an unknown expected status"
+            )
+        normalized.append({
+            "expected_status": expected_status,
+            "suite": case["suite"],
+            "kind": kind,
+        })
+
+    request = {
+        "schema_version": EXECUTION_BATCH_ENVELOPE_ADJUDICATION_REQUEST_SCHEMA,
+        "item_count": len(normalized),
+        "document": {"chunks": chunks, "byte_length": len(document)},
+        "items": normalized,
+    }
+    result = run_native_app(
+        "test-execution-batch-envelope-adjudication.json",
+        request,
+        request_schema=EXECUTION_BATCH_ENVELOPE_ADJUDICATION_REQUEST_SCHEMA,
+        result_schema=EXECUTION_BATCH_ENVELOPE_ADJUDICATION_RESULT_SCHEMA,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        step_budget=8_000_000,
+        timeout_seconds=timeout_seconds,
+    )
+    rows = result.get("rows")
+    if (result.get("schema_version") != EXECUTION_BATCH_ENVELOPE_ADJUDICATION_RESULT_SCHEMA
+            or type(result.get("item_count")) is not int
+            or result["item_count"] != len(normalized)
+            or not isinstance(rows, list)
+            or len(rows) != EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_ITEMS):
+        raise NativeTransportError(
+            "native execution batch envelope adjudication returned a mismatched result count"
+        )
+
+    def chunk_bytes(raw: object) -> bytes | None:
+        if isinstance(raw, str):
+            try:
+                return raw.encode("utf-8")
+            except UnicodeEncodeError:
+                return None
+        if (isinstance(raw, list)
+                and all(type(value) is int and 0 <= value <= 255 for value in raw)):
+            return bytes(raw)
+        return None
+
+    def collect_document(
+        raw: object,
+        *,
+        index: int,
+        label: str,
+        max_bytes: int,
+        max_chunks: int,
+        chunk_length_field: bool,
+    ) -> bytes | None:
+        if (not isinstance(raw, dict)
+                or not isinstance(raw.get("chunks"), list)
+                or type(raw.get("byte_length")) is not int
+                or not 0 < raw["byte_length"] <= max_bytes
+                or not 1 <= len(raw["chunks"]) <= max_chunks
+                or ("valid" in raw and raw["valid"] is not True)):
+            return None
+        parts: list[bytes] = []
+        for chunk in raw["chunks"]:
+            expected_keys = {"bytes", "length"} if chunk_length_field else {"bytes"}
+            if not isinstance(chunk, dict) or set(chunk) != expected_keys:
+                return None
+            part = chunk_bytes(chunk.get("bytes"))
+            if part is None or not 0 < len(part) <= 1024:
+                return None
+            if chunk_length_field and (
+                type(chunk.get("length")) is not int or chunk["length"] != len(part)
+            ):
+                return None
+            parts.append(part)
+        encoded = b"".join(parts)
+        if len(encoded) != raw["byte_length"]:
+            return None
+        return encoded
+
+    validated: list[dict[str, object]] = []
+    for index, raw in enumerate(rows[:len(normalized)]):
+        if not isinstance(raw, dict) or set(raw) != {
+            "supported", "projection_attempted", "status", "native_result",
+            "process_result", "execution_json", "returned_json",
+        }:
+            raise NativeTransportError(
+                f"native execution batch envelope row {index} is malformed"
+            )
+        supported = raw["supported"]
+        attempted = raw["projection_attempted"]
+        status = raw["status"]
+        raw_projection = raw["native_result"]
+        if (type(supported) is not bool or type(attempted) is not bool
+                or not isinstance(status, str) or not isinstance(raw_projection, dict)
+                or type(raw_projection.get("kind")) is not int
+                or raw_projection.get("kind") != normalized[index]["kind"]
+                or type(raw_projection.get("supported")) is not bool):
+            raise NativeTransportError(
+                f"native execution batch envelope row {index} has invalid projection fields"
+            )
+        if not supported:
+            return None
+        if attempted is not (status == "returned") or (
+            attempted and raw_projection.get("supported") is not True
+        ):
+            return None
+        projection = (
+            normalize_native_result_projection(raw_projection, normalized[index]["kind"])
+            if attempted else None
+        )
+        if attempted and projection is None:
+            return None
+        process_result = _process_transport_result(raw["process_result"])
+        if (process_result.get("decision") != "continue"
+                or process_result.get("terminal") is not False
+                or not isinstance(process_result.get("execution"), dict)):
+            return None
+        metadata_bytes = collect_document(
+            raw["execution_json"], index=index, label="execution metadata",
+            max_bytes=16_384, max_chunks=16, chunk_length_field=False,
+        )
+        returned_bytes = collect_document(
+            raw["returned_json"], index=index, label="returned values",
+            max_bytes=EXECUTION_BATCH_ENVELOPE_ADJUDICATION_MAX_DOCUMENT_BYTES,
+            max_chunks=64, chunk_length_field=True,
+        )
+        if metadata_bytes is None or returned_bytes is None:
+            return None
+        if not returned_bytes.startswith(b"[") or not returned_bytes.endswith(b"]"):
+            return None
+        try:
+            metadata = json.loads(metadata_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(metadata, dict):
+            return None
+        validated.append({
+            "status": status,
+            "execution": metadata,
+            "native_result": projection,
+            "projection_attempted": attempted,
+            "process": process_result,
+            "returned_json": returned_bytes,
         })
     return validated
 

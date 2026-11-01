@@ -1007,3 +1007,21 @@ Differential tests verify that the exact original stdout reaches MNCS and that
 the supported returned result succeeds while Python's full-tree decoder is
 disabled; the transport, projection, and live runner regressions verify the
 consumer boundary.
+
+P-049 moves retained `mncs-embed` batch response parsing and returned
+TestResult/SuiteSummary projection into
+`mncs.test.execution_batch_envelope_adjudication_v1`. The adapter copies the
+UTF-8 C ABI response as bytes; MNCS validates the bounded array, adjudicates
+each call output, projects the typed result, retains the complete execution
+metadata used by the public TestResult, and returns the original returned
+values as bounded JSON fragments. The batch admits at most 16 calls and a
+65,536-byte document carried in at most 64 UTF-8-safe 1,024-byte chunks.
+Python no longer materializes successful returned values between embed
+execution, suite observation, and public-result serialization. Suite
+observation receives the returned value as a raw JSON argument, and the final
+public serializer splices the returned array without a host JSON tree.
+Unsupported result shapes, native declines, and over-bound documents retain
+the existing compatibility path. Independent nested-value expectations,
+transport and projection regressions, the live self-suite, and the expected
+runtime-failure runner case verify the new path and its fallback-facing
+semantics.
