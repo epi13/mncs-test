@@ -123,13 +123,25 @@ P-062 moved the compile-verdict diagnostic-code projection into the native
 JSON value-tree projection with a bounded stream over Stdlib
 `json_cursor.v1` events, validated in parallel by `json.v1`. MNCS selects
 root-array, `errors`, or `diagnostics` entries and retains up to 32 object
-`code` strings before applying the shared compile-verdict policy. It does not
-construct a `JsonValueV1` tree. Documents are capped at 16,384 bytes; at most
-16 expected prefixes of 512 UTF-8 bytes each are admitted. Incomplete scans,
+`code` strings before applying the shared compile-verdict policy. This verdict
+scan does not construct a `JsonValueV1` tree. Documents are capped at 16,384
+bytes; at most 16 expected prefixes of 512 UTF-8 bytes each are admitted.
+Incomplete scans,
 unsupported code shapes, and over-bound inputs return to the established
 compatibility adapter. Python still decodes detailed diagnostics for the
 public TestResult contract, while it no longer builds a second host list of
 diagnostic codes for ordinary bounded verdicts.
+
+P-064 adds a bounded typed projection for the standard compiler diagnostic
+shape. The native application projects up to 32 records with the seven public
+diagnostic fields, a four-field span, an empty `expected` array, and `found` as
+null, text, boolean, or signed integer. `compile_entry` reconstructs the
+public diagnostic dictionaries from those typed records, so supported
+compiler documents do not pass through Python's JSON tree parser. The native
+projection uses Test's bounded `public_result_json_key_order_v1` value parser
+and declines extended or unsupported shapes, non-empty `expected` arrays, and
+oversized documents; those retain the established compatibility path. The public result
+contract and diagnostic ordering stay unchanged.
 
 For decoded runtime outcomes, `mncs.test.execution_adjudication_v1` owns the
 Test runner's execution-status, expected-failure, native-verdict, and suite

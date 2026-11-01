@@ -138,7 +138,7 @@ VERIFICATION_COHERENCE_MAX_IDENTITY_LENGTH = 1024
 COMPILE_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-verdict-request/1"
 COMPILE_VERDICT_RESULT_SCHEMA = "mncs.test-compile-verdict/1"
 COMPILE_DIAGNOSTIC_VERDICT_REQUEST_SCHEMA = "mncs.test-compile-diagnostic-verdict-request/1"
-COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/1"
+COMPILE_DIAGNOSTIC_VERDICT_RESULT_SCHEMA = "mncs.test-compile-diagnostic-verdict/2"
 COMPILE_DIAGNOSTIC_VERDICT_MAX_DOCUMENT_BYTES = 16_384
 COMPILE_DIAGNOSTIC_VERDICT_MAX_EXPECTED_CODES = 16
 TEST_RESULT_SUMMARY_REQUEST_SCHEMA = "mncs.test-result-summary-request/1"
@@ -1803,7 +1803,7 @@ def diagnostic_list(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-def native_compile_diagnostic_document_verdict(
+def native_compile_diagnostic_document_result(
     document: bytes,
     expected: list[str],
     *,
@@ -1812,13 +1812,13 @@ def native_compile_diagnostic_document_verdict(
     mncs: str,
     cwd: Path,
     environment: dict[str, str],
-) -> str | None:
+) -> dict[str, Any] | None:
     """Project a bounded compiler diagnostic JSON document in MNCS.
 
     ``None`` selects the established code-list adapter when the source document,
     expected prefix list, or native execution budget is outside this app's
-    bounds. The public TestResult may still retain the decoded diagnostics for
-    output; this path removes their separate host code projection for verdicts.
+    bounds. A supported result also carries bounded typed diagnostics so the
+    normal compiler-result path does not build a Python tree from raw stdout.
     """
     if type(compiler_exit_code) is not int or type(expects_failure) is not bool:
         raise AdapterError("compiler result metadata is malformed")
@@ -1882,13 +1882,114 @@ def native_compile_diagnostic_document_verdict(
         raise AdapterError("MNCS compiler diagnostic app returned malformed support metadata")
     if not supported:
         return None
+    projection_supported = result.get("projection_supported")
+    root_is_object = result.get("root_is_object")
+    valid_field_present = result.get("valid_field_present")
+    valid_field_is_true = result.get("valid_field_is_true")
+    diagnostic_count = result.get("diagnostic_count")
+    diagnostics = result.get("diagnostics")
+    if any(type(value) is not bool for value in (
+        projection_supported, root_is_object, valid_field_present, valid_field_is_true,
+    )):
+        raise AdapterError("MNCS compiler diagnostic app returned malformed projection metadata")
+    if type(diagnostic_count) is not int or not isinstance(diagnostics, list):
+        raise AdapterError("MNCS compiler diagnostic app returned malformed diagnostic records")
+    if diagnostic_count > 32 or len(diagnostics) != 32:
+        raise AdapterError("MNCS compiler diagnostic app returned an invalid diagnostic count")
+    if projection_supported:
+        for item in diagnostics[:diagnostic_count]:
+            if not isinstance(item, dict):
+                raise AdapterError("MNCS compiler diagnostic app returned a non-record diagnostic")
+            text_fields = ("code", "stage", "severity", "message")
+            numeric_fields = ("span_start", "span_end", "span_line", "span_column")
+            if any(not isinstance(item.get(field), str) for field in text_fields):
+                raise AdapterError("MNCS compiler diagnostic app returned malformed diagnostic text")
+            if any(type(item.get(field)) is not int for field in numeric_fields):
+                raise AdapterError("MNCS compiler diagnostic app returned malformed diagnostic span")
+            if (
+                type(item.get("expected_count")) is not int
+                or item["expected_count"] != 0
+            ):
+                raise AdapterError("MNCS compiler diagnostic app returned malformed expected values")
+            if (
+                type(item.get("found_kind")) is not int
+                or item["found_kind"] not in {1, 2, 3, 4}
+                or type(item.get("found_negative")) is not bool
+                or type(item.get("found_magnitude")) is not int
+                or type(item.get("found_boolean")) is not bool
+            ):
+                raise AdapterError("MNCS compiler diagnostic app returned malformed found value")
+            if item["found_kind"] == 2 and not isinstance(item.get("found_text"), str):
+                raise AdapterError("MNCS compiler diagnostic app returned malformed found string")
     verdict = result.get("verdict")
     if not isinstance(verdict, str) or verdict not in {
         "compile_pass", "expected_failure", "compile_expectation_mismatch",
         "diagnostic_mismatch", "compile_failure",
     }:
         raise AdapterError("MNCS compiler diagnostic app returned an unknown verdict")
-    return verdict
+    return result
+
+
+def native_compile_diagnostic_document_verdict(
+    document: bytes,
+    expected: list[str],
+    *,
+    compiler_exit_code: int,
+    expects_failure: bool,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> str | None:
+    """Return the native compile verdict while retaining the typed result API."""
+    result = native_compile_diagnostic_document_result(
+        document,
+        expected,
+        compiler_exit_code=compiler_exit_code,
+        expects_failure=expects_failure,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if result is None:
+        return None
+    return result["verdict"]
+
+
+def native_compile_diagnostic_records(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild public diagnostic dictionaries from native typed records."""
+    if result.get("projection_supported") is not True:
+        raise AdapterError("native compile diagnostic projection is unavailable")
+    records: list[dict[str, Any]] = []
+    for item in result["diagnostics"][:result["diagnostic_count"]]:
+        found_kind = item["found_kind"]
+        if found_kind == 1:
+            found: Any = None
+        elif found_kind == 2:
+            found = item["found_text"]
+        elif found_kind == 3:
+            found = item["found_boolean"]
+        elif found_kind == 4:
+            magnitude = item["found_magnitude"]
+            found = -magnitude if item["found_negative"] else magnitude
+        else:
+            raise AdapterError("native compile diagnostic projection returned an unknown value kind")
+        records.append(
+            {
+                "code": item["code"],
+                "stage": item["stage"],
+                "severity": item["severity"],
+                "message": item["message"],
+                "span": {
+                    "start": item["span_start"],
+                    "end": item["span_end"],
+                    "line": item["span_line"],
+                    "column": item["span_column"],
+                },
+                "expected": [],
+                "found": found,
+            }
+        )
+    return records
 
 
 def native_compile_verdict(
@@ -6449,19 +6550,12 @@ def compile_entry(
             message=f"MNCS validation exceeded {timeout_seconds}s",
             timeout_seconds=timeout_seconds,
         )
-    decoded = parse_json_output(process["stdout"])
-    diagnostics = diagnostic_list(decoded)
-    test_result["process_exit_code"] = process["returncode"]
-    test_result["diagnostics"] = diagnostics
     kind = test["kind"]
     expects_failure = kind in {"compile-fail", "diagnostic"}
     expected_codes = list(test.get("diagnostic_codes", [])) if expects_failure else []
     if type(process["returncode"]) is not int:
         raise AdapterError("MNCS validation returned no process exit status")
-    compiler_result_is_object = isinstance(decoded, dict)
-    valid_field_present = compiler_result_is_object and "valid" in decoded
-    valid_field_is_true = compiler_result_is_object and decoded.get("valid") is True
-    native_verdict = native_compile_diagnostic_document_verdict(
+    native_result = native_compile_diagnostic_document_result(
         process["stdout"],
         expected_codes,
         compiler_exit_code=process["returncode"],
@@ -6470,6 +6564,21 @@ def compile_entry(
         cwd=cwd,
         environment=environment,
     )
+    if native_result is not None and native_result.get("projection_supported") is True:
+        diagnostics = native_compile_diagnostic_records(native_result)
+        compiler_result_is_object = native_result["root_is_object"]
+        valid_field_present = native_result["valid_field_present"]
+        valid_field_is_true = native_result["valid_field_is_true"]
+        native_verdict: str | None = native_result["verdict"]
+    else:
+        decoded = parse_json_output(process["stdout"])
+        diagnostics = diagnostic_list(decoded)
+        compiler_result_is_object = isinstance(decoded, dict)
+        valid_field_present = compiler_result_is_object and "valid" in decoded
+        valid_field_is_true = compiler_result_is_object and decoded.get("valid") is True
+        native_verdict = native_result["verdict"] if native_result is not None else None
+    test_result["process_exit_code"] = process["returncode"]
+    test_result["diagnostics"] = diagnostics
     if native_verdict is None:
         native_verdict = native_compile_verdict(
             diagnostics,

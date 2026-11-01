@@ -1,0 +1,609 @@
+mncs 0.18;
+
+// Project the compiler's public diagnostic value into bounded typed records.
+// Unsupported shapes decline so the Test adapter can retain its compatibility
+// path without lossy field coercion.
+module mncs.test.compile_diagnostic_projection_v1;
+
+use mncs.test.public_result_json_key_order_v1 as json_order;
+
+record FieldLookupV1 {
+    found: bool,
+    value: json_order.JsonValueV1
+}
+
+record TextReadV1 {
+    value: [byte; up_to 512],
+    valid: bool
+}
+
+record FoundValueV1 {
+    kind: byte,
+    text: [byte; up_to 512],
+    negative: bool,
+    magnitude: u64,
+    boolean: bool
+}
+
+record SpanValueV1 {
+    start: u64,
+    end: u64,
+    line: u64,
+    column: u64,
+    valid: bool
+}
+
+record UnsignedScanV1 {
+    value: u64,
+    digits: u64,
+    valid: bool
+}
+
+record DiagnosticRecordV1 {
+    code: [byte; up_to 512],
+    stage: [byte; up_to 512],
+    severity: [byte; up_to 512],
+    message: [byte; up_to 512],
+    span_start: u64,
+    span_end: u64,
+    span_line: u64,
+    span_column: u64,
+    expected_count: u64,
+    found_kind: byte,
+    found_text: [byte; up_to 512],
+    found_negative: bool,
+    found_magnitude: u64,
+    found_boolean: bool,
+    valid: bool
+}
+
+record DiagnosticArrayStateV1 {
+    remaining: json_order.JsonValueV1,
+    records: [DiagnosticRecordV1; 32],
+    count: u64,
+    valid: bool,
+    done: bool
+}
+
+record DiagnosticProjectionV1 {
+    supported: bool,
+    root_is_object: bool,
+    valid_field_present: bool,
+    valid_field_is_true: bool,
+    records: [DiagnosticRecordV1; 32],
+    count: u64
+}
+
+fn empty_lookup() -> (result: FieldLookupV1) {
+    return FieldLookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: FieldLookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } =>
+            match json_order.compare_key(wanted, current) {
+                json_order.KeyOrderV1.Equal => FieldLookupV1 { found: true, value: value },
+                json_order.KeyOrderV1.Before => empty_lookup(),
+                json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+            },
+        json_order.JsonValueV1.ObjectNil => empty_lookup(),
+        json_order.JsonValueV1.Empty => empty_lookup(),
+        json_order.JsonValueV1.Null => empty_lookup(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.Boolean { value: boolean_value } => empty_lookup(),
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => empty_lookup(),
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_lookup(),
+        json_order.JsonValueV1.Array { items: items } => empty_lookup(),
+        json_order.JsonValueV1.Object { fields: nested } => empty_lookup(),
+        json_order.JsonValueV1.ArrayNil => empty_lookup(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_lookup()
+    };
+}
+
+fn static_key(value: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: value,
+        ordered_length: value.len,
+        json_escaped: false,
+        valid: true
+    };
+}
+
+fn key_code() -> (result: json_order.KeyV1) { return static_key([99,111,100,101]); }
+fn key_stage() -> (result: json_order.KeyV1) { return static_key([115,116,97,103,101]); }
+fn key_severity() -> (result: json_order.KeyV1) { return static_key([115,101,118,101,114,105,116,121]); }
+fn key_message() -> (result: json_order.KeyV1) { return static_key([109,101,115,115,97,103,101]); }
+fn key_span() -> (result: json_order.KeyV1) { return static_key([115,112,97,110]); }
+fn key_expected() -> (result: json_order.KeyV1) { return static_key([101,120,112,101,99,116,101,100]); }
+fn key_found() -> (result: json_order.KeyV1) { return static_key([102,111,117,110,100]); }
+fn key_start() -> (result: json_order.KeyV1) { return static_key([115,116,97,114,116]); }
+fn key_end() -> (result: json_order.KeyV1) { return static_key([101,110,100]); }
+fn key_line() -> (result: json_order.KeyV1) { return static_key([108,105,110,101]); }
+fn key_column() -> (result: json_order.KeyV1) { return static_key([99,111,108,117,109,110]); }
+fn key_valid() -> (result: json_order.KeyV1) { return static_key([118,97,108,105,100]); }
+fn key_errors() -> (result: json_order.KeyV1) { return static_key([101,114,114,111,114,115]); }
+fn key_diagnostics() -> (result: json_order.KeyV1) { return static_key([100,105,97,103,110,111,115,116,105,99,115]); }
+
+fn field_count_step(remaining: json_order.JsonValueV1, count: u64, limit: u64) -> (result: u64) {
+    if count >= limit { return count +% 1; }
+    return match remaining {
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } =>
+            field_count_step(tail, count +% 1, limit),
+        json_order.JsonValueV1.ObjectNil => count,
+        json_order.JsonValueV1.Empty => count +% limit +% 1,
+        json_order.JsonValueV1.Null => count +% limit +% 1,
+        json_order.JsonValueV1.Raw { start: start, length: length } => count +% limit +% 1,
+        json_order.JsonValueV1.Boolean { value: boolean_value } => count +% limit +% 1,
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => count +% limit +% 1,
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => count +% limit +% 1,
+        json_order.JsonValueV1.String { start: start, length: length } => count +% limit +% 1,
+        json_order.JsonValueV1.Array { items: items } => count +% limit +% 1,
+        json_order.JsonValueV1.Object { fields: fields } => count +% limit +% 1,
+        json_order.JsonValueV1.ArrayNil => count +% limit +% 1,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => count +% limit +% 1
+    };
+}
+
+fn has_exact_field_count(fields: json_order.JsonValueV1, wanted: u64) -> (result: bool) {
+    return field_count_step(fields, 0, wanted +% 1) == wanted;
+}
+
+fn is_array(value: json_order.JsonValueV1) -> (result: bool) {
+    return match value {
+        json_order.JsonValueV1.Array { items: items } => true,
+        json_order.JsonValueV1.ArrayNil => true,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => true,
+        json_order.JsonValueV1.Empty => false,
+        json_order.JsonValueV1.Null => false,
+        json_order.JsonValueV1.Raw { start: start, length: length } => false,
+        json_order.JsonValueV1.Boolean { value: flag } => false,
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => false,
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => false,
+        json_order.JsonValueV1.String { start: start, length: length } => false,
+        json_order.JsonValueV1.Object { fields: fields } => false,
+        json_order.JsonValueV1.ObjectNil => false,
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => false
+    };
+}
+
+fn decode_text_span(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextReadV1) {
+    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(document, start, length);
+    return TextReadV1 { value: decoded.bytes[0..decoded.length], valid: decoded.valid };
+}
+
+fn read_text(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextReadV1) {
+    return match value {
+        json_order.JsonValueV1.String { start: start, length: length } => decode_text_span(document, start, length),
+        json_order.JsonValueV1.Empty => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Null => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Boolean { value: boolean_value } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Array { items: items } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.ArrayNil => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.ObjectNil => TextReadV1 { value: [], valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => TextReadV1 { value: [], valid: false }
+    };
+}
+
+fn unsigned_byte(state: UnsignedScanV1, value: byte) -> (result: UnsignedScanV1) {
+    let digit: u64 = (value as u64) -% 48;
+    let digit_valid: bool = value >= 48 && value <= 57;
+    let safe: bool = state.value < 1844674407370955161
+        || (state.value == 1844674407370955161 && digit <= 5);
+    if !digit_valid || !safe || state.digits >= 20 {
+        return UnsignedScanV1 { ..state, valid: false };
+    }
+    return UnsignedScanV1 {
+        value: state.value *% 10 +% digit,
+        digits: state.digits +% 1,
+        valid: state.valid
+    };
+}
+
+fn unsigned_raw_step(state: UnsignedScanV1, document: json_order.JsonTokenDocumentV1, start: u64, length: u64, index: u64) -> (result: UnsignedScanV1) {
+    if index >= length { return state; }
+    return unsigned_byte(state, json_order.located_byte(document, start +% index));
+}
+
+fn unsigned_raw(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: SpanValueV1) {
+    let initial: UnsignedScanV1 = UnsignedScanV1 { value: 0, digits: 0, valid: length > 0 && length <= 20 };
+    iterate i up_to 20 carrying scanned: UnsignedScanV1 = initial {
+        next scanned = unsigned_raw_step(scanned, document, start, length, i);
+    }
+    return SpanValueV1 {
+        start: scanned.value,
+        end: 0,
+        line: 0,
+        column: 0,
+        valid: scanned.valid && scanned.digits == length
+    };
+}
+
+fn raw_token_is(document: json_order.JsonTokenDocumentV1, start: u64, length: u64, expected: [byte; up_to 8]) -> (result: bool) {
+    if length != expected.len { return false; }
+    iterate i over expected carrying equal: bool = true {
+        next equal = equal && json_order.located_byte(document, start +% i) == expected[i];
+    }
+    return equal;
+}
+
+fn found_raw_token(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: FoundValueV1) {
+    if raw_token_is(document, start, length, [110,117,108,108]) {
+        return FoundValueV1 { kind: 1, text: [], negative: false, magnitude: 0, boolean: false };
+    }
+    if raw_token_is(document, start, length, [116,114,117,101]) {
+        return FoundValueV1 { kind: 3, text: [], negative: false, magnitude: 0, boolean: true };
+    }
+    if raw_token_is(document, start, length, [102,97,108,115,101]) {
+        return FoundValueV1 { kind: 3, text: [], negative: false, magnitude: 0, boolean: false };
+    }
+    let negative: bool = length > 1 && json_order.located_byte(document, start) == 45;
+    let negative_width: u64 = select(negative, 1, 0);
+    let number_start: u64 = start +% negative_width;
+    let number_length: u64 = length -% negative_width;
+    let number: SpanValueV1 = unsigned_raw(document, number_start, number_length);
+    if number.valid {
+        return FoundValueV1 {
+            kind: 4,
+            text: [],
+            negative: negative,
+            magnitude: number.start,
+            boolean: false
+        };
+    }
+    return FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false };
+}
+
+fn read_unsigned(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: SpanValueV1) {
+    return match value {
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } =>
+            SpanValueV1 { start: magnitude, end: 0, line: 0, column: 0, valid: !negative },
+        json_order.JsonValueV1.Raw { start: start, length: length } => unsigned_raw(document, start, length),
+        json_order.JsonValueV1.Empty => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Null => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Boolean { value: boolean_value } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Array { items: items } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Object { fields: fields } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ArrayNil => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ObjectNil => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false }
+    };
+}
+
+fn project_span_fields(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: SpanValueV1) {
+    let start_value: FieldLookupV1 = lookup_field(fields, key_start());
+    let end_value: FieldLookupV1 = lookup_field(fields, key_end());
+    let line_value: FieldLookupV1 = lookup_field(fields, key_line());
+    let column_value: FieldLookupV1 = lookup_field(fields, key_column());
+    let start: SpanValueV1 = read_unsigned(start_value.value, document);
+    let end: SpanValueV1 = read_unsigned(end_value.value, document);
+    let line: SpanValueV1 = read_unsigned(line_value.value, document);
+    let column: SpanValueV1 = read_unsigned(column_value.value, document);
+    return SpanValueV1 {
+        start: start.start,
+        end: end.start,
+        line: line.start,
+        column: column.start,
+        valid: start_value.found && end_value.found && line_value.found && column_value.found
+            && has_exact_field_count(fields, 4)
+            && start.valid && end.valid && line.valid && column.valid
+    };
+}
+
+fn project_span(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: SpanValueV1) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => project_span_fields(fields, document),
+        json_order.JsonValueV1.Empty => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Null => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Boolean { value: boolean_value } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.String { start: start, length: length } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.Array { items: items } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ArrayNil => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ObjectNil => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => SpanValueV1 { start: 0, end: 0, line: 0, column: 0, valid: false }
+    };
+}
+
+fn raw_empty_array_space_step(document: json_order.JsonTokenDocumentV1, start: u64, length: u64, index: u64, still_empty: bool) -> (result: bool) {
+    if index +% 1 >= length -% 1 { return still_empty; }
+    let value: byte = json_order.located_byte(document, start +% index +% 1);
+    let space: bool = value == 9 || value == 10 || value == 13 || value == 32;
+    return still_empty && space;
+}
+
+fn raw_empty_array(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: bool) {
+    if length < 2 || length > 1024
+        || json_order.located_byte(document, start) != 91
+        || json_order.located_byte(document, start +% length -% 1) != 93 {
+        return false;
+    }
+    iterate i up_to 1024 carrying empty: bool = true {
+        next empty = raw_empty_array_space_step(document, start, length, i, empty);
+    }
+    return empty;
+}
+
+fn expected_is_empty(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: bool) {
+    return match value {
+        json_order.JsonValueV1.ArrayNil => true,
+        json_order.JsonValueV1.Array { items: items } => json_order.is_array_nil(items),
+        json_order.JsonValueV1.Raw { start: start, length: length } => raw_empty_array(document, start, length),
+        json_order.JsonValueV1.Empty => false,
+        json_order.JsonValueV1.Null => false,
+        json_order.JsonValueV1.Boolean { value: flag } => false,
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => false,
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => false,
+        json_order.JsonValueV1.String { start: start, length: length } => false,
+        json_order.JsonValueV1.Object { fields: fields } => false,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => false,
+        json_order.JsonValueV1.ObjectNil => false,
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => false
+    };
+}
+
+fn found_text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: FoundValueV1) {
+    let text: TextReadV1 = read_text(value, document);
+    return FoundValueV1 { kind: 2, text: text.value, negative: false, magnitude: 0, boolean: text.valid };
+}
+
+fn project_found(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: FoundValueV1) {
+    return match value {
+        json_order.JsonValueV1.Null => FoundValueV1 { kind: 1, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.String { start: start, length: length } => found_text_value(value, document),
+        json_order.JsonValueV1.Boolean { value: flag } => FoundValueV1 { kind: 3, text: [], negative: false, magnitude: 0, boolean: flag },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => FoundValueV1 { kind: 4, text: [], negative: negative, magnitude: magnitude, boolean: false },
+        json_order.JsonValueV1.Empty => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.Raw { start: start, length: length } => found_raw_token(document, start, length),
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.Array { items: items } => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.Object { fields: fields } => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.ArrayNil => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.ObjectNil => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => FoundValueV1 { kind: 0, text: [], negative: false, magnitude: 0, boolean: false }
+    };
+}
+
+fn empty_diagnostic() -> (result: DiagnosticRecordV1) {
+    return DiagnosticRecordV1 {
+        code: [], stage: [], severity: [], message: [],
+        span_start: 0, span_end: 0, span_line: 0, span_column: 0,
+        expected_count: 0,
+        found_kind: 0, found_text: [], found_negative: false,
+        found_magnitude: 0, found_boolean: false, valid: false
+    };
+}
+
+fn project_diagnostic(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DiagnosticRecordV1) {
+    let code_field: FieldLookupV1 = lookup_field(fields, key_code());
+    let stage_field: FieldLookupV1 = lookup_field(fields, key_stage());
+    let severity_field: FieldLookupV1 = lookup_field(fields, key_severity());
+    let message_field: FieldLookupV1 = lookup_field(fields, key_message());
+    let span_field: FieldLookupV1 = lookup_field(fields, key_span());
+    let expected_field: FieldLookupV1 = lookup_field(fields, key_expected());
+    let found_field: FieldLookupV1 = lookup_field(fields, key_found());
+    let code: TextReadV1 = read_text(code_field.value, document);
+    let stage: TextReadV1 = read_text(stage_field.value, document);
+    let severity: TextReadV1 = read_text(severity_field.value, document);
+    let message: TextReadV1 = read_text(message_field.value, document);
+    let span: SpanValueV1 = project_span(span_field.value, document);
+    let expected_empty: bool = expected_is_empty(expected_field.value, document);
+    let found: FoundValueV1 = project_found(found_field.value, document);
+    let found_valid: bool = found.kind != 0 && (found.kind != 2 || found.boolean);
+    return DiagnosticRecordV1 {
+        code: code.value,
+        stage: stage.value,
+        severity: severity.value,
+        message: message.value,
+        span_start: span.start,
+        span_end: span.end,
+        span_line: span.line,
+        span_column: span.column,
+        expected_count: 0,
+        found_kind: found.kind,
+        found_text: found.text,
+        found_negative: found.negative,
+        found_magnitude: found.magnitude,
+        found_boolean: found.boolean,
+        valid: code_field.found && stage_field.found && severity_field.found && message_field.found
+            && span_field.found && expected_field.found && found_field.found
+            && has_exact_field_count(fields, 7)
+            && code.valid && stage.valid && severity.valid && message.valid
+            && span.valid && expected_empty && found_valid
+    };
+}
+
+fn empty_diagnostic_array_state() -> (result: DiagnosticArrayStateV1) {
+    return DiagnosticArrayStateV1 {
+        remaining: json_order.JsonValueV1.ArrayNil,
+        records: [empty_diagnostic(); 32],
+        count: 0,
+        valid: true,
+        done: false
+    };
+}
+
+fn project_diagnostic_item(
+    state: DiagnosticArrayStateV1,
+    item: json_order.JsonValueV1,
+    tail: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: DiagnosticArrayStateV1) {
+    return match item {
+        json_order.JsonValueV1.Object { fields: fields } => append_projected_diagnostic(state, fields, tail, document),
+                json_order.JsonValueV1.Empty => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.Null => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.Raw { start: start, length: length } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.Boolean { value: flag } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.Utf8String { start: start, length: length } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.String { start: start, length: length } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.Array { items: items } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.ArrayNil => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.ArrayCons { head: nested, tail: nested_tail } => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.ObjectNil => DiagnosticArrayStateV1 { ..state, remaining: tail },
+                json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: object_tail } => DiagnosticArrayStateV1 { ..state, remaining: tail }
+    };
+}
+
+fn append_projected_diagnostic(
+    state: DiagnosticArrayStateV1,
+    fields: json_order.JsonValueV1,
+    tail: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: DiagnosticArrayStateV1) {
+    if state.count >= 32 {
+        return DiagnosticArrayStateV1 { ..state, valid: false, done: true };
+    }
+    let diagnostic: DiagnosticRecordV1 = project_diagnostic(fields, document);
+    if !diagnostic.valid {
+        return DiagnosticArrayStateV1 { ..state, valid: false, done: true };
+    }
+    return DiagnosticArrayStateV1 {
+        ..state,
+        remaining: tail,
+        records: replace(state.records, state.count, diagnostic),
+        count: state.count +% 1
+    };
+}
+
+fn diagnostic_array_step(state: DiagnosticArrayStateV1, document: json_order.JsonTokenDocumentV1) -> (result: DiagnosticArrayStateV1) {
+    return match state.remaining {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => project_diagnostic_item(state, head, tail, document),
+        json_order.JsonValueV1.ArrayNil => DiagnosticArrayStateV1 { ..state, done: true },
+        json_order.JsonValueV1.Empty => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Null => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.String { start: start, length: length } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Array { items: items } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.Object { fields: fields } => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => DiagnosticArrayStateV1 { ..state, valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => DiagnosticArrayStateV1 { ..state, valid: false, done: true }
+    };
+}
+
+fn project_diagnostic_array(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DiagnosticArrayStateV1) {
+    let initial: DiagnosticArrayStateV1 = match value {
+        json_order.JsonValueV1.Array { items: items } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), remaining: items },
+        json_order.JsonValueV1.ArrayNil => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), done: true },
+        json_order.JsonValueV1.Empty => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Null => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Raw { start: start, length: length } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Boolean { value: flag } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.String { start: start, length: length } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.Object { fields: fields } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.ObjectNil => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true },
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => DiagnosticArrayStateV1 { ..empty_diagnostic_array_state(), valid: false, done: true }
+    };
+    iterate i up_to 64 carrying scanned: DiagnosticArrayStateV1 = initial {
+        next scanned = select(scanned.done, scanned, diagnostic_array_step(scanned, document));
+    }
+    return DiagnosticArrayStateV1 { ..scanned, valid: scanned.valid && scanned.done };
+}
+
+fn empty_projection() -> (result: DiagnosticProjectionV1) {
+    return DiagnosticProjectionV1 {
+        supported: false,
+        root_is_object: false,
+        valid_field_present: false,
+        valid_field_is_true: false,
+        records: [empty_diagnostic(); 32],
+        count: 0
+    };
+}
+
+fn project_root_array(root: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DiagnosticProjectionV1) {
+    let projected: DiagnosticArrayStateV1 = project_diagnostic_array(root, document);
+    return DiagnosticProjectionV1 {
+        supported: projected.valid,
+        root_is_object: false,
+        valid_field_present: false,
+        valid_field_is_true: false,
+        records: projected.records,
+        count: projected.count
+    };
+}
+
+fn project_root_object(fields: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DiagnosticProjectionV1) {
+    let valid_value: FieldLookupV1 = lookup_field(fields, key_valid());
+    let errors_value: FieldLookupV1 = lookup_field(fields, key_errors());
+    let diagnostics_value: FieldLookupV1 = lookup_field(fields, key_diagnostics());
+    let selected: json_order.JsonValueV1 = select(
+        errors_value.found && is_array(errors_value.value),
+        errors_value.value,
+        select(
+            diagnostics_value.found && is_array(diagnostics_value.value),
+            diagnostics_value.value,
+            json_order.JsonValueV1.ArrayNil
+        )
+    );
+    let valid_true: bool = match valid_value.value {
+        json_order.JsonValueV1.Boolean { value: flag } => valid_value.found && flag,
+        json_order.JsonValueV1.Empty => false,
+        json_order.JsonValueV1.Null => false,
+        json_order.JsonValueV1.Raw { start: start, length: length } => false,
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => false,
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => false,
+        json_order.JsonValueV1.String { start: start, length: length } => false,
+        json_order.JsonValueV1.Array { items: items } => false,
+        json_order.JsonValueV1.Object { fields: nested } => false,
+        json_order.JsonValueV1.ArrayNil => false,
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => false,
+        json_order.JsonValueV1.ObjectNil => false,
+        json_order.JsonValueV1.ObjectCons { key: key, value: inner, tail: rest } => false
+    };
+    let projected: DiagnosticArrayStateV1 = project_diagnostic_array(selected, document);
+    return DiagnosticProjectionV1 {
+        supported: projected.valid,
+        root_is_object: true,
+        valid_field_present: valid_value.found,
+        valid_field_is_true: valid_true,
+        records: projected.records,
+        count: projected.count
+    };
+}
+
+fn project_root(root: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DiagnosticProjectionV1) {
+    return match root {
+        json_order.JsonValueV1.Array { items: items } => project_root_array(root, document),
+        json_order.JsonValueV1.Object { fields: fields } => project_root_object(fields, document),
+        json_order.JsonValueV1.Empty => empty_projection(),
+        json_order.JsonValueV1.Null => empty_projection(),
+        json_order.JsonValueV1.Raw { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.Boolean { value: flag } => empty_projection(),
+        json_order.JsonValueV1.Integer { negative: negative, magnitude: magnitude } => empty_projection(),
+        json_order.JsonValueV1.Utf8String { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.String { start: start, length: length } => empty_projection(),
+        json_order.JsonValueV1.ArrayNil => empty_projection(),
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => empty_projection(),
+        json_order.JsonValueV1.ObjectNil => empty_projection(),
+        json_order.JsonValueV1.ObjectCons { key: key, value: value, tail: tail } => empty_projection()
+    };
+}
+
+fn project(document: json_order.JsonTokenDocumentV1, request_valid: bool) -> (result: DiagnosticProjectionV1) {
+    if !request_valid { return empty_projection(); }
+    let parsed: json_order.ParseStateV1 = json_order.parse_checked(document, request_valid);
+    if !parsed.valid || !parsed.has_root { return empty_projection(); }
+    return project_root(parsed.root, document);
+}
