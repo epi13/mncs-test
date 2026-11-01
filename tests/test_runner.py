@@ -756,7 +756,6 @@ class RunnerTests(unittest.TestCase):
             serializer_applications
             and set(serializer_applications)
             <= {
-                "test-public-result-json-value-input.json",
                 "test-public-result-json-native-token-tape.json",
                 "test-public-result-json-source-digest.json",
                 "test-public-result-json-token-tape.json",

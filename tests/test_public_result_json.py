@@ -37,61 +37,23 @@ def _native_environment() -> dict[str, str]:
 
 
 def _assert_native_raw_token_route(applications: list[str]) -> None:
-    if applications and applications[0] == "test-public-result-json-value-input.json":
-        if len(applications) == 1:
-            return
-        if set(applications) <= {
-            "test-public-result-json-value-input.json",
-            "test-public-result-json-source-digest.json",
-        }:
-            assert "test-public-result-json-source-digest.json" in applications
-            return
-        assert len(applications) > 1
-        if applications[1] != "test-public-result-json-token.json":
-            _assert_native_raw_token_route(applications[1:])
-            return
-        fallback = next(
-            (index for index, name in enumerate(applications)
-             if name == "test-public-result-json-native-token-tape.json"),
-            None,
+    assert applications
+    assert "test-public-result-json-value-input.json" not in applications
+    if "test-public-result-json-native-token-tape.json" in applications:
+        assert "test-public-result-json-token-tape.json" in applications or (
+            "test-public-result-json-token.json" in applications
         )
-        if fallback is None:
-            assert set(applications) <= {
-                "test-public-result-json-value-input.json",
-                "test-public-result-json-token.json",
-                "test-public-result-json-token-window.json",
-            }
-            return
-        assert set(applications[:fallback]) <= {
-            "test-public-result-json-value-input.json",
-            "test-public-result-json-token.json",
-            "test-public-result-json-token-window.json",
-        }
-        _assert_native_raw_token_route(applications[fallback:])
-        return
-    assert applications[-1] == "test-public-result-json-source-digest.json"
-    assert applications[0] == "test-public-result-json-native-token-tape.json"
-    assert "test-public-result-json-token-tape.json" in applications
-    expected = {
-        "test-public-result-json-native-token-tape.json",
-        "test-public-result-json-source-digest.json",
-        "test-public-result-json-token-tape.json",
-    }
-    assert set(applications) in (expected, expected | {
-        "test-public-result-json-native-token-tape-window.json",
-    })
+        if "test-public-result-json-token-tape.json" in applications:
+            assert "test-public-result-json-source-digest.json" in applications
+            assert applications[-1] == "test-public-result-json-source-digest.json"
 
 
-def _assert_native_value_input_route(
+def _assert_native_token_tape_attempt(
     observed: list[tuple[str, dict[str, object]]],
 ) -> None:
     assert observed
-    assert observed[0][0] == "test-public-result-json-value-input.json"
-    result = observed[0][1]
-    assert result["supported"] is True
-    assert type(result.get("node_count")) is int and result["node_count"] > 0
-    assert type(result.get("document_length")) is int and result["document_length"] > 0
-    assert isinstance(result.get("chunks"), list) and result["chunks"]
+    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
+    assert all(name != "test-public-result-json-value-input.json" for name, _ in observed)
 
 
 def _python_result_bytes(value: object) -> bytes:
@@ -128,44 +90,7 @@ def test_native_request_transports_one_compact_json_document() -> None:
     assert "edges" not in request
 
 
-def test_native_public_value_request_packs_strings_and_floats() -> None:
-    value = {"κ": ["Lúna 東京", None, True, False, -(2**64 - 1), 2**64 - 1]}
-    request = mncs_test._native_public_result_value_request(value)
-
-    assert request is not None
-    assert request["schema_version"] == mncs_test.PUBLIC_RESULT_JSON_VALUE_INPUT_REQUEST_SCHEMA
-    assert request["node_count"] == 8
-    tape = "".join(chunk["bytes"] for chunk in request["node_tape"])
-    rows = tape.split(";")[:-1]
-    assert len(rows) == request["node_count"]
-    assert [int(row[0], 16) for row in rows] == [6, 5, 4, 0, 2, 1, 3, 3]
-    assert rows[1][1] == "1"
-    assert [int(field, 16) for field in rows[1][2:].split(",")] == [
-        0, len("κ".encode("utf-8")), 6,
-    ]
-    assert [int(field, 16) for field in rows[2][2:].split(",")] == [
-        len("κ".encode("utf-8")), len("Lúna 東京".encode("utf-8")),
-    ]
-    packed = "".join(chunk["bytes"] for chunk in request["text"]["chunks"])
-    assert packed == "κLúna 東京"
-    assert request["text"]["byte_length"] == len(packed.encode("utf-8"))
-    assert all(chunk["bytes"].endswith(";") for chunk in request["node_tape"])
-    assert all(chunk["length"] <= mncs_test.PUBLIC_RESULT_JSON_INPUT_CHUNK_BYTES
-               for chunk in request["node_tape"])
-
-    cycle: list[object] = []
-    cycle.append(cycle)
-    float_request = mncs_test._native_public_result_value_request({"float": 1.5})
-    assert float_request is not None
-    float_rows = "".join(chunk["bytes"] for chunk in float_request["node_tape"]).split(";")[:-1]
-    assert [int(row[0], 16) for row in float_rows] == [6, 7]
-    assert "".join(chunk["bytes"] for chunk in float_request["text"]["chunks"]) == "float1.5"
-    assert mncs_test._native_public_result_value_request({"large": 2**64}) is None
-    assert mncs_test._native_public_result_value_request({1: "non-string key"}) is None
-    assert mncs_test._native_public_result_value_request(cycle) is None
-
-
-def test_native_public_value_encoding_replaces_python_compact_projection(
+def test_native_public_result_retires_python_typed_value_projection(
     tmp_path: Path,
 ) -> None:
     value = {
@@ -178,7 +103,7 @@ def test_native_public_value_encoding_replaces_python_compact_projection(
         True,
         False,
         -(2**64 - 1),
-        2**64 - 1,
+        2**80,
         ("tuple", {"z": 0, "a": 1}),
     ]
     expected = _python_result_bytes(value)
@@ -194,15 +119,10 @@ def test_native_public_value_encoding_replaces_python_compact_projection(
 
     with (
         mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+        mock.patch.object(
             mncs_test, "run_native_app", side_effect=observe_native_app
-        ),
-        mock.patch.object(
-            mncs_test, "compact_json", side_effect=AssertionError("host JSON projection used")
-        ),
-        mock.patch.object(
-            mncs_test,
-            "_public_result_ordering_requirements",
-            side_effect=AssertionError("host value-tree scan used"),
         ),
     ):
         actual, digest = mncs_test._native_public_result_payload(
@@ -214,12 +134,14 @@ def test_native_public_value_encoding_replaces_python_compact_projection(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert observed[0][0] == "test-public-result-json-value-input.json"
+    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
     assert observed[0][1]["supported"] is True
-    assert "test-public-result-json-key-order.json" not in [name for name, _ in observed]
+    assert all(name != "test-public-result-json-value-input.json" for name, _ in observed)
+    assert not hasattr(mncs_test, "_native_public_result_value_request")
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
-def test_native_public_value_encoding_emits_finite_floats_differentially(
+def test_native_public_result_token_route_emits_finite_floats_differentially(
     tmp_path: Path,
 ) -> None:
     value = {
@@ -233,31 +155,23 @@ def test_native_public_value_encoding_emits_finite_floats_differentially(
             "max_finite": 1.7976931348623157e308,
         },
     }
-    request = mncs_test._native_public_result_value_request(value)
-    assert request is not None
-    rows = "".join(chunk["bytes"] for chunk in request["node_tape"]).split(";")[:-1]
-    assert [int(row[0], 16) for row in rows] == [6, 7, 7, 5, 7, 7, 6, 7, 7, 7, 7]
-
     expected = _python_result_bytes(value)
-    observed: list[tuple[str, dict[str, object]]] = []
+    observed: list[str] = []
     original_run_native_app = mncs_test.run_native_app
 
     def observe_native_app(
-        name: str, native_request: dict[str, object], **kwargs: object
+        name: str, request: dict[str, object], **kwargs: object
     ) -> dict[str, object]:
-        result = original_run_native_app(name, native_request, **kwargs)
-        observed.append((name, result))
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append(name)
         return result
 
     with (
-        mock.patch.object(mncs_test, "run_native_app", side_effect=observe_native_app),
         mock.patch.object(
-            mncs_test, "compact_json", side_effect=AssertionError("host JSON projection used")
-        ),
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
         mock.patch.object(
-            mncs_test,
-            "_public_result_ordering_requirements",
-            side_effect=AssertionError("host value-tree scan used"),
+            mncs_test, "run_native_app", side_effect=observe_native_app
         ),
     ):
         actual, digest = mncs_test._native_public_result_payload(
@@ -269,18 +183,26 @@ def test_native_public_value_encoding_emits_finite_floats_differentially(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert observed[0][0] == "test-public-result-json-value-input.json"
-    assert observed[0][1]["supported"] is True
-    assert all(name != "test-public-result-json-key-order.json" for name, _ in observed)
+    assert observed[0] == "test-public-result-json-native-token-tape.json"
+    assert "test-public-result-json-value-input.json" not in observed
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
-def test_native_public_value_encoder_rejects_non_json_float_tokens(tmp_path: Path) -> None:
-    assert mncs_test._native_public_result_value_payload(
-        float("nan"),
+def test_native_public_result_token_route_accepts_large_python_integers(
+    tmp_path: Path,
+) -> None:
+    value = {"large": 2**80}
+    expected = _python_result_bytes(value)
+
+    actual, digest = mncs_test._native_public_result_payload(
+        value,
         mncs=str(MNCS),
         cwd=tmp_path,
         environment=_native_environment(),
-    ) is None
+    )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
 
 
 def test_native_raw_tokenizer_reuses_transport_source_digest(tmp_path: Path) -> None:
@@ -586,10 +508,7 @@ def test_validate_manifest_json_uses_native_serializer_for_ascii_output(
     assert exit_code == mncs_test.EXIT_SUCCESS
     assert output == _python_result_bytes(document)
     applications = [call.args[0] for call in native_app.call_args_list]
-    assert applications[-2:] == [
-        "test-public-result-json-value-input.json",
-        "test-public-result-json-source-digest.json",
-    ]
+    _assert_native_raw_token_route(applications)
 
 
 def test_ascii_json_mode_keeps_escaped_unicode_compatibility(
@@ -673,8 +592,8 @@ def test_ascii_json_mode_keeps_bounded_expansion_fallback(
     assert output == expected
     assert output.isascii()
     applications = [call.args[0] for call in native_app.call_args_list]
-    assert applications.count("test-public-result-json-value-input.json") >= 1
-    assert applications.count("test-public-result-json-source-digest.json") >= 1
+    assert "test-public-result-json-value-input.json" not in applications
+    assert "test-public-result-json-native-token-tape.json" in applications
     assert applications[-1] == "test-public-result-json-ascii-escape.json"
 
 
@@ -822,8 +741,8 @@ def test_native_key_order_handles_values_past_the_legacy_token_bound(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_value_input_route(observed)
-    compact.assert_not_called()
+    _assert_native_token_tape_attempt(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
 def test_native_key_order_sorts_object_descendants_in_large_arrays(
@@ -858,8 +777,8 @@ def test_native_key_order_sorts_object_descendants_in_large_arrays(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_value_input_route(observed)
-    compact.assert_not_called()
+    _assert_native_token_tape_attempt(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
 def test_native_key_order_handles_exact_value_bound_with_object_in_array(
@@ -894,8 +813,8 @@ def test_native_key_order_handles_exact_value_bound_with_object_in_array(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_value_input_route(observed)
-    compact.assert_not_called()
+    _assert_native_token_tape_attempt(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
 def test_native_public_result_key_order_handles_128_object_members(
@@ -925,7 +844,7 @@ def test_native_public_result_key_order_handles_128_object_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_value_input_route(observed)
+    _assert_native_token_tape_attempt(observed)
 
 
 def test_native_public_result_key_order_handles_129_members(
@@ -955,7 +874,7 @@ def test_native_public_result_key_order_handles_129_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_value_input_route(observed)
+    _assert_native_token_tape_attempt(observed)
 
 
 @pytest.mark.parametrize(
@@ -990,7 +909,7 @@ def test_native_public_result_key_order_handles_256_object_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_value_input_route(observed)
+    _assert_native_token_tape_attempt(observed)
 
 
 def test_native_public_result_key_order_handles_257_members(
@@ -1025,8 +944,8 @@ def test_native_public_result_key_order_handles_257_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    compact.assert_not_called()
-    _assert_native_value_input_route(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    _assert_native_token_tape_attempt(observed)
 @pytest.mark.parametrize(
     "indices",
     [tuple(range(512)), tuple(reversed(range(512)))],
@@ -1064,8 +983,8 @@ def test_native_public_result_key_order_handles_512_scalar_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    compact.assert_not_called()
-    _assert_native_value_input_route(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    _assert_native_token_tape_attempt(observed)
 
 
 @pytest.mark.parametrize(
@@ -1105,8 +1024,8 @@ def test_native_public_result_key_order_handles_640_scalar_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    compact.assert_not_called()
-    _assert_native_value_input_route(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    _assert_native_token_tape_attempt(observed)
 
 
 def test_native_public_result_key_order_falls_back_at_641_members(
@@ -1202,8 +1121,8 @@ def test_native_public_result_key_order_handles_513_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    compact.assert_not_called()
-    _assert_native_value_input_route(observed)
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    _assert_native_token_tape_attempt(observed)
 
 
 def test_native_public_result_merge_sort_rejects_duplicate_keys_after_128_members(
@@ -1341,11 +1260,11 @@ def test_native_key_order_sorts_a_33_kibibyte_object_with_one_host_transport_pas
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_results[0][0] == "test-public-result-json-value-input.json"
+    assert native_results[0][0] == "test-public-result-json-native-token-tape.json"
     assert native_results[0][1]["supported"] is True
     calls = [call.args[0] for call in native_app.call_args_list]
     _assert_native_raw_token_route(calls)
-    compact.assert_not_called()
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
 def test_non_string_mapping_keys_keep_python_sort_semantics(tmp_path: Path) -> None:
@@ -1634,11 +1553,7 @@ def test_public_result_preflights_utf8_input_that_needs_a_65th_chunk(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    if mncs_test._native_public_result_value_request(value) is None:
-        native_app.assert_not_called()
-    else:
-        native_app.assert_called_once()
-        assert native_app.call_args.args[0] == "test-public-result-json-value-input.json"
+    native_app.assert_not_called()
 
 
 def test_results_through_expanded_native_window_use_native_json(
@@ -1664,15 +1579,10 @@ def test_results_through_expanded_native_window_use_native_json(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert 2 < len(calls) <= 13
-    assert calls[0] == "test-public-result-json-native-token-tape.json"
-    assert set(calls[1:]) == {
-        "test-public-result-json-native-token-tape-window.json",
-        "test-public-result-json-source-digest.json",
-        "test-public-result-json-token-tape.json",
+    assert calls == [
+        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
-        "test-public-result-json-token-window.json",
-    }
+    ]
 
 
 def test_large_array_uses_native_json_without_python_typed_token_projection(
@@ -1702,7 +1612,7 @@ def test_large_array_uses_native_json_without_python_typed_token_projection(
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
     _assert_native_raw_token_route(calls)
-    compact.assert_not_called()
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
 def test_results_above_expanded_native_window_keep_compatibility_json(
@@ -1776,11 +1686,9 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
-        "test-public-result-json-value-input.json",
         "test-public-result-json-native-token-tape.json",
         "test-public-result-json-key-order.json",
         "test-public-result-json-token.json",
-        "test-public-result-json-value-input.json",
         "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
     ]

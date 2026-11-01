@@ -147,14 +147,14 @@ adapter rejoins those chunks when it writes the public JSON document. The
 compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_token_tape_v1` receives the compact JSON transport
 chunks and token spans produced by its MNCS cursor application. The Python
-boundary encodes each supported value once so it can cross the structured
-application boundary; MNCS initializes scanner and cursor state through the
-shared `json.init()` and `json_cursor.init()` functions. The first native
-request carries only the bounded document and its digest; continuation windows
-carry state returned by MNCS. A narrow compatibility check preserves Python's
-key ordering for mappings with non-string keys. Python does not project the
-value tree into typed tokens, initialize native parser state, or estimate
-native token bounds. MNCS scans the bounded
+boundary compact-encodes each supported value once into JSON transport bytes;
+it no longer builds a Python preorder typed-value tape. A narrow compatibility
+check preserves Python's key ordering for mappings with non-string keys. The
+Test-owned `json_token_cursor_v1` combines the shared `json.v1` validator with
+`json_cursor.v1` token spans and adds scalar spans. The first native request
+carries only the bounded document and its digest; continuation windows carry
+state returned by MNCS. Python does not initialize native parser state or
+estimate native token bounds. MNCS scans the bounded
 source in four 1 KiB chunks per window, carries cursor and JSON validation
 state between calls, validates the token spans, constructs a bounded native
 value, sorts object keys by decoded UTF-8, and writes the public indented JSON
@@ -934,3 +934,18 @@ the implementation therefore bounds its merge/reverse work at 640 instead of
 raising the execution limit. The existing 1,024-value ceiling remains
 independent of this object-member bound. All 53 public-result JSON regressions
 pass with the release MNCS binary and integrated Stdlib JSON cursor provider.
+
+P-044 removes the Python typed-value preorder tape from public-result
+serialization. Python now compact-encodes a supported value once as JSON
+transport bytes, then MNCS validates and tokenizes the document through the
+Test-owned `json_token_cursor_v1` path and uses the existing native token and
+document formatters for ordering, pretty output, and digesting. The native
+token tape remains bounded at 512 tokens; larger token shapes can continue
+through the bounded document formatter when its value, depth, byte, and step
+limits admit them. Python retains a compatibility preflight for non-string
+mapping keys, custom containers, and cycles, plus exact sorted fallback when
+native bounds or execution budgets decline an input. Independent output-byte
+and SHA-256 comparisons cover large integers, finite floats, Unicode and
+control text, large objects and arrays, and expanded output. The complete
+public-result JSON suite passes all 56 tests with the release MNCS binary and
+integrated Stdlib JSON cursor provider.
