@@ -963,3 +963,15 @@ compatibility route, and host aggregation policy remains in its existing owner.
 The 16-record batch and 16,384-byte per-document bounds keep transport and native
 work finite. The parser already serves this Test consumer, so P-045 did not add a
 Stdlib API.
+
+P-046 moves non-first-class public-result summary field projection into
+`mncs.test.result_summary_projection_v1`. Python compacts the bounded result-row
+array once as UTF-8 transport; MNCS parses up to 256 rows, resolves the summary
+fields, validates string and unsigned-count bounds, and feeds the existing
+`mncs.test.result_summary_v1::observe_entry` reducer. Only summary-relevant
+verdict, skipped status, and recognized failure-class values are passed to the
+reducer. The native document is limited to 65,536 bytes and 1,024 parsed values;
+unsupported fields, larger documents, and native declines retain the previous
+compatibility projection. Differential tests cover exact summary counters and
+non-integer count fallback, and the live expected-runtime-failure runner covers
+the consumer boundary.

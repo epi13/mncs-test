@@ -69,6 +69,9 @@ NATIVE_RESULT_PROJECTION_REQUEST_SCHEMA = "mncs.test.native-result-projection-re
 NATIVE_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test.native-result-projection/1"
 NATIVE_RESULT_PROJECTION_MAX_ITEMS = 16
 NATIVE_RESULT_PROJECTION_MAX_DOCUMENT_BYTES = 16_384
+NATIVE_RESULT_SUMMARY_PROJECTION_REQUEST_SCHEMA = "mncs.test.result-summary-projection-request/1"
+NATIVE_RESULT_SUMMARY_PROJECTION_RESULT_SCHEMA = "mncs.test.result-summary-projection/1"
+NATIVE_RESULT_SUMMARY_PROJECTION_MAX_BYTES = 65_536
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-manifest-request/1"
@@ -2172,7 +2175,100 @@ def native_result_projection_batch(
     return projected, stats
 
 
+def _native_result_summary_projection(
+    test_results: list[dict[str, Any]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, int] | None:
+    try:
+        encoded = compact_json(test_results, sort_keys=False).encode("utf-8")
+    except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+        return None
+    if not encoded or len(encoded) > NATIVE_RESULT_SUMMARY_PROJECTION_MAX_BYTES:
+        return None
+    chunks = _public_result_input_chunks(encoded)
+    request = {
+        "schema_version": NATIVE_RESULT_SUMMARY_PROJECTION_REQUEST_SCHEMA,
+        "item_count": len(test_results),
+        "document": {
+            "chunks": [
+                {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+                for chunk in chunks
+            ],
+            "byte_length": len(encoded),
+        },
+    }
+    try:
+        result = run_native_app(
+            "test-result-summary-projection.json",
+            request,
+            request_schema=NATIVE_RESULT_SUMMARY_PROJECTION_REQUEST_SCHEMA,
+            result_schema=NATIVE_RESULT_SUMMARY_PROJECTION_RESULT_SCHEMA,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+            step_budget=8_000_000,
+        )
+    except (NativeTransportError, OSError, subprocess.TimeoutExpired):
+        return None
+
+    returned = result.get("summary")
+    fields = (
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "unsupported",
+        "assertion_failures",
+        "setup_failures",
+        "compile_failures",
+        "runtime_failures",
+        "timeout_failures",
+        "infrastructure_failures",
+        "assertion_count",
+        "failure_count",
+    )
+    maximum_count = (1 << 64) - 1
+    if (
+        result.get("schema_version") != NATIVE_RESULT_SUMMARY_PROJECTION_RESULT_SCHEMA
+        or type(result.get("item_count")) is not int
+        or result["item_count"] != len(test_results)
+        or result.get("supported") is not True
+        or not isinstance(returned, dict)
+    ):
+        return None
+    summary = {field: returned.get(field) for field in fields}
+    if any(
+        type(value) is not int or not 0 <= value <= maximum_count
+        for value in summary.values()
+    ):
+        return None
+    return {field: int(value) for field, value in summary.items()}
+
+
 def native_result_summary(
+    test_results: list[dict[str, Any]],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> dict[str, int]:
+    """Summarize bounded public result rows in MNCS before host projection."""
+    if len(test_results) > 256:
+        raise AdapterError("test result summary exceeds the 256-row native bound")
+    native = _native_result_summary_projection(
+        test_results, mncs=mncs, cwd=cwd, environment=environment
+    )
+    if native is not None:
+        return native
+    return _compatibility_native_result_summary(
+        test_results, mncs=mncs, cwd=cwd, environment=environment
+    )
+
+
+def _compatibility_native_result_summary(
     test_results: list[dict[str, Any]],
     *,
     mncs: str,

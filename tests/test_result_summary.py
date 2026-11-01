@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -82,12 +83,22 @@ def test_native_result_summary_matches_independent_result_contract(tmp_path: Pat
         },
     ]
 
-    summary = mncs_test.native_result_summary(
-        rows,
-        mncs=str(MNCS),
-        cwd=tmp_path,
-        environment=_environment(),
-    )
+    calls: list[str] = []
+    original = mncs_test.run_native_app
+
+    def observe(name, request, **kwargs):
+        calls.append(name)
+        return original(name, request, **kwargs)
+
+    with mock.patch.object(mncs_test, "run_native_app", side_effect=observe):
+        summary = mncs_test.native_result_summary(
+            rows,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_environment(),
+        )
+
+    assert calls == ["test-result-summary-projection.json"]
 
     assert summary == {
         "total": 8,
@@ -110,3 +121,34 @@ def test_native_result_summary_matches_independent_result_contract(tmp_path: Pat
         cwd=tmp_path,
         environment=_environment(),
     ) == {field: 0 for field in summary}
+
+
+def test_native_result_summary_projection_falls_back_for_noninteger_counts(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "verdict": "PASS",
+            "status": "passed",
+            "native_result": {"assertions": 1.5, "failures": 0},
+        }
+    ]
+    calls: list[str] = []
+    original = mncs_test.run_native_app
+
+    def observe(name, request, **kwargs):
+        calls.append(name)
+        return original(name, request, **kwargs)
+
+    with mock.patch.object(mncs_test, "run_native_app", side_effect=observe):
+        summary = mncs_test.native_result_summary(
+            rows,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_environment(),
+        )
+
+    assert summary["total"] == 1
+    assert summary["passed"] == 1
+    assert summary["assertion_count"] == 1
+    assert calls == ["test-result-summary-projection.json", "test-result-summary.json"]

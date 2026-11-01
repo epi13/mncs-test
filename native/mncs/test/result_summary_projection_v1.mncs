@@ -1,0 +1,504 @@
+mncs 0.18;
+
+// Parse public TestResult rows in MNCS and pass their facts to the native
+// summary reducer. Python transports the bounded JSON document without
+// projecting each row into a second host-built record tree.
+module mncs.test.result_summary_projection_v1;
+
+use mncs.std.application.v1;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+use mncs.test.result_summary_v1 as result_summary;
+
+record ResultSummaryProjectionRequestV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    document: json_order.JsonTokenDocumentV1
+}
+
+record ResultSummaryProjectionResultV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    supported: bool,
+    decline_code: u64,
+    summary: result_summary.TestSummaryTotalsV1
+}
+
+record LookupV1 { found: bool, value: json_order.JsonValueV1 }
+record TextV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
+record DecimalV1 { negative: bool, magnitude: u64, valid: bool }
+record CountV1 { value: u64, valid: bool }
+record EntryProjectionV1 {
+    entry: result_summary.TestSummaryEntryV1,
+    valid: bool,
+    decline_code: u64
+}
+record ProjectionStateV1 {
+    remaining: json_order.JsonValueV1,
+    accumulator: result_summary.TestSummaryAccumulatorV1,
+    count: u64,
+    valid: bool,
+    decline_code: u64
+}
+record ArrayStepV1 {
+    head: json_order.JsonValueV1,
+    tail: json_order.JsonValueV1,
+    has_head: bool,
+    is_nil: bool
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,114,101,115,117,108,116,45,115,117,109,109,97,114,121,45,112,114,111,106,101,99,116,105,111,110,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,114,101,115,117,108,116,45,115,117,109,109,97,114,121,45,112,114,111,106,101,99,116,105,111,110,47,49];
+}
+
+fn same_bytes(left: [byte; up_to 512], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over right carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
+    return json_order.KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: name,
+        ordered_length: name.len,
+        json_escaped: false,
+        valid: true
+    };
+}
+
+fn key_verdict() -> (result: json_order.KeyV1) { return static_key([118,101,114,100,105,99,116]); }
+fn key_status() -> (result: json_order.KeyV1) { return static_key([115,116,97,116,117,115]); }
+fn key_failure() -> (result: json_order.KeyV1) { return static_key([102,97,105,108,117,114,101]); }
+fn key_class() -> (result: json_order.KeyV1) { return static_key([99,108,97,115,115]); }
+fn key_native_result() -> (result: json_order.KeyV1) { return static_key([110,97,116,105,118,101,95,114,101,115,117,108,116]); }
+fn key_assertions() -> (result: json_order.KeyV1) { return static_key([97,115,115,101,114,116,105,111,110,115]); }
+fn key_failures() -> (result: json_order.KeyV1) { return static_key([102,97,105,108,117,114,101,115]); }
+
+fn empty_lookup() -> (result: LookupV1) {
+    return LookupV1 { found: false, value: json_order.JsonValueV1.Empty };
+}
+
+fn object_fields(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => fields,
+        Empty => json_order.JsonValueV1.Empty,
+        Null => json_order.JsonValueV1.Empty,
+        Boolean { value: flag } => json_order.JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => json_order.JsonValueV1.Empty,
+        Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
+        String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Array { items: items } => json_order.JsonValueV1.Empty,
+        ArrayNil => json_order.JsonValueV1.Empty,
+        ArrayCons { head: head, tail: tail } => json_order.JsonValueV1.Empty,
+        ObjectNil => json_order.JsonValueV1.Empty,
+        ObjectCons { key: key, value: inner, tail: tail } => json_order.JsonValueV1.Empty
+    };
+}
+
+fn is_object(value: json_order.JsonValueV1) -> (result: bool) {
+    return match value {
+        json_order.JsonValueV1.Object { fields: fields } => true,
+        Empty => false,
+        Null => false,
+        Boolean { value: flag } => false,
+        Integer { negative: negative, magnitude: magnitude } => false,
+        Raw { start: start, length: length } => false,
+        String { start: start, length: length } => false,
+        Utf8String { start: start, length: length } => false,
+        Array { items: items } => false,
+        ArrayNil => false,
+        ArrayCons { head: head, tail: tail } => false,
+        ObjectNil => true,
+        ObjectCons { key: key, value: inner, tail: tail } => true
+    };
+}
+
+fn lookup_field(fields: json_order.JsonValueV1, wanted: json_order.KeyV1) -> (result: LookupV1) {
+    return match fields {
+        json_order.JsonValueV1.ObjectCons { key: current, value: value, tail: tail } =>
+            match json_order.compare_key(wanted, current) {
+                json_order.KeyOrderV1.Equal => LookupV1 { found: true, value: value },
+                json_order.KeyOrderV1.Before => empty_lookup(),
+                json_order.KeyOrderV1.After => lookup_field(tail, wanted)
+            },
+        ObjectNil => empty_lookup(),
+        Empty => empty_lookup(),
+        Null => empty_lookup(),
+        Boolean { value: flag } => empty_lookup(),
+        Integer { negative: negative, magnitude: magnitude } => empty_lookup(),
+        Raw { start: start, length: length } => empty_lookup(),
+        String { start: start, length: length } => empty_lookup(),
+        Utf8String { start: start, length: length } => empty_lookup(),
+        Array { items: items } => empty_lookup(),
+        ArrayNil => empty_lookup(),
+        ArrayCons { head: head, tail: tail } => empty_lookup(),
+        Object { fields: nested } => empty_lookup()
+    };
+}
+
+fn empty_text(valid: bool) -> (result: TextV1) {
+    return TextV1 { bytes: [], length: 0, valid: valid };
+}
+
+fn text_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: TextV1) {
+    return match value {
+        json_order.JsonValueV1.String { start: start, length: length } => decoded_text(document, start, length),
+        Utf8String { start: start, length: length } => decoded_text(document, start, length),
+        Empty => empty_text(false),
+        Null => empty_text(false),
+        Boolean { value: flag } => empty_text(false),
+        Integer { negative: negative, magnitude: magnitude } => empty_text(false),
+        Raw { start: start, length: length } => empty_text(false),
+        Array { items: items } => empty_text(false),
+        ArrayNil => empty_text(false),
+        ArrayCons { head: head, tail: tail } => empty_text(false),
+        Object { fields: fields } => empty_text(false),
+        ObjectNil => empty_text(false),
+        ObjectCons { key: key, value: inner, tail: tail } => empty_text(false)
+    };
+}
+
+fn optional_text(
+    found: bool,
+    value: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: TextV1) {
+    if !found { return empty_text(true); }
+    return text_value(value, document);
+}
+
+fn failure_text(
+    failure: LookupV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: TextV1) {
+    if !failure.found || !is_object(failure.value) { return empty_text(true); }
+    let fields: json_order.JsonValueV1 = object_fields(failure.value);
+    let class_value: LookupV1 = lookup_field(fields, key_class());
+    return optional_text(class_value.found, class_value.value, document);
+}
+
+fn decoded_text(document: json_order.JsonTokenDocumentV1, start: u64, length: u64) -> (result: TextV1) {
+    let decoded: json_order.JsonDecodedStringV1 = json_order.decode_string(document, start, length);
+    return TextV1 { bytes: decoded.bytes, length: decoded.length, valid: decoded.valid };
+}
+
+fn fixed_text(value: TextV1, allow_empty: bool) -> (result: bool) {
+    return value.valid && value.length <= 64 && (allow_empty || value.length > 0);
+}
+
+fn summary_verdict(value: TextV1) -> (result: [byte; up_to 64]) {
+    if same_bytes(value.bytes, [80,65,83,83]) { return [80,65,83,83]; }
+    if same_bytes(value.bytes, [70,65,73,76]) { return [70,65,73,76]; }
+    if same_bytes(value.bytes, [85,78,75,78,79,87,78]) { return [85,78,75,78,79,87,78]; }
+    return [];
+}
+
+fn summary_status(value: TextV1) -> (result: [byte; up_to 64]) {
+    if same_bytes(value.bytes, [115,107,105,112,112,101,100]) { return [115,107,105,112,112,101,100]; }
+    return [];
+}
+
+fn summary_failure_class(value: TextV1) -> (result: [byte; up_to 64]) {
+    if same_bytes(value.bytes, [97,115,115,101,114,116,105,111,110]) { return [97,115,115,101,114,116,105,111,110]; }
+    if same_bytes(value.bytes, [115,101,116,117,112]) { return [115,101,116,117,112]; }
+    if same_bytes(value.bytes, [99,111,109,112,105,108,101,95,102,97,105,108,117,114,101]) { return [99,111,109,112,105,108,101,95,102,97,105,108,117,114,101]; }
+    if same_bytes(value.bytes, [99,111,109,112,105,108,101,95,101,120,112,101,99,116,97,116,105,111,110,95,109,105,115,109,97,116,99,104]) { return [99,111,109,112,105,108,101,95,101,120,112,101,99,116,97,116,105,111,110,95,109,105,115,109,97,116,99,104]; }
+    if same_bytes(value.bytes, [100,105,97,103,110,111,115,116,105,99,95,109,105,115,109,97,116,99,104]) { return [100,105,97,103,110,111,115,116,105,99,95,109,105,115,109,97,116,99,104]; }
+    if same_bytes(value.bytes, [114,117,110,116,105,109,101,95,102,97,105,108,117,114,101]) { return [114,117,110,116,105,109,101,95,102,97,105,108,117,114,101]; }
+    if same_bytes(value.bytes, [116,105,109,101,111,117,116]) { return [116,105,109,101,111,117,116]; }
+    if same_bytes(value.bytes, [105,110,102,114,97,115,116,114,117,99,116,117,114,101,95,102,97,105,108,117,114,101]) { return [105,110,102,114,97,115,116,114,117,99,116,117,114,101,95,102,97,105,108,117,114,101]; }
+    if same_bytes(value.bytes, [109,97,108,102,111,114,109,101,100,95,116,101,115,116,95,100,101,99,108,97,114,97,116,105,111,110]) { return [109,97,108,102,111,114,109,101,100,95,116,101,115,116,95,100,101,99,108,97,114,97,116,105,111,110]; }
+    if same_bytes(value.bytes, [109,97,108,102,111,114,109,101,100,95,116,101,115,116,95,114,101,115,117,108,116]) { return [109,97,108,102,111,114,109,101,100,95,116,101,115,116,95,114,101,115,117,108,116]; }
+    return [];
+}
+
+fn decimal_step(
+    state: DecimalV1,
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: DecimalV1) {
+    if !state.valid || index >= length { return state; }
+    let current: byte = json_order.located_byte(document, start +% index);
+    if index == 0 && current == 45 { return DecimalV1 { ..state, negative: true }; }
+    if current < 48 || current > 57 { return DecimalV1 { ..state, valid: false }; }
+    let digit: u64 = (current as u64) -% 48;
+    if state.magnitude > 1844674407370955161
+        || (state.magnitude == 1844674407370955161 && digit > 5) {
+        return DecimalV1 { ..state, valid: false };
+    }
+    return DecimalV1 { ..state, magnitude: state.magnitude *% 10 +% digit };
+}
+
+fn decimal_span(
+    document: json_order.JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: DecimalV1) {
+    let initial: DecimalV1 = DecimalV1 { negative: false, magnitude: 0, valid: length > 0 };
+    iterate i up_to 32 carrying current: DecimalV1 = initial {
+        next current = decimal_step(current, document, start, length, i);
+    }
+    return DecimalV1 {
+        ..current,
+        valid: current.valid && length <= 32 && length > (current.negative as u64)
+    };
+}
+
+fn decimal_value(value: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: DecimalV1) {
+    return match value {
+        json_order.JsonValueV1.Raw { start: start, length: length } => decimal_span(document, start, length),
+        Integer { negative: negative, magnitude: magnitude } => DecimalV1 { negative: negative, magnitude: magnitude, valid: true },
+        Null => DecimalV1 { negative: false, magnitude: 0, valid: true },
+        Empty => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Boolean { value: flag } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        String { start: start, length: length } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Utf8String { start: start, length: length } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Array { items: items } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        Object { fields: fields } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ArrayNil => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ArrayCons { head: head, tail: tail } => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ObjectNil => DecimalV1 { negative: false, magnitude: 0, valid: false },
+        ObjectCons { key: key, value: inner, tail: tail } => DecimalV1 { negative: false, magnitude: 0, valid: false }
+    };
+}
+
+fn direct_count(
+    value: json_order.JsonValueV1,
+    found: bool,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: CountV1) {
+    if !found {
+        return CountV1 { value: 0, valid: true };
+    }
+    let parsed: DecimalV1 = decimal_value(value, document);
+    return CountV1 { value: parsed.magnitude, valid: parsed.valid && !parsed.negative };
+}
+
+fn project_row(row: json_order.JsonValueV1, document: json_order.JsonTokenDocumentV1) -> (result: EntryProjectionV1) {
+    let fields: json_order.JsonValueV1 = object_fields(row);
+    let verdict_lookup: LookupV1 = lookup_field(fields, key_verdict());
+    let verdict: TextV1 = text_value(verdict_lookup.value, document);
+    let status_lookup: LookupV1 = lookup_field(fields, key_status());
+    let status: TextV1 = optional_text(status_lookup.found, status_lookup.value, document);
+    let failure_lookup: LookupV1 = lookup_field(fields, key_failure());
+    let failure_class: TextV1 = failure_text(failure_lookup, document);
+    let native: LookupV1 = lookup_field(fields, key_native_result());
+    let native_fields: json_order.JsonValueV1 = object_fields(native.value);
+    let native_is_object: bool = native.found && is_object(native.value);
+    let assertions: LookupV1 = lookup_field(native_fields, key_assertions());
+    let failures: LookupV1 = lookup_field(native_fields, key_failures());
+    let assertion_count: CountV1 = direct_count(assertions.value, assertions.found, document);
+    let failure_count: CountV1 = direct_count(failures.value, failures.found, document);
+    return project_row_fields(
+        verdict,
+        status,
+        failure_class,
+        native_is_object,
+        assertion_count,
+        failure_count
+    );
+}
+
+fn project_row_fields(
+    verdict: TextV1,
+    status: TextV1,
+    failure_class: TextV1,
+    native_is_object: bool,
+    assertion_count: CountV1,
+    failure_count: CountV1
+) -> (result: EntryProjectionV1) {
+    let verdict_valid: bool = same_bytes(verdict.bytes, [80,65,83,83])
+        || same_bytes(verdict.bytes, [70,65,73,76])
+        || same_bytes(verdict.bytes, [85,78,75,78,79,87,78]);
+    if !verdict.valid || verdict.length == 0 {
+        return EntryProjectionV1 {
+            entry: result_summary.TestSummaryEntryV1 {
+                verdict: [], status: [], failure_class: [], assertions: 0, failures: 0
+            },
+            valid: false,
+            decline_code: 2
+        };
+    }
+    if !verdict_valid || !fixed_text(verdict, false) {
+        return EntryProjectionV1 {
+            entry: result_summary.TestSummaryEntryV1 {
+                verdict: [], status: [], failure_class: [], assertions: 0, failures: 0
+            },
+            valid: false,
+            decline_code: 3
+        };
+    }
+    if !fixed_text(status, true) {
+        return EntryProjectionV1 {
+            entry: result_summary.TestSummaryEntryV1 {
+                verdict: [], status: [], failure_class: [], assertions: 0, failures: 0
+            },
+            valid: false,
+            decline_code: 4
+        };
+    }
+    if !fixed_text(failure_class, true) {
+        return EntryProjectionV1 {
+            entry: result_summary.TestSummaryEntryV1 {
+                verdict: [], status: [], failure_class: [], assertions: 0, failures: 0
+            },
+            valid: false,
+            decline_code: 5
+        };
+    }
+    if !assertion_count.valid || !failure_count.valid {
+        return EntryProjectionV1 {
+            entry: result_summary.TestSummaryEntryV1 {
+                verdict: [], status: [], failure_class: [], assertions: 0, failures: 0
+            },
+            valid: false,
+            decline_code: 6
+        };
+    }
+    return EntryProjectionV1 {
+        entry: result_summary.TestSummaryEntryV1 {
+            verdict: summary_verdict(verdict),
+            status: summary_status(status),
+            failure_class: summary_failure_class(failure_class),
+            assertions: select(native_is_object, assertion_count.value, 0),
+            failures: select(native_is_object, failure_count.value, 0)
+        },
+        valid: true,
+        decline_code: 0
+    };
+}
+
+fn array_items(value: json_order.JsonValueV1) -> (result: json_order.JsonValueV1) {
+    return match value {
+        json_order.JsonValueV1.Array { items: items } => items,
+        ArrayCons { head: head, tail: tail } => value,
+        ArrayNil => value,
+        Empty => json_order.JsonValueV1.Empty,
+        Null => json_order.JsonValueV1.Empty,
+        Boolean { value: flag } => json_order.JsonValueV1.Empty,
+        Integer { negative: negative, magnitude: magnitude } => json_order.JsonValueV1.Empty,
+        Raw { start: start, length: length } => json_order.JsonValueV1.Empty,
+        String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Utf8String { start: start, length: length } => json_order.JsonValueV1.Empty,
+        Object { fields: fields } => json_order.JsonValueV1.Empty,
+        ObjectNil => json_order.JsonValueV1.Empty,
+        ObjectCons { key: key, value: inner, tail: tail } => json_order.JsonValueV1.Empty
+    };
+}
+
+fn array_step(value: json_order.JsonValueV1) -> (result: ArrayStepV1) {
+    return match value {
+        json_order.JsonValueV1.ArrayCons { head: head, tail: tail } => ArrayStepV1 { head: head, tail: tail, has_head: true, is_nil: false },
+        ArrayNil => ArrayStepV1 { head: json_order.JsonValueV1.Empty, tail: value, has_head: false, is_nil: true },
+        Empty => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Null => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Boolean { value: flag } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Integer { negative: negative, magnitude: magnitude } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Raw { start: start, length: length } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        String { start: start, length: length } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Utf8String { start: start, length: length } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Array { items: items } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        Object { fields: fields } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        ObjectNil => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false },
+        ObjectCons { key: key, value: inner, tail: tail } => ArrayStepV1 { head: value, tail: value, has_head: false, is_nil: false }
+    };
+}
+
+fn empty_state(remaining: json_order.JsonValueV1) -> (result: ProjectionStateV1) {
+    return ProjectionStateV1 {
+        remaining: remaining,
+        accumulator: result_summary.empty_summary(),
+        count: 0,
+        valid: true,
+        decline_code: 0
+    };
+}
+
+fn project_step(state: ProjectionStateV1, document: json_order.JsonTokenDocumentV1) -> (result: ProjectionStateV1) {
+    let step: ArrayStepV1 = array_step(state.remaining);
+    if !state.valid || step.is_nil || !step.has_head { return state; }
+    let projected: EntryProjectionV1 = project_row(step.head, document);
+    if !projected.valid {
+        return ProjectionStateV1 { ..state, valid: false, decline_code: projected.decline_code };
+    }
+    return ProjectionStateV1 {
+        remaining: step.tail,
+        accumulator: result_summary.observe_entry(state.accumulator, projected.entry),
+        count: state.count +% 1,
+        valid: true,
+        decline_code: 0
+    };
+}
+
+fn project_rows(
+    remaining: json_order.JsonValueV1,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: ProjectionStateV1) {
+    iterate i up_to 256 carrying state: ProjectionStateV1 = empty_state(remaining) {
+        next state = project_step(state, document);
+    }
+    return state;
+}
+
+fn valid_request(request: ResultSummaryProjectionRequestV1) -> (result: bool) {
+    return request.item_count <= 256
+        && request.document.byte_length > 0
+        && request.document.byte_length <= 65536
+        && same_bytes(request.schema_version, request_schema());
+}
+
+fn projection_decline_code(
+    parsed: json_order.ParseStateV1,
+    projected: ProjectionStateV1,
+    final_step: ArrayStepV1,
+    expected_count: u64
+) -> (result: u64) {
+    if !parsed.valid || !parsed.has_root { return 1; }
+    if parsed.value_count > 1024 { return 2; }
+    if !projected.valid { return projected.decline_code; }
+    if projected.count != expected_count { return 4; }
+    if !final_step.is_nil { return 5; }
+    return 0;
+}
+
+fn result_summary_projection_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97,114,103,118,32,114,101,113,117,105,114,101,115,32,50,32,114,101,115,117,108,116,32,115,117,109,109,97,114,121,32,112,114,111,106,101,99,116,105,111,110,32,112,97,116,104,115], 2);
+    }
+    let request: ResultSummaryProjectionRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105,110,118,97,108,105,100,32,114,101,115,117,108,116,32,115,117,109,109,97,114,121,32,112,114,111,106,101,99,116,105,111,110,32,114,101,113,117,101,115,116], 4);
+    }
+    let parsed: json_order.ParseStateV1 = json_order.parse_document(request.document);
+    let root_items: json_order.JsonValueV1 = array_items(parsed.root);
+    let projected: ProjectionStateV1 = project_rows(root_items, request.document);
+    let final_step: ArrayStepV1 = array_step(projected.remaining);
+    let summary_record: result_summary.TestSummaryResultV1 = result_summary.result_for(projected.accumulator);
+    let decline_code: u64 = projection_decline_code(parsed, projected, final_step, request.item_count);
+    let result: ResultSummaryProjectionResultV1 = ResultSummaryProjectionResultV1 {
+        schema_version: result_schema(),
+        item_count: projected.count,
+        supported: decline_code == 0,
+        decline_code: decline_code,
+        summary: summary_record.summary
+    };
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 {
+        return failure([114,101,115,117,108,116,32,115,117,109,109,97,114,121,32,112,114,111,106,101,99,116,105,111,110,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+    }
+    return success([]);
+}
