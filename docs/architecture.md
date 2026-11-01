@@ -500,9 +500,9 @@ step estimate remains below 8,000,000. After three native
 application hashes in one store, it compiles the same MNCS module to a backend
 artifact and retains an `mncs-embed` session. That session calls the pure MNCS
 identity and SHA-256 functions in bounded windows for payloads up to 512 KiB
-and files up to 1 MiB. Differential tests cover a 512 KiB payload, a
+and files up to 2 MiB. Differential tests cover a 512 KiB payload, a
 393,233-byte compiler artifact, a provenance source just above 512 KiB, and a
-file at the exact 1 MiB bound against independent Python `hashlib` results.
+file at the exact 2 MiB bound against independent Python `hashlib` results.
 The retained session adds a one-time compile and open cost; no throughput gain
 over host `hashlib` is claimed.
 For those retained SHA-256 stream calls, the adapter packs each eight payload
@@ -519,11 +519,11 @@ rejected by MNCS.
 14,336 bytes through `ArtifactStore`, keeping each small provenance hash
 within a single bounded MNCS request. Files above 14,336 bytes use the
 bounded file adapter. After the retained session is warm, it hashes files
-through 1 MiB in 14,336-byte windows without buffering the whole file. Every
+through 2 MiB in 14,336-byte windows without buffering the whole file. Every
 file above the 65,536-byte native-application request bound uses this streaming
 path after warm-up, including files that still fit within the 512 KiB payload
 bound.
-Files above 1 MiB retain host fallback. Before retained-session warm-up, the
+Files above 2 MiB retain host fallback. Before retained-session warm-up, the
 existing native application handles files through 65,536 bytes; larger files
 fall back to the host until warm-up. If embedding fails, bounded files use the
 existing native application through 65,536 bytes and larger files use host
@@ -543,7 +543,7 @@ Each retained window uses one MNCS function that validates the
 request and advances SHA-256 state together; the final window also finalizes the
 digest in that same call, with no separate initialization or finalization call
 from Python. Larger artifacts encountered
-before warm-up, or any file over 1 MiB, retain the host streaming fallback.
+before warm-up, or any file over 2 MiB, retain the host streaming fallback.
 Payloads over 512 KiB retain the host digest path. Python still reads and
 writes files, supplies bounded typed values,
 enumerates library directories, and preserves explicit host fallback for
