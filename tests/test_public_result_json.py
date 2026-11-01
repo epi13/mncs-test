@@ -1094,10 +1094,20 @@ def test_native_public_result_key_order_handles_640_scalar_members(
 
 @pytest.mark.parametrize(
     "indices",
-    [tuple(range(641)), tuple(reversed(range(641)))],
-    ids=["ascending-input", "descending-input"],
+    [
+        tuple(range(641)),
+        tuple(reversed(range(641))),
+        tuple(range(642)),
+        tuple(reversed(range(642))),
+    ],
+    ids=[
+        "641-ascending-input",
+        "641-descending-input",
+        "642-ascending-input",
+        "642-descending-input",
+    ],
 )
-def test_native_public_result_key_order_handles_641_scalar_members(
+def test_native_public_result_key_order_handles_641_and_642_scalar_members(
     indices: tuple[int, ...], tmp_path: Path,
 ) -> None:
     value = {f"field-{index:03d}": index for index in indices}
@@ -1138,18 +1148,24 @@ def test_native_public_result_key_order_handles_641_scalar_members(
     _assert_native_document_route(observed)
 
 
-def test_native_public_result_key_order_falls_back_at_642_members(
+def test_native_public_result_key_order_falls_back_for_unsorted_642_member_budget(
     tmp_path: Path,
 ) -> None:
-    value = {f"field-{index:03d}": index for index in range(642)}
+    indices = tuple((index * 73) % 642 for index in range(642))
+    value = {f"field-{index:03d}": index for index in indices}
     expected = _python_result_bytes(value)
     observed: list[tuple[str, dict[str, object]]] = []
+    budget_exhaustions: list[str] = []
     original_run_native_app = mncs_test.run_native_app
 
     def observe_native_app(
         name: str, request: dict[str, object], **kwargs: object
     ) -> dict[str, object]:
-        result = original_run_native_app(name, request, **kwargs)
+        try:
+            result = original_run_native_app(name, request, **kwargs)
+        except NativeBudgetExhaustedError:
+            budget_exhaustions.append(name)
+            raise
         observed.append((name, result))
         return result
 
@@ -1170,15 +1186,12 @@ def test_native_public_result_key_order_falls_back_at_642_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
+    assert budget_exhaustions == ["test-public-result-json-key-order.json"]
     assert compact.call_args_list == [
         mock.call(value, sort_keys=False),
         mock.call(value),
     ]
-    key_order = next(
-        result for name, result in observed
-        if name == "test-public-result-json-key-order.json"
-    )
-    assert key_order["supported"] is False
+    _assert_native_raw_token_route([name for name, _result in observed])
 
 
 def test_native_public_result_key_order_merges_unsorted_256_members(

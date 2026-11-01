@@ -1122,6 +1122,14 @@ native parser, merge/reverse passes, and packed-token value validation.
 All 59 public-result JSON regressions pass with the release MNCS binary and
 integrated Stdlib cursor provider.
 
+P-075 extends the native monotonic key-order path to 642 object members under
+the same 8,000,000-step ceiling. Ascending and descending 642-member public
+results match independent JSON bytes and SHA-256 through native key ordering and
+the public formatter, with one unsorted compact transport. A shuffled 642-member
+object still exceeds the key-order app's step budget; the adapter preserves the
+exact sorted compatibility output in that case. Parser, merge/reverse-pass, and
+packed-value bounds stay aligned at 642, and no execution limit is raised.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing

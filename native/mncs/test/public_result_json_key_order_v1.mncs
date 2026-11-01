@@ -711,9 +711,9 @@ fn reverse_object_fields(fields: JsonValueV1, count: u64) -> (result: ObjectReve
         reversed: JsonValueV1.ObjectNil,
         count: count,
         index: 0,
-        valid: count <= 641
+        valid: count <= 642
     };
-    iterate i up_to 641 carrying reversed: ObjectReverseStateV1 = initial {
+    iterate i up_to 642 carrying reversed: ObjectReverseStateV1 = initial {
         next reversed = reverse_object_field_step(reversed);
     }
     return reversed;
@@ -886,10 +886,10 @@ fn merge_object_fields_pass(fields: JsonValueV1, count: u64, width: u64) -> (res
         run_remaining: 0,
         output: JsonValueV1.ObjectNil,
         output_count: 0,
-        valid: count <= 641
+        valid: count <= 642
     };
     let first_run: ObjectMergeStateV1 = begin_object_merge_run(initial);
-    iterate i up_to 641 carrying merged: ObjectMergeStateV1 = first_run {
+    iterate i up_to 642 carrying merged: ObjectMergeStateV1 = first_run {
         next merged = object_merge_item_step(merged);
     }
     if !merged.valid || merged.output_count != count {
@@ -920,7 +920,7 @@ fn sort_object_fields_merge(fields: JsonValueV1, count: u64) -> (result: ObjectS
         fields: fields,
         count: count,
         width: 1,
-        valid: count <= 641
+        valid: count <= 642
     };
     iterate pass up_to 10 carrying sorted: ObjectMergeSortStateV1 = initial {
         next sorted = object_merge_sort_step(sorted);
@@ -1097,7 +1097,7 @@ fn append_value(
             valid: !is_empty_value(prepended)
         };
     }
-    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 641 {
+    if frame.kind == 1 && frame.expect == 3 && frame.has_pending_key && frame.child_count < 642 {
         let use_merge_sort: bool = frame.merge_sort_needed || frame.child_count >= 32;
         let inserted: JsonValueV1 = append_object_field_by_mode(
             frame.items, frame.pending_key, value, use_merge_sort, frame.child_count,
@@ -2929,7 +2929,7 @@ fn valid_public_value_node(
         return node.child_count <= 1024 && node.magnitude == 0 && !node.negative;
     }
     if node.kind == 6 {
-        return node.child_count <= 641 && node.magnitude == 0 && !node.negative;
+        return node.child_count <= 642 && node.magnitude == 0 && !node.negative;
     }
     return false;
 }
