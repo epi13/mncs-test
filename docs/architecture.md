@@ -1130,6 +1130,15 @@ object still exceeds the key-order app's step budget; the adapter preserves the
 exact sorted compatibility output in that case. Parser, merge/reverse-pass, and
 packed-value bounds stay aligned at 642, and no execution limit is raised.
 
+P-076 caches the first eight decoded key bytes as a zero-padded big-endian
+prefix in the Test key-order value. MNCS compares that prefix before scanning a
+remaining key suffix, preserving UTF-8 byte order for Unicode and zero-byte keys.
+For shuffled `field-NNN` objects, the exact native merge-sort boundary moved
+from 522 to 596 members under the unchanged 8,000,000-step cap. The 596-member
+output matches an independent sorted JSON golden; 597 members still exhaust
+the budget and keep exact sorted compatibility serialization. The 642-member
+shuffled case continues to decline safely.
+
 P-045 moves the Test runner's compiler-returned `TestResult` and `SuiteSummary`
 record projection into `mncs.test.native_result_projection_v1`. Python packs each
 bounded ABI document as UTF-8 text chunks; MNCS parses the JSON with the existing

@@ -29,6 +29,7 @@ record KeyV1 {
     raw_length: u64,
     ordered: [byte; up_to 256],
     ordered_length: u64,
+    ordered_prefix: u64,
     json_escaped: bool,
     valid: bool
 }
@@ -98,7 +99,7 @@ record PublicValueNodeReadResultV1 {
     node: PublicValueNodeV1,
     next_offset: u64
 }
-record PublicValueKeyCopyV1 { bytes: [byte; 256], valid: bool }
+record PublicValueKeyCopyV1 { bytes: [byte; 256], ordered_prefix: u64, valid: bool }
 record PublicValueNumberBytesV1 { bytes: [byte; 64], valid: bool }
 record PublicValueTapeShapeStateV1 { total: u64, valid: bool }
 
@@ -215,7 +216,7 @@ record DecodeStateV1 {
     skip: u64,
     valid: bool
 }
-record KeyCopyV1 { bytes: [byte; 256], length: u64 }
+record KeyCopyV1 { bytes: [byte; 256], length: u64, ordered_prefix: u64 }
 record JsonDecodedStringV1 { bytes: [byte; up_to 512], length: u64, valid: bool }
 
 record LocatedByteV1 { base: u64, value: byte }
@@ -470,10 +471,21 @@ fn decode_key_step(
 }
 
 fn copy_decoded_key_byte(state: KeyCopyV1, decoded: DecodeStateV1, index: u64) -> (result: KeyCopyV1) {
-    if index >= decoded.length || index >= 256 { return state; }
+    if index >= 256 { return state; }
+    let prefix_byte: byte = select(index < decoded.length, decoded.bytes[index], 0);
+    let ordered_prefix: u64 = select(
+        index < 8,
+        state.ordered_prefix *% 256 +% (prefix_byte as u64),
+        state.ordered_prefix
+    );
+    if index >= decoded.length {
+        return KeyCopyV1 { ..state, ordered_prefix: ordered_prefix };
+    }
     return KeyCopyV1 {
+        ..state,
         bytes: replace(state.bytes, state.length, decoded.bytes[index]),
-        length: state.length +% 1
+        length: state.length +% 1,
+        ordered_prefix: ordered_prefix
     };
 }
 
@@ -490,7 +502,9 @@ fn decode_short_key(
 }
 
 fn copy_short_decoded_key(decoded: DecodeStateV1) -> (result: KeyCopyV1) {
-    let initial: KeyCopyV1 = KeyCopyV1 { bytes: [0; 256], length: 0 };
+    let initial: KeyCopyV1 = KeyCopyV1 {
+        bytes: [0; 256], length: 0, ordered_prefix: 0
+    };
     iterate i up_to 16 carrying copied: KeyCopyV1 = initial {
         next copied = copy_decoded_key_byte(copied, decoded, i);
     }
@@ -513,6 +527,7 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
             raw_length: raw_length,
             ordered: key_bytes_short.bytes[0..key_bytes_short.length],
             ordered_length: decoded_short.length,
+            ordered_prefix: key_bytes_short.ordered_prefix,
             json_escaped: true,
             valid: decoded_short.valid && !decoded_short.escaped
                 && decoded_short.skip == 0 && key_bytes_short.length == decoded_short.length
@@ -524,7 +539,9 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
     iterate i up_to 256 carrying decoded: DecodeStateV1 = initial {
         next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
     }
-    let key_initial: KeyCopyV1 = KeyCopyV1 { bytes: [0; 256], length: 0 };
+    let key_initial: KeyCopyV1 = KeyCopyV1 {
+        bytes: [0; 256], length: 0, ordered_prefix: 0
+    };
     iterate i up_to 256 carrying key_bytes: KeyCopyV1 = key_initial {
         next key_bytes = copy_decoded_key_byte(key_bytes, decoded, i);
     }
@@ -533,6 +550,7 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
         raw_length: raw_length,
         ordered: key_bytes.bytes[0..key_bytes.length],
         ordered_length: decoded.length,
+        ordered_prefix: key_bytes.ordered_prefix,
         json_escaped: true,
         valid: raw_length <= 256 && decoded.valid && !decoded.escaped
             && decoded.skip == 0 && key_bytes.length == decoded.length
@@ -554,10 +572,13 @@ fn decode_string(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64)
 }
 
 fn compare_key(left: KeyV1, right: KeyV1) -> (result: KeyOrderV1) {
+    if left.ordered_prefix < right.ordered_prefix { return KeyOrderV1.Before; }
+    if left.ordered_prefix > right.ordered_prefix { return KeyOrderV1.After; }
     let common: u64 = select(left.ordered_length < right.ordered_length, left.ordered_length, right.ordered_length);
-    let shared: [byte; up_to 256] = left.ordered[0..common];
+    let tail_start: u64 = select(common < 8, common, 8);
+    let shared: [byte; up_to 256] = left.ordered[tail_start..common];
     iterate i over shared carrying order: i64 = 0 {
-        next order = compare_key_step(order, left, right, i, common);
+        next order = compare_key_step(order, left, right, tail_start +% i, common);
     }
     if order < 0 { return KeyOrderV1.Before; }
     if order > 0 { return KeyOrderV1.After; }
@@ -1006,6 +1027,27 @@ fn empty_key() -> (result: KeyV1) {
         raw_length: 0,
         ordered: [0; 0],
         ordered_length: 0,
+        ordered_prefix: 0,
+        json_escaped: false,
+        valid: true
+    };
+}
+
+fn key_prefix_step(prefix: u64, name: [byte; up_to 256], index: u64) -> (result: u64) {
+    if index < name.len { return prefix *% 256 +% (name[index] as u64); }
+    return prefix *% 256;
+}
+
+fn key_from_bytes(name: [byte; up_to 256]) -> (result: KeyV1) {
+    iterate i up_to 8 carrying prefix: u64 = 0 {
+        next prefix = key_prefix_step(prefix, name, i);
+    }
+    return KeyV1 {
+        raw_start: 0,
+        raw_length: 0,
+        ordered: name,
+        ordered_length: name.len,
+        ordered_prefix: prefix,
         json_escaped: false,
         valid: true
     };
@@ -2941,11 +2983,28 @@ fn public_value_key_byte_step(
     length: u64,
     index: u64
 ) -> (result: PublicValueKeyCopyV1) {
-    if !state.valid || index >= length { return state; }
-    return PublicValueKeyCopyV1 {
-        bytes: replace(state.bytes, index, located_byte(document, start +% index)),
-        valid: true
-    };
+    if !state.valid || index >= 256 { return state; }
+    if index < length {
+        let value: byte = located_byte(document, start +% index);
+        let ordered_prefix: u64 = select(
+            index < 8,
+            state.ordered_prefix *% 256 +% (value as u64),
+            state.ordered_prefix
+        );
+        return PublicValueKeyCopyV1 {
+            ..state,
+            bytes: replace(state.bytes, index, value),
+            ordered_prefix: ordered_prefix,
+            valid: true
+        };
+    }
+    if index < 8 {
+        return PublicValueKeyCopyV1 {
+            ..state,
+            ordered_prefix: state.ordered_prefix *% 256
+        };
+    }
+    return state;
 }
 
 fn public_value_key(document: JsonTokenDocumentV1, node: PublicValueNodeV1) -> (result: KeyV1) {
@@ -2955,6 +3014,7 @@ fn public_value_key(document: JsonTokenDocumentV1, node: PublicValueNodeV1) -> (
     }
     let initial: PublicValueKeyCopyV1 = PublicValueKeyCopyV1 {
         bytes: [0; 256],
+        ordered_prefix: 0,
         valid: true
     };
     iterate i up_to 256 carrying copied: PublicValueKeyCopyV1 = initial {
@@ -2967,6 +3027,7 @@ fn public_value_key(document: JsonTokenDocumentV1, node: PublicValueNodeV1) -> (
         raw_length: 0,
         ordered: copied.bytes[0..node.key_length],
         ordered_length: node.key_length,
+        ordered_prefix: copied.ordered_prefix,
         json_escaped: false,
         valid: copied.valid
     };

@@ -769,6 +769,56 @@ def test_native_key_order_matches_unicode_and_escaped_key_golden(tmp_path: Path)
     _assert_native_raw_token_route([call.args[0] for call in native_app.call_args_list])
 
 
+def test_native_key_order_prefix_matches_utf8_and_zero_padding(
+    tmp_path: Path,
+) -> None:
+    value = {
+        "\x01\xff": 0,
+        "\x02": 1,
+        "\x01": 2,
+        "\x00\x01": 3,
+        "\x00": 4,
+        "\x00\x00": 5,
+        "": 6,
+        "a\x00": 7,
+        "a": 8,
+        "abcdefgh\x01": 9,
+        "abcdefgh": 10,
+        "abcdefgh\x00": 11,
+        "é": 12,
+        "😀": 13,
+    }
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with mock.patch.object(
+        mncs_test, "run_native_app", side_effect=observe_native_app
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    _assert_native_raw_token_route([name for name, _result in observed])
+
+
 @pytest.mark.parametrize(
     "item_count", [520, 1021], ids=["past-legacy-bound", "at-native-bound"]
 )
@@ -1194,10 +1244,74 @@ def test_native_public_result_key_order_falls_back_for_unsorted_642_member_budge
     _assert_native_raw_token_route([name for name, _result in observed])
 
 
+def test_native_public_result_key_order_falls_back_for_unsorted_597_member_budget(
+    tmp_path: Path,
+) -> None:
+    indices = tuple((index * 73) % 597 for index in range(597))
+    value = {f"field-{index:03d}": index for index in indices}
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    budget_exhaustions: list[str] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        try:
+            result = original_run_native_app(name, request, **kwargs)
+        except NativeBudgetExhaustedError:
+            budget_exhaustions.append(name)
+            raise
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=observe_native_app
+        ),
+        mock.patch.object(
+            mncs_test, "compact_json", wraps=mncs_test.compact_json
+        ) as compact,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert budget_exhaustions == ["test-public-result-json-key-order.json"]
+    assert compact.call_args_list == [
+        mock.call(value, sort_keys=False),
+        mock.call(value),
+    ]
+    _assert_native_raw_token_route([name for name, _result in observed])
+
+
 def test_native_public_result_key_order_merges_unsorted_256_members(
     tmp_path: Path,
 ) -> None:
     indices = tuple((index * 73) % 256 for index in range(256))
+    value = {f"field-{index:03d}": index for index in indices}
+    source = json.dumps(value, separators=(",", ":"), sort_keys=False).encode()
+    expected = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+
+    actual = mncs_test._native_public_result_key_order(
+        source,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+
+    assert actual == expected
+
+
+def test_native_public_result_key_order_merges_unsorted_596_members(
+    tmp_path: Path,
+) -> None:
+    indices = tuple((index * 73) % 596 for index in range(596))
     value = {f"field-{index:03d}": index for index in indices}
     source = json.dumps(value, separators=(",", ":"), sort_keys=False).encode()
     expected = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()

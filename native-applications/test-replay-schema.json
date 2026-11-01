@@ -5,7 +5,7 @@
   "module": "mncs.test.replay_schema_v1",
   "entry_function": "replay_schema_app_v1",
   "profile": "0.18",
-  "interface_identity": "b19ca2633e2cc8d234d79e92010fa541f20849c3eb7a6d065fd0539174c6c1e6",
+  "interface_identity": "5b5c5fe528203dbbc96870af2f0b09bf3b4165c31b85bdded0c1a48917f3e248",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

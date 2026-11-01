@@ -62,14 +62,7 @@ fn result_schema() -> (result: [byte; up_to 64]) {
 }
 
 fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
-    return json_order.KeyV1 {
-        raw_start: 0,
-        raw_length: 0,
-        ordered: name,
-        ordered_length: name.len,
-        json_escaped: false,
-        valid: true
-    };
+    return json_order.key_from_bytes(name);
 }
 
 fn key_status() -> (result: json_order.KeyV1) { return static_key([115,116,97,116,117,115]); }

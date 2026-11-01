@@ -468,14 +468,7 @@ fn decode_failure_message(
 }
 
 fn key_value(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
-    return json_order.KeyV1 {
-        raw_start: 0,
-        raw_length: 0,
-        ordered: name,
-        ordered_length: name.len,
-        json_escaped: false,
-        valid: true
-    };
+    return json_order.key_from_bytes(name);
 }
 
 fn widen_text_step<N: Nat>(

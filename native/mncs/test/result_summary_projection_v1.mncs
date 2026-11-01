@@ -63,14 +63,7 @@ fn same_bytes(left: [byte; up_to 512], right: [byte; up_to 64]) -> (result: bool
 }
 
 fn static_key(name: [byte; up_to 256]) -> (result: json_order.KeyV1) {
-    return json_order.KeyV1 {
-        raw_start: 0,
-        raw_length: 0,
-        ordered: name,
-        ordered_length: name.len,
-        json_escaped: false,
-        valid: true
-    };
+    return json_order.key_from_bytes(name);
 }
 
 fn key_verdict() -> (result: json_order.KeyV1) { return static_key([118,101,114,100,105,99,116]); }
