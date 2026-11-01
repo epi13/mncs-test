@@ -1,0 +1,15 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.execution-result-adjudication",
+  "source": "../native/mncs/test/execution_result_adjudication_v1.mncs",
+  "module": "mncs.test.execution_result_adjudication_v1",
+  "entry_function": "execution_result_adjudication_app_v1",
+  "profile": "0.18",
+  "interface_identity": "28696a05042b42c98a94ff58f0ad4fd199acc49a38622e220ad6dc718cf2ba06",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": ["test_artifact"]
+}

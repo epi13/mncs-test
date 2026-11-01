@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 from unittest import mock
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = next(
@@ -17,6 +18,7 @@ MNCS = Path(os.environ.get(
 ))
 sys.path.insert(0, str(ROOT / "tools"))
 import mncs_test  # noqa: E402
+import mncs_test_native  # noqa: E402
 
 
 def _environment() -> dict[str, str]:
@@ -158,4 +160,59 @@ def test_native_projection_declines_invalid_finite_identity_for_compatibility() 
     )
     assert native == [None]
     assert stats == {"calls": 1, "candidates": 1, "projected": 0, "unsupported": 1}
+
+
+def test_native_projection_builds_execution_cases_in_mncs(tmp_path: Path) -> None:
+    values = [
+        _test_result(
+            verdict="PASS", failure_kind="NoFailure", discriminant=0,
+            expected=-7, actual=9, failures=0,
+        ),
+        _test_result(
+            verdict="FAIL", failure_kind="AssertionFailure", discriminant=2,
+            expected=41, actual=42, failures=1,
+        ),
+    ]
+    executions = [
+        {"status": "returned", "returned": [value]}
+        for value in values
+    ]
+    tests = [
+        {"id": "pass-case", "kind": "unit"},
+        {"id": "assertion-case", "kind": "unit"},
+    ]
+    observed: list[str] = []
+    original = mncs_test_native.run_native_app
+
+    def observe(name: str, request: dict[str, object], **kwargs: object) -> dict[str, object]:
+        observed.append(name)
+        return original(name, request, **kwargs)
+
+    with mock.patch.object(mncs_test_native, "run_native_app", side_effect=observe):
+        rows, stats = mncs_test.native_execution_result_adjudication_batch(
+            executions,
+            tests,
+            suite=False,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_environment(),
+        )
+
+    assert observed == ["test-execution-result-adjudication.json"]
+    assert [row["native_projection"] for row in rows if row is not None] == [
+        mncs_test._compatibility_native_test_result(executions[0]),
+        mncs_test._compatibility_native_test_result(executions[1]),
+    ]
+    assert [row["process"]["execution"]["decision"] for row in rows if row is not None] == [
+        "success",
+        "assertion_failure",
+    ]
+    assert stats == {
+        "calls": 1,
+        "case_count": 2,
+        "projection_calls": 1,
+        "projection_candidates": 2,
+        "projection_native": 2,
+        "projection_unsupported": 0,
+    }
 

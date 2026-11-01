@@ -20,6 +20,7 @@ MNCS = Path(os.environ.get("MNCS_BINARY", os.environ.get("MNCS", str(_default_mn
 
 sys.path.insert(0, str(ROOT / "tools"))
 import mncs_test  # noqa: E402
+import mncs_test_native  # noqa: E402
 from mncs_test_native import (  # noqa: E402
     NativeTransportError,
     run_process_transport_adjudication,
@@ -56,6 +57,37 @@ def _case(
         "nonzero_exit": nonzero_exit,
         "diagnostics_present": diagnostics_present,
     }
+
+
+def _integer(value: int) -> dict[str, object]:
+    return {"integer": {"value": value, "type": {"bits": 64, "signed": value < 0}}}
+
+
+def _finite(type_name: str, variant: str, discriminant: int) -> dict[str, object]:
+    return {
+        "finite": {
+            "type_identity": f"mncs:0.2:finite-type:mncs.test.assertions::{type_name}",
+            "variant_identity": (
+                f"mncs:0.2:finite-variant:mncs.test.assertions::{type_name}::{variant}"
+            ),
+            "discriminant": discriminant,
+        }
+    }
+
+
+def _returned_pass_result() -> dict[str, object]:
+    fields = [
+        ["verdict", _finite("Verdict", "PASS", 0)],
+        ["verdict_code", _integer(0)],
+        ["failure_kind", _finite("FailureKind", "NoFailure", 0)],
+        ["failure_code", _integer(0)],
+        ["assertions", _integer(1)],
+        ["failures", _integer(0)],
+        ["expected", _integer(0)],
+        ["actual", _integer(0)],
+        ["assertion_code", _integer(0)],
+    ]
+    return {"record": {"name": "TestResult", "type_identity": "test-result", "fields": fields}}
 
 
 def _execution_case(status: str = "runtime_failure") -> dict[str, object]:
@@ -238,6 +270,14 @@ def test_execute_entry_adjudicates_transport_and_execution_in_one_native_call(
         "command_artifact": "commands/case.json",
     }
     monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
+    observed: list[str] = []
+    original = mncs_test_native.run_native_app
+
+    def observe(name: str, request: dict[str, object], **kwargs: object) -> dict[str, object]:
+        observed.append(name)
+        return original(name, request, **kwargs)
+
+    monkeypatch.setattr(mncs_test_native, "run_native_app", observe)
     monkeypatch.setattr(
         mncs_test,
         "run_execution_adjudication",
@@ -262,6 +302,52 @@ def test_execute_entry_adjudicates_transport_and_execution_in_one_native_call(
 
     assert result["failure"]["class"] == "runtime_failure"
     assert result["execution_status"] == "runtime_failure"
+    assert observed == ["test-process-transport-adjudication.json"]
+
+
+def test_execute_entry_projects_and_adjudicates_returned_result_in_mncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = {
+        "timed_out": False,
+        "returncode": 0,
+        "stdout": json.dumps({
+            "status": "returned",
+            "returned": [_returned_pass_result()],
+        }).encode(),
+        "stderr": b"",
+        "stdout_artifact": "stdout/case.out",
+        "stderr_artifact": "stderr/case.err",
+        "command_artifact": "commands/case.json",
+    }
+    monkeypatch.setattr(mncs_test, "run_process", lambda *args, **kwargs: process)
+    observed: list[str] = []
+    original = mncs_test_native.run_native_app
+
+    def observe(name: str, request: dict[str, object], **kwargs: object) -> dict[str, object]:
+        observed.append(name)
+        return original(name, request, **kwargs)
+
+    monkeypatch.setattr(mncs_test_native, "run_native_app", observe)
+
+    result = mncs_test.execute_entry(
+        test={"id": "returned-pass", "entry": "exercise", "kind": "unit"},
+        source_path=tmp_path / "case.mncs",
+        source_text="",
+        module="mncs.test.transport_case",
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        default_step_budget=4096,
+        default_timeout=30,
+        artifacts=mncs_test.ArtifactStore(tmp_path / "artifacts"),
+        artifact_key="returned-pass",
+    )
+
+    assert result["verdict"] == "PASS"
+    assert result["native_result"]["assertions"] == 1
+    assert observed == ["test-execution-result-adjudication.json"]
 
 
 @pytest.mark.parametrize(

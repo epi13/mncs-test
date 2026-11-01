@@ -1,0 +1,232 @@
+mncs 0.18;
+
+// Join bounded native-result projection to Test execution adjudication.
+// The adapter transports the compiler's returned ABI value and process facts;
+// MNCS interprets the value, constructs ExecutionCaseV1, and applies the
+// existing process and execution policies in one native application call.
+module mncs.test.execution_result_adjudication_v1;
+
+use mncs.std.application.v1;
+use mncs.test.execution_adjudication_v1 as execution;
+use mncs.test.native_result_projection_v1 as projection;
+use mncs.test.process_transport_adjudication_v1 as process;
+use mncs.test.public_result_json_key_order_v1 as json_order;
+
+record ExecutionResultAdjudicationCaseV1 {
+    process_start_failed: bool,
+    timed_out: bool,
+    structured_result_present: bool,
+    nonzero_exit: bool,
+    diagnostics_present: bool,
+    execution_status: [byte; up_to 64],
+    expected_status: [byte; up_to 64],
+    suite: bool,
+    kind: byte,
+    document: json_order.JsonTokenDocumentV1
+}
+
+record ExecutionResultAdjudicationRequestV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    items: [ExecutionResultAdjudicationCaseV1; up_to 16]
+}
+
+record ExecutionResultAdjudicationRowV1 {
+    projection_attempted: bool,
+    native_result: projection.NativeResultProjectionV1,
+    process_result: process.ProcessTransportResultV1
+}
+
+record ExecutionResultAdjudicationResultV1 {
+    schema_version: [byte; up_to 64],
+    item_count: u64,
+    rows: [ExecutionResultAdjudicationRowV1; 16]
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,101,120,101,99,117,116,105,111,110,45,114,101,115,117,108,116,45,97,100,106,117,100,105,99,97,116,105,111,110,45,114,101,113,117,101,115,116,47,49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109,110,99,115,46,116,101,115,116,46,101,120,101,99,117,116,105,111,110,45,114,101,115,117,108,116,45,97,100,106,117,100,105,99,97,116,105,111,110,47,49];
+}
+
+fn returned_status() -> (result: [byte; up_to 64]) {
+    return [114,101,116,117,114,110,101,100];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over right carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn empty_execution_case(
+    status: [byte; up_to 64],
+    expected_status: [byte; up_to 64],
+    suite: bool
+) -> (result: execution.ExecutionCaseV1) {
+    return execution.ExecutionCaseV1 {
+        execution_status: status,
+        expected_status: expected_status,
+        suite: suite,
+        native_result_present: false,
+        native_verdict: [],
+        native_failure_class: []
+    };
+}
+
+fn process_case(
+    value: ExecutionResultAdjudicationCaseV1,
+    execution_case: execution.ExecutionCaseV1
+) -> (result: process.ProcessTransportCaseV1) {
+    return process.ProcessTransportCaseV1 {
+        process_start_failed: value.process_start_failed,
+        timed_out: value.timed_out,
+        structured_result_present: value.structured_result_present,
+        nonzero_exit: value.nonzero_exit,
+        diagnostics_present: value.diagnostics_present,
+        execution_case: execution_case
+    };
+}
+
+fn build_process_result(value: process.ProcessTransportCaseV1) -> (result: process.ProcessTransportResultV1) {
+    return process.build_result(process.ProcessTransportRequestV1 {
+        schema_version: process.request_schema(),
+        case: value
+    });
+}
+
+fn projected_verdict(value: projection.NativeResultProjectionV1) -> (result: [byte; up_to 64]) {
+    if !value.supported || value.verdict_length > 64 { return []; }
+    return value.verdict[0..value.verdict_length];
+}
+
+fn projected_failure_class(value: projection.NativeResultProjectionV1) -> (result: [byte; up_to 64]) {
+    if !value.supported || value.failure_kind_length > 64 { return []; }
+    return value.failure_kind[0..value.failure_kind_length];
+}
+
+fn projected_case_failure_class(
+    value: projection.NativeResultProjectionV1,
+    suite: bool
+) -> (result: [byte; up_to 64]) {
+    if suite { return []; }
+    return projected_failure_class(value);
+}
+
+fn maybe_project(
+    attempted: bool,
+    kind: byte,
+    document: json_order.JsonTokenDocumentV1
+) -> (result: projection.NativeResultProjectionV1) {
+    if !attempted { return projection.empty_projection(kind); }
+    return projection.project_item(projection.NativeResultProjectionItemV1 {
+        kind: kind,
+        document: document
+    });
+}
+
+fn empty_process_result() -> (result: process.ProcessTransportResultV1) {
+    return process.ProcessTransportResultV1 {
+        schema_version: [],
+        decision: [],
+        failure_class: [],
+        terminal: false,
+        execution_outcome_present: false,
+        execution_outcome: execution.ExecutionOutcomeV1 {
+            decision: [], status: [], verdict: [], failure_class: [], expected_failure: false
+        }
+    };
+}
+
+fn empty_row(kind: byte) -> (result: ExecutionResultAdjudicationRowV1) {
+    return ExecutionResultAdjudicationRowV1 {
+        projection_attempted: false,
+        native_result: projection.empty_projection(kind),
+        process_result: empty_process_result()
+    };
+}
+
+fn adjudicate_item(value: ExecutionResultAdjudicationCaseV1) -> (result: ExecutionResultAdjudicationRowV1) {
+    let initial_execution: execution.ExecutionCaseV1 = empty_execution_case(
+        value.execution_status,
+        value.expected_status,
+        value.suite
+    );
+    let initial_process: process.ProcessTransportCaseV1 = process_case(value, initial_execution);
+    let initial_decision: process.ProcessTransportDecisionV1 = process.classify(initial_process);
+    if initial_decision.terminal {
+        return ExecutionResultAdjudicationRowV1 {
+            projection_attempted: false,
+            native_result: projection.empty_projection(value.kind),
+            process_result: build_process_result(initial_process)
+        };
+    }
+
+    let attempted: bool = same_bytes(value.execution_status, returned_status());
+    let projected: projection.NativeResultProjectionV1 = maybe_project(
+        attempted,
+        value.kind,
+        value.document
+    );
+    let adjudication_case: execution.ExecutionCaseV1 = execution.ExecutionCaseV1 {
+        ..initial_execution,
+        native_result_present: projected.supported,
+        native_verdict: projected_verdict(projected),
+        native_failure_class: projected_case_failure_class(projected, value.suite)
+    };
+    let final_process: process.ProcessTransportCaseV1 = process_case(value, adjudication_case);
+    return ExecutionResultAdjudicationRowV1 {
+        projection_attempted: attempted,
+        native_result: projected,
+        process_result: build_process_result(final_process)
+    };
+}
+
+fn valid_request(value: ExecutionResultAdjudicationRequestV1) -> (result: bool) {
+    if !same_bytes(value.schema_version, request_schema())
+        || value.item_count != value.items.len
+        || value.item_count > 16 {
+        return false;
+    }
+    iterate i over value.items carrying valid: bool = true {
+        let item: ExecutionResultAdjudicationCaseV1 = value.items[i];
+        next valid = valid && (item.kind == 1 || item.kind == 2)
+            && (item.suite == (item.kind == 2))
+            && item.document.byte_length <= 16384;
+    }
+    return valid;
+}
+
+fn execution_result_adjudication_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97,114,103,118,32,114,101,113,117,105,114,101,115,32,50,32,101,120,101,99,117,116,105,111,110,32,114,101,115,117,108,116,32,97,100,106,117,100,105,99,97,116,105,111,110,32,112,97,116,104,115], 2);
+    }
+    let request: ExecutionResultAdjudicationRequestV1 = structured_read(context.argv[0], request_schema());
+    if !valid_request(request) {
+        return failure([105,110,118,97,108,105,100,32,84,101,115,116,32,101,120,101,99,117,116,105,111,110,32,114,101,115,117,108,116,32,97,100,106,117,100,105,99,97,116,105,111,110,32,114,101,113,117,101,115,116], 4);
+    }
+    let initial: ExecutionResultAdjudicationResultV1 = ExecutionResultAdjudicationResultV1 {
+        schema_version: result_schema(),
+        item_count: request.item_count,
+        rows: [empty_row(0); 16]
+    };
+    iterate i over request.items carrying built: ExecutionResultAdjudicationResultV1 = initial {
+        next built = ExecutionResultAdjudicationResultV1 {
+            ..built,
+            rows: replace(built.rows, i, adjudicate_item(request.items[i]))
+        };
+    }
+    let published: u64 = structured_write(context.argv[1], result_schema(), built);
+    if published == 0 {
+        return failure([101,120,101,99,117,116,105,111,110,32,114,101,115,117,108,116,32,97,100,106,117,100,105,99,97,116,105,111,110,32,112,117,98,108,105,115,104,32,102,97,105,108,101,100], 3);
+    }
+    return success([]);
+}

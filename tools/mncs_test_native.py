@@ -344,6 +344,13 @@ PROCESS_TRANSPORT_ADJUDICATION_REQUEST_SCHEMA = (
 PROCESS_TRANSPORT_ADJUDICATION_RESULT_SCHEMA = (
     "mncs.test-process-transport-adjudication/2"
 )
+EXECUTION_RESULT_ADJUDICATION_REQUEST_SCHEMA = (
+    "mncs.test.execution-result-adjudication-request/1"
+)
+EXECUTION_RESULT_ADJUDICATION_RESULT_SCHEMA = (
+    "mncs.test.execution-result-adjudication/1"
+)
+EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS = 16
 PROCESS_TRANSPORT_DECISIONS = {
     "start_failure": ("infrastructure_failure", True),
     "timeout": ("timeout", True),
@@ -1042,7 +1049,11 @@ def run_process_transport_adjudication(
         environment=environment,
         timeout_seconds=timeout_seconds,
     )
-    if set(result) != {
+    return _process_transport_result(result)
+
+
+def _process_transport_result(result: object) -> dict[str, object]:
+    if not isinstance(result, dict) or set(result) != {
         "schema_version", "decision", "failure_class", "terminal",
         "execution_outcome_present", "execution_outcome",
     } or result.get("schema_version") != PROCESS_TRANSPORT_ADJUDICATION_RESULT_SCHEMA:
@@ -1077,6 +1088,124 @@ def run_process_transport_adjudication(
         "terminal": terminal,
         "execution": execution_outcome,
     }
+
+
+def run_execution_result_adjudication(
+    cases: list[dict],
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout_seconds: float = 120.0,
+) -> list[dict[str, object]]:
+    """Project typed Test results and adjudicate process outcomes in MNCS."""
+    if not isinstance(cases, list) or len(cases) > EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS:
+        raise NativeTransportError(
+            "execution result adjudication accepts at most "
+            f"{EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS} cases"
+        )
+    required = {
+        "process_start_failed", "timed_out", "structured_result_present",
+        "nonzero_exit", "diagnostics_present", "execution_status",
+        "expected_status", "suite", "kind", "document",
+    }
+    normalized: list[dict[str, object]] = []
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict) or set(case) != required:
+            raise NativeTransportError(
+                f"execution result adjudication case {index} has an invalid field set"
+            )
+        for field in (
+            "process_start_failed", "timed_out", "structured_result_present",
+            "nonzero_exit", "diagnostics_present", "suite",
+        ):
+            if type(case[field]) is not bool:
+                raise NativeTransportError(
+                    f"execution result adjudication case {index} has invalid {field}"
+                )
+        for field in ("execution_status", "expected_status"):
+            case[field] = _bounded_adjudication_text(case[field], field)
+        kind = case["kind"]
+        if (type(kind) is not int or kind not in (1, 2)
+                or case["suite"] is not (kind == 2)):
+            raise NativeTransportError(
+                f"execution result adjudication case {index} has invalid result kind"
+            )
+        if case["expected_status"] and case["expected_status"] not in EXECUTION_STATUS_VALUES:
+            raise NativeTransportError(
+                f"execution result adjudication case {index} has an unknown expected status"
+            )
+        if not isinstance(case["document"], dict):
+            raise NativeTransportError(
+                f"execution result adjudication case {index} has an invalid document"
+            )
+        normalized.append(case)
+    request = {
+        "schema_version": EXECUTION_RESULT_ADJUDICATION_REQUEST_SCHEMA,
+        "item_count": len(normalized),
+        "items": normalized,
+    }
+    step_budget = (
+        8_000_000
+        if any(
+            isinstance(case["document"].get("byte_length"), int)
+            and case["document"]["byte_length"] > 0
+            for case in normalized
+        )
+        else 1_048_576
+    )
+    result = run_native_app(
+        "test-execution-result-adjudication.json",
+        request,
+        request_schema=EXECUTION_RESULT_ADJUDICATION_REQUEST_SCHEMA,
+        result_schema=EXECUTION_RESULT_ADJUDICATION_RESULT_SCHEMA,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        step_budget=step_budget,
+        timeout_seconds=timeout_seconds,
+    )
+    rows = result.get("rows")
+    if (result.get("schema_version") != EXECUTION_RESULT_ADJUDICATION_RESULT_SCHEMA
+            or type(result.get("item_count")) is not int
+            or result["item_count"] != len(normalized)
+            or not isinstance(rows, list)
+            or len(rows) != EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS):
+        raise NativeTransportError(
+            "native execution result adjudication returned a mismatched result count"
+        )
+    validated: list[dict[str, object]] = []
+    for index, raw in enumerate(rows[:len(normalized)]):
+        if not isinstance(raw, dict) or set(raw) != {
+            "projection_attempted", "native_result", "process_result",
+        }:
+            raise NativeTransportError(
+                f"native execution result adjudication row {index} is malformed"
+            )
+        attempted = raw["projection_attempted"]
+        projection = raw["native_result"]
+        if (type(attempted) is not bool or not isinstance(projection, dict)
+                or projection.get("kind") != normalized[index]["kind"]
+                or type(projection.get("supported")) is not bool):
+            raise NativeTransportError(
+                f"native execution result adjudication row {index} has an invalid projection"
+            )
+        process_result = raw["process_result"]
+        process_decision = _process_transport_result(process_result)
+        expected_attempt = (
+            not process_decision["terminal"]
+            and normalized[index]["execution_status"] == "returned"
+        )
+        if attempted is not expected_attempt:
+            raise NativeTransportError(
+                f"native execution result adjudication row {index} has an inconsistent projection flag"
+            )
+        validated.append({
+            **process_decision,
+            "projection_attempted": attempted,
+            "native_result": projection,
+        })
+    return validated
 
 
 def run_runner_policy(

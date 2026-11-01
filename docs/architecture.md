@@ -975,3 +975,17 @@ unsupported fields, larger documents, and native declines retain the previous
 compatibility projection. Differential tests cover exact summary counters and
 non-integer count fallback, and the live expected-runtime-failure runner covers
 the consumer boundary.
+
+P-047 adds `mncs.test.execution_result_adjudication_v1` to join the bounded
+returned-result projection with the existing ProcessTransport and execution
+adjudication policies. Python sends process observations and one compact UTF-8
+ABI document per eligible returned result; MNCS projects each TestResult or
+SuiteSummary, constructs the bounded execution case, and returns the public
+native-result fields and policy decisions in one application call. Batches are
+limited to 16 records and each document to 16,384 bytes. Python no longer
+converts projected typed slots into an execution-case request on this path; it
+still normalizes scalar fields for the public result envelope. Non-returned
+executions continue through the lower-cost process-adjudication path, while
+unsupported, malformed, over-bound, and unavailable native results retain the
+compatibility projection and adjudication route. Differential projection and
+policy tests plus the live Test self-suite exercise the integrated consumer.

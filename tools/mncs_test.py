@@ -34,11 +34,13 @@ from family_contract import (
 )
 from mncs_test_native import (
     EXECUTION_ADJUDICATION_MAX_CASES,
+    EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS,
     NativeBudgetExhaustedError,
     NativeInputBoundError,
     NativeTransportError,
     run_exact_test_identity_selection,
     run_execution_adjudication,
+    run_execution_result_adjudication,
     run_native_app,
     run_process_transport_adjudication,
     run_runner_policy,
@@ -72,6 +74,7 @@ NATIVE_RESULT_PROJECTION_MAX_DOCUMENT_BYTES = 16_384
 NATIVE_RESULT_SUMMARY_PROJECTION_REQUEST_SCHEMA = "mncs.test.result-summary-projection-request/1"
 NATIVE_RESULT_SUMMARY_PROJECTION_RESULT_SCHEMA = "mncs.test.result-summary-projection/1"
 NATIVE_RESULT_SUMMARY_PROJECTION_MAX_BYTES = 65_536
+NATIVE_EXECUTION_RESULT_ADJUDICATION_MAX_DOCUMENT_BYTES = 16_384
 REPLAY_SCHEMA_REQUEST_SCHEMA = "mncs.test.replay-schema-request/1"
 REPLAY_SCHEMA_RESULT_SCHEMA = "mncs.test.replay-schema/4"
 FAMILY_CHECK_MANIFEST_NATIVE_REQUEST_SCHEMA = "mncs.test.family-check-manifest-request/1"
@@ -2172,6 +2175,137 @@ def native_result_projection_batch(
                 stats["projected"] += 1
 
     stats["unsupported"] = stats["candidates"] - stats["projected"]
+    return projected, stats
+
+
+def _native_execution_status(decoded: Any) -> str:
+    status = decoded.get("status") if isinstance(decoded, dict) else None
+    if not isinstance(status, str):
+        return "<invalid-status>"
+    try:
+        size = len(status.encode("utf-8"))
+    except UnicodeEncodeError:
+        return "<invalid-status>"
+    return status if size <= 64 else "<invalid-status>"
+
+
+def _native_execution_result_document(decoded: Any) -> tuple[dict[str, Any], bool]:
+    empty = {"chunks": [], "byte_length": 0}
+    if _native_execution_status(decoded) != "returned" or not isinstance(decoded, dict):
+        return empty, False
+    returned = decoded.get("returned")
+    if not isinstance(returned, list) or len(returned) != 1:
+        return empty, False
+    try:
+        encoded = compact_json(returned[0], sort_keys=False).encode("utf-8")
+    except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
+        return empty, False
+    if not encoded or len(encoded) > NATIVE_EXECUTION_RESULT_ADJUDICATION_MAX_DOCUMENT_BYTES:
+        return empty, False
+    chunks = _public_result_input_chunks(encoded)
+    return {
+        "chunks": [
+            {"bytes": chunk.decode("utf-8"), "length": len(chunk)}
+            for chunk in chunks
+        ],
+        "byte_length": len(encoded),
+    }, True
+
+
+def native_execution_result_adjudication_batch(
+    executions: list[Any],
+    tests: list[dict[str, Any]],
+    *,
+    suite: bool,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+    process_observations: list[dict[str, bool]] | None = None,
+) -> tuple[list[dict[str, Any] | None], dict[str, int]]:
+    """Project returned Test ABI values and adjudicate their cases in MNCS."""
+    if len(executions) != len(tests) or len(executions) > 256:
+        raise AdapterError("execution result adjudication rows must align and fit the 256-row bound")
+    if process_observations is not None and len(process_observations) != len(executions):
+        raise AdapterError("execution process observations must align with their results")
+    projected: list[dict[str, Any] | None] = [None] * len(executions)
+    stats = {
+        "calls": 0,
+        "case_count": len(executions),
+        "projection_calls": 0,
+        "projection_candidates": 0,
+        "projection_native": 0,
+        "projection_unsupported": 0,
+    }
+    kind = 2 if suite else 1
+    requests: list[dict[str, Any]] = []
+    request_indices: list[int] = []
+    projection_candidates: list[bool] = []
+    for index, (decoded, test) in enumerate(zip(executions, tests, strict=True)):
+        observation = (
+            process_observations[index]
+            if process_observations is not None
+            else {
+                "process_start_failed": False,
+                "timed_out": False,
+                "structured_result_present": isinstance(decoded, dict),
+                "nonzero_exit": False,
+                "diagnostics_present": False,
+            }
+        )
+        if not isinstance(observation, dict) or set(observation) != {
+            "process_start_failed", "timed_out", "structured_result_present",
+            "nonzero_exit", "diagnostics_present",
+        } or any(type(value) is not bool for value in observation.values()):
+            raise AdapterError("execution process observation has an invalid shape")
+        document, has_candidate = _native_execution_result_document(decoded)
+        stats["projection_candidates"] += int(has_candidate)
+        if not has_candidate:
+            continue
+        requests.append({
+            **observation,
+            "execution_status": _native_execution_status(decoded),
+            "expected_status": expected_status_for(test) or "",
+            "suite": suite,
+            "kind": kind,
+            "document": document,
+        })
+        request_indices.append(index)
+        projection_candidates.append(has_candidate)
+
+    for offset in range(0, len(requests), EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS):
+        batch = requests[offset:offset + EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS]
+        indices = request_indices[offset:offset + EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS]
+        candidate_flags = projection_candidates[offset:offset + EXECUTION_RESULT_ADJUDICATION_MAX_ITEMS]
+        stats["calls"] += 1
+        try:
+            rows = run_execution_result_adjudication(
+                batch,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+        except (NativeTransportError, OSError, subprocess.TimeoutExpired):
+            continue
+        if any(candidate_flags):
+            stats["projection_calls"] += 1
+        for index, row, has_candidate in zip(indices, rows, candidate_flags, strict=True):
+            raw_projection = row["native_result"]
+            native_projection = _native_result_projection_value(raw_projection, kind)
+            if has_candidate and row["projection_attempted"] and native_projection is not None:
+                stats["projection_native"] += 1
+            projected[index] = {
+                "process": {
+                    "decision": row["decision"],
+                    "failure_class": row["failure_class"],
+                    "terminal": row["terminal"],
+                    "execution": row["execution"],
+                },
+                "native_projection": native_projection,
+                "native_projection_attempted": row["projection_attempted"],
+            }
+    stats["projection_unsupported"] = (
+        stats["projection_candidates"] - stats["projection_native"]
+    )
     return projected, stats
 
 
@@ -5330,13 +5464,15 @@ def execution_result_from_decoded(
             **expected_reference,
             "execution_status": decoded.get("status"),
         }
-    _native_case, native = execution_adjudication_case(
-        test=test,
-        decoded=decoded,
-        suite=suite,
-        native_projection=native_projection,
-        native_projection_attempted=native_projection_attempted,
-    )
+    if native_projection_attempted:
+        native = native_projection
+    elif decoded.get("status") == "returned":
+        native = (
+            _compatibility_native_suite_summary(decoded)
+            if suite else _compatibility_native_test_result(decoded)
+        )
+    else:
+        native = None
     if not isinstance(adjudication, dict):
         raise AdapterError("execution result is missing its native adjudication")
     return apply_execution_adjudication(
@@ -5402,60 +5538,75 @@ def execute_entry(
     test_result["command_artifact"] = process["command_artifact"]
     decoded = parse_json_output(process["stdout"])
     diagnostics = diagnostic_list(decoded)
-    native_projection: dict[str, Any] | None = None
-    projection_attempted = isinstance(decoded, dict) and decoded.get("status") == "returned"
-    if projection_attempted:
-        projected, _projection_stats = native_result_projection_batch(
-            [decoded],
-            kind=2 if suite else 1,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
-        )
-        native_projection = projected[0]
-    case, native = execution_adjudication_case(
-        test=test,
-        decoded=decoded if isinstance(decoded, dict) else {},
+    process_observation = {
+        "process_start_failed": "transport_error" in process,
+        "timed_out": process.get("timed_out") is True,
+        "structured_result_present": isinstance(decoded, dict),
+        "nonzero_exit": (
+            type(process.get("returncode")) is int
+            and process["returncode"] != 0
+        ),
+        "diagnostics_present": bool(diagnostics),
+    }
+    combined, _projection_stats = native_execution_result_adjudication_batch(
+        [decoded],
+        [test],
         suite=suite,
-        native_projection=native_projection,
-        native_projection_attempted=projection_attempted,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        process_observations=[process_observation],
     )
-    try:
-        process_decision = run_process_transport_adjudication(
-            {
-                "process_start_failed": "transport_error" in process,
-                "timed_out": process.get("timed_out") is True,
-                "structured_result_present": isinstance(decoded, dict),
-                "nonzero_exit": (
-                    type(process.get("returncode")) is int
-                    and process["returncode"] != 0
-                ),
-                "diagnostics_present": bool(diagnostics),
-            },
-            case,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
+    combined_result = combined[0]
+    if combined_result is not None:
+        process_decision = combined_result["process"]
+        native = combined_result["native_projection"]
+    else:
+        native_projection: dict[str, Any] | None = None
+        projection_attempted = isinstance(decoded, dict) and decoded.get("status") == "returned"
+        if projection_attempted:
+            projected, _projection_stats = native_result_projection_batch(
+                [decoded],
+                kind=2 if suite else 1,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            native_projection = projected[0]
+        case, native = execution_adjudication_case(
+            test=test,
+            decoded=decoded if isinstance(decoded, dict) else {},
+            suite=suite,
+            native_projection=native_projection,
+            native_projection_attempted=projection_attempted,
         )
-    except (NativeTransportError, OSError, subprocess.TimeoutExpired) as error:
-        # Start failures and deadlines are already observed at the host
-        # process boundary. Preserve those outcomes if the classifier cannot
-        # run, for example because the MNCS executable itself is unavailable.
-        if "transport_error" in process:
-            return result_failure(
-                test_result,
-                failure_class="infrastructure_failure",
-                message="MNCS process could not be started",
-                error=process["transport_error"],
+        try:
+            process_decision = run_process_transport_adjudication(
+                process_observation,
+                case,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
             )
-        if process.get("timed_out") is True:
-            return result_failure(
-                test_result,
-                failure_class="timeout",
-                message=f"MNCS execution exceeded {timeout_seconds}s",
-                timeout_seconds=timeout_seconds,
-            )
-        raise AdapterError(f"native process transport adjudication failed: {error}") from error
+        except (NativeTransportError, OSError, subprocess.TimeoutExpired) as error:
+            # Start failures and deadlines are already observed at the host
+            # process boundary. Preserve those outcomes if the classifier cannot
+            # run, for example because the MNCS executable itself is unavailable.
+            if "transport_error" in process:
+                return result_failure(
+                    test_result,
+                    failure_class="infrastructure_failure",
+                    message="MNCS process could not be started",
+                    error=process["transport_error"],
+                )
+            if process.get("timed_out") is True:
+                return result_failure(
+                    test_result,
+                    failure_class="timeout",
+                    message=f"MNCS execution exceeded {timeout_seconds}s",
+                    timeout_seconds=timeout_seconds,
+                )
+            raise AdapterError(f"native process transport adjudication failed: {error}") from error
 
     decision = process_decision["decision"]
     if decision == "start_failure":
@@ -5620,55 +5771,94 @@ def execute_batch(
             results.append(result)
         return results
     results: list[dict[str, Any]] = []
-    adjudication_cases: list[dict[str, Any]] = []
-    adjudication_indices: list[int] = []
-    returned_indices = [
+    adjudication_indices = [
         index for index, value in enumerate(decoded)
-        if index < len(tests) and isinstance(value, dict) and value.get("status") == "returned"
+        if index < len(tests) and isinstance(value, dict)
     ]
-    projected_values, projection_stats = native_result_projection_batch(
-        [decoded[index] for index in returned_indices],
-        kind=2 if suite else 1,
+    native_projection_by_index: dict[int, dict[str, Any] | None] = {}
+    native_projection_attempted_by_index: dict[int, bool] = {}
+    adjudication_by_index: dict[int, dict[str, Any]] = {}
+    combined_results, combined_stats = native_execution_result_adjudication_batch(
+        [decoded[index] for index in adjudication_indices],
+        [tests[index] for index in adjudication_indices],
+        suite=suite,
         mncs=mncs,
         cwd=cwd,
         environment=environment,
     )
-    native_projection_by_index = dict(zip(returned_indices, projected_values, strict=True))
-    for index, test in enumerate(tests):
-        if index >= len(decoded) or not isinstance(decoded[index], dict):
+    legacy_projection_stats = {"calls": 0, "candidates": 0, "projected": 0, "unsupported": 0}
+    legacy_adjudication_calls = 0
+    legacy_indices: list[int] = []
+    for index, row in zip(adjudication_indices, combined_results, strict=True):
+        if row is None:
+            legacy_indices.append(index)
             continue
-        case, _native = execution_adjudication_case(
-            test=test,
-            decoded=decoded[index],
-            suite=suite,
-            native_projection=native_projection_by_index.get(index),
-            native_projection_attempted=decoded[index].get("status") == "returned",
-        )
-        adjudication_cases.append(case)
-        adjudication_indices.append(index)
-    adjudication_by_index: dict[int, dict[str, Any]] = {}
-    adjudication_calls = 0
-    for offset in range(0, len(adjudication_cases), EXECUTION_ADJUDICATION_MAX_CASES):
-        case_batch = adjudication_cases[offset:offset + EXECUTION_ADJUDICATION_MAX_CASES]
-        index_batch = adjudication_indices[offset:offset + EXECUTION_ADJUDICATION_MAX_CASES]
-        adjudication_results = run_execution_adjudication(
-            case_batch,
+        process_decision = row["process"]
+        if process_decision["terminal"] or process_decision["decision"] != "continue":
+            raise AdapterError("retained MNCS result was unexpectedly classified as a process failure")
+        outcome = process_decision["execution"]
+        if not isinstance(outcome, dict):
+            raise AdapterError("native execution result adjudication omitted its outcome")
+        adjudication_by_index[index] = outcome
+        native_projection_by_index[index] = row["native_projection"]
+        native_projection_attempted_by_index[index] = row["native_projection_attempted"]
+    if legacy_indices:
+        returned_indices = [
+            index for index in legacy_indices
+            if decoded[index].get("status") == "returned"
+        ]
+        projected_values, legacy_projection_stats = native_result_projection_batch(
+            [decoded[index] for index in returned_indices],
+            kind=2 if suite else 1,
             mncs=mncs,
             cwd=cwd,
             environment=environment,
         )
-        adjudication_by_index.update(
-            zip(index_batch, adjudication_results, strict=True)
+        native_projection_by_index.update(
+            zip(returned_indices, projected_values, strict=True)
         )
-        adjudication_calls += 1
+        native_projection_attempted_by_index.update(
+            (index, True) for index in returned_indices
+        )
+        adjudication_cases: list[dict[str, Any]] = []
+        for index in legacy_indices:
+            case, _native = execution_adjudication_case(
+                test=tests[index],
+                decoded=decoded[index],
+                suite=suite,
+                native_projection=native_projection_by_index.get(index),
+                native_projection_attempted=decoded[index].get("status") == "returned",
+            )
+            adjudication_cases.append(case)
+        for offset in range(0, len(adjudication_cases), EXECUTION_ADJUDICATION_MAX_CASES):
+            case_batch = adjudication_cases[offset:offset + EXECUTION_ADJUDICATION_MAX_CASES]
+            index_batch = legacy_indices[offset:offset + EXECUTION_ADJUDICATION_MAX_CASES]
+            adjudication_results = run_execution_adjudication(
+                case_batch,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            adjudication_by_index.update(
+                zip(index_batch, adjudication_results, strict=True)
+            )
+            legacy_adjudication_calls += 1
     if native_adjudication_summary is not None:
         native_adjudication_summary.update({
-            "calls": adjudication_calls,
-            "case_count": len(adjudication_cases),
-            "result_projection_calls": projection_stats["calls"],
-            "result_projection_candidates": projection_stats["candidates"],
-            "result_projection_native": projection_stats["projected"],
-            "result_projection_compatibility": projection_stats["unsupported"],
+            "calls": combined_stats["calls"] + legacy_adjudication_calls,
+            "case_count": len(adjudication_indices),
+            "result_projection_calls": (
+                combined_stats["projection_calls"] + legacy_projection_stats["calls"]
+            ),
+            "result_projection_candidates": (
+                combined_stats["projection_candidates"] + legacy_projection_stats["candidates"]
+            ),
+            "result_projection_native": (
+                combined_stats["projection_native"] + legacy_projection_stats["projected"]
+            ),
+            "result_projection_compatibility": (
+                combined_stats["projection_unsupported"] + legacy_projection_stats["unsupported"]
+            ),
         })
     for index, test in enumerate(tests):
         if index >= len(decoded):
@@ -5690,10 +5880,7 @@ def execute_batch(
                 suite=suite,
                 transport=transport,
                 native_projection=native_projection_by_index.get(index),
-                native_projection_attempted=(
-                    isinstance(decoded[index], dict)
-                    and decoded[index].get("status") == "returned"
-                ),
+                native_projection_attempted=native_projection_attempted_by_index.get(index, False),
             )
         result["request"] = request_documents[index]
         result["transport_request"] = transport_requests[index]
