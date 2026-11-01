@@ -99,6 +99,7 @@ record PublicValueNodeReadResultV1 {
     next_offset: u64
 }
 record PublicValueKeyCopyV1 { bytes: [byte; 256], valid: bool }
+record PublicValueNumberBytesV1 { bytes: [byte; 64], valid: bool }
 record PublicValueTapeShapeStateV1 { total: u64, valid: bool }
 
 record PublicValueBuildResultV1 {
@@ -114,6 +115,7 @@ record PublicValueInputResultV1 {
     node_count: u64,
     document_length: u64,
     chunk_count: u64,
+    output_sha256: [byte; up_to 64],
     chunks: [JsonOrderChunkV1; up_to 64]
 }
 
@@ -312,7 +314,7 @@ fn public_value_request_schema_v1() -> (result: [byte; up_to 64]) {
 }
 
 fn public_value_result_schema_v1() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 118, 97, 108, 117, 101, 45, 105, 110, 112, 117, 116, 47, 50];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 106, 115, 111, 110, 45, 118, 97, 108, 117, 101, 45, 105, 110, 112, 117, 116, 47, 51];
 }
 
 fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
@@ -1429,12 +1431,35 @@ fn parse_chunk(state: ParseStateV1, document: JsonTokenDocumentV1, chunk_index: 
     return parsed;
 }
 
+fn initial_json_scan_state() -> (result: json.ScanState) {
+    return json.ScanState {
+        stack: 0,
+        depth: 0,
+        expect: 0,
+        mode: 0,
+        number: 0,
+        literal: 0,
+        position: 0,
+        escape: false,
+        unicode: 0,
+        valid: true,
+        error: 0,
+        objects: 0,
+        arrays: 0,
+        strings: 0
+    };
+}
+
 fn scan_document_part(scanned: json.ScanState, chunk: JsonTokenInputChunkV1, index: u64) -> (result: json.ScanState) {
     let start: u64 = index *% 64;
     if start >= chunk.length { return scanned; }
     let remaining: u64 = chunk.length -% start;
     let size: u64 = select(remaining < 64, remaining, 64);
-    return json.feed_chunk(scanned, chunk.bytes[start..start +% size]);
+    let source: [byte; up_to 64] = chunk.bytes[start..start +% size];
+    iterate i over source carrying current: json.ScanState = scanned {
+        next current = json.scan_step(current, source[i]);
+    }
+    return current;
 }
 
 fn scan_document_chunk(scanned: json.ScanState, chunk: JsonTokenInputChunkV1) -> (result: json.ScanState) {
@@ -1445,10 +1470,14 @@ fn scan_document_chunk(scanned: json.ScanState, chunk: JsonTokenInputChunkV1) ->
 }
 
 fn scan_document(document: JsonTokenDocumentV1) -> (result: json.ScanState) {
-    iterate i over document.chunks carrying scanned: json.ScanState = json.init() {
+    iterate i over document.chunks carrying scanned: json.ScanState = initial_json_scan_state() {
         next scanned = scan_document_chunk(scanned, document.chunks[i]);
     }
-    return json.finish(scanned);
+    return json.scan_finish_end(scanned);
+}
+
+fn json_scan_is_valid(scanned: json.ScanState) -> (result: bool) {
+    return scanned.valid && scanned.depth == 0 && scanned.mode == 0 && scanned.expect == 7;
 }
 
 fn parse_document_with_array_spans(
@@ -2609,7 +2638,7 @@ fn encode_digest(raw: [byte; 32]) -> (result: [byte; up_to 64]) {
 fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result: ParseStateV1) {
     if request_valid {
         let scanned: json.ScanState = scan_document(document);
-        if json.is_valid(scanned) { return parse_document(document); }
+        if json_scan_is_valid(scanned) { return parse_document(document); }
     }
     return ParseStateV1 { ..empty_parse_state(false), valid: false };
 }
@@ -2617,7 +2646,7 @@ fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result:
 fn parse_key_order_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result: ParseStateV1) {
     if request_valid {
         let scanned: json.ScanState = scan_document(document);
-        if json.is_valid(scanned) { return parse_key_order_document(document); }
+        if json_scan_is_valid(scanned) { return parse_key_order_document(document); }
     }
     return ParseStateV1 { ..empty_parse_state(true), valid: false };
 }
@@ -2753,7 +2782,7 @@ fn public_value_payload(
             next_offset: magnitude.next_offset, valid: magnitude.valid
         };
     }
-    if kind == 4 {
+    if kind == 4 || kind == 7 {
         let text_start: PublicValueHexResultV1 = public_value_tape_hex(chunk, start, 44);
         let text_length: PublicValueHexResultV1 = public_value_tape_hex(
             chunk, text_start.next_offset, 59
@@ -2784,7 +2813,7 @@ fn public_value_node(chunk: JsonTokenInputChunkV1, start: u64) -> (result: Publi
     }
     let raw_kind: u64 = public_value_tape_digit(chunk.bytes[start]);
     let flags: u64 = public_value_tape_digit(chunk.bytes[start +% 1]);
-    let kind_valid: bool = raw_kind <= 6;
+    let kind_valid: bool = raw_kind <= 7;
     let kind: byte = select(kind_valid, raw_kind as byte, 255);
     let has_key: bool = flags == 1 || flags == 3;
     let negative: bool = flags == 2 || flags == 3;
@@ -2846,11 +2875,46 @@ fn valid_public_value_request(request: PublicValueRequestV1) -> (result: bool) {
         && request.text.byte_length <= 65536 && text_shape.valid && tape_shape.valid;
 }
 
+fn public_value_number_byte_step(
+    state: PublicValueNumberBytesV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: PublicValueNumberBytesV1) {
+    if !state.valid || index >= length { return state; }
+    return PublicValueNumberBytesV1 {
+        bytes: replace(state.bytes, index, located_byte(document, start +% index)),
+        valid: true
+    };
+}
+
+fn public_value_number_slice(
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64
+) -> (result: [byte; up_to 64]) {
+    if length == 0 || length > 64 || start > document.byte_length
+        || length > document.byte_length -% start { return [0; 0]; }
+    let initial: PublicValueNumberBytesV1 = PublicValueNumberBytesV1 {
+        bytes: [0; 64],
+        valid: true
+    };
+    iterate i up_to 64 carrying copied: PublicValueNumberBytesV1 = initial {
+        next copied = public_value_number_byte_step(
+            copied, document, start, length, i
+        );
+    }
+    if !copied.valid { return [0; 0]; }
+    return copied.bytes[0..length];
+}
+
 fn valid_public_value_node(
-    text_length: u64,
+    document: JsonTokenDocumentV1,
     node: PublicValueNodeV1,
     expects_key: bool
 ) -> (result: bool) {
+    let text_length: u64 = document.byte_length;
     if !node.valid || node.has_key != expects_key { return false; }
     if expects_key {
         if node.key_length > 256 || node.key_start > text_length
@@ -2861,6 +2925,15 @@ fn valid_public_value_node(
         return node.text_start <= text_length
             && node.text_length <= text_length -% node.text_start
             && node.child_count == 0 && node.magnitude == 0 && !node.negative;
+    }
+    if node.kind == 7 {
+        return node.text_start <= text_length
+            && node.text_length > 0 && node.text_length <= 64
+            && node.text_length <= text_length -% node.text_start
+            && node.child_count == 0 && node.magnitude == 0 && !node.negative
+            && json.scan(public_value_number_slice(
+                document, node.text_start, node.text_length
+            )) > 0;
     }
     if node.text_start != 0 || node.text_length != 0 { return false; }
     if node.kind <= 2 {
@@ -3083,13 +3156,13 @@ fn public_value_open_container(
 
 fn public_value_process_node(
     state: PublicValueBuildStateV1,
-    text_length: u64,
+    document: JsonTokenDocumentV1,
     node: PublicValueNodeV1,
     key: KeyV1
 ) -> (result: PublicValueBuildStateV1) {
     let expects_key: bool = public_value_expects_key(state);
     if !public_value_can_accept(state)
-        || !valid_public_value_node(text_length, node, expects_key) {
+        || !valid_public_value_node(document, node, expects_key) {
         return PublicValueBuildStateV1 { ..state, valid: false };
     }
     if node.kind == 5 || node.kind == 6 {
@@ -3104,14 +3177,19 @@ fn public_value_process_node(
             select(
                 node.kind == 3,
                 JsonValueV1.Integer { negative: node.negative, magnitude: node.magnitude },
-                JsonValueV1.Utf8String { start: node.text_start, length: node.text_length }
+                select(
+                    node.kind == 4,
+                    JsonValueV1.Utf8String { start: node.text_start, length: node.text_length },
+                    JsonValueV1.Raw { start: node.text_start, length: node.text_length }
+                )
             )
         )
     );
     let writer_steps: u64 = select(
         node.kind == 3,
         integer_digit_length(node.magnitude) +% select(node.negative, 1, 0),
-        select(node.kind == 4, node.text_length +% 2, 1)
+        select(node.kind == 4, node.text_length +% 2,
+            select(node.kind == 7, node.text_length, 1))
     );
     let leaf_key: KeyV1 = select(expects_key, key, empty_key());
     return public_value_settle(
@@ -3122,8 +3200,7 @@ fn public_value_process_node(
 fn public_value_tape_node_step(
     cursor: PublicValueTapeCursorV1,
     chunk: JsonTokenInputChunkV1,
-    document: JsonTokenDocumentV1,
-    text_length: u64
+    document: JsonTokenDocumentV1
 ) -> (result: PublicValueTapeCursorV1) {
     if !cursor.build.valid || cursor.remaining_nodes == 0
         || cursor.offset >= chunk.length {
@@ -3132,7 +3209,7 @@ fn public_value_tape_node_step(
     let read: PublicValueNodeReadResultV1 = public_value_node(chunk, cursor.offset);
     let key: KeyV1 = public_value_node_key(cursor.build, document, read.node);
     let built: PublicValueBuildStateV1 = public_value_process_node(
-        cursor.build, text_length, read.node, key
+        cursor.build, document, read.node, key
     );
     return PublicValueTapeCursorV1 {
         build: built,
@@ -3153,12 +3230,11 @@ fn public_value_node_key(
 fn public_value_tape_chunk_step(
     cursor: PublicValueTapeCursorV1,
     chunk: JsonTokenInputChunkV1,
-    document: JsonTokenDocumentV1,
-    text_length: u64
+    document: JsonTokenDocumentV1
 ) -> (result: PublicValueTapeCursorV1) {
     iterate i up_to 64 carrying parsed: PublicValueTapeCursorV1 = cursor {
         next parsed = public_value_tape_node_step(
-            parsed, chunk, document, text_length
+            parsed, chunk, document
         );
     }
     if parsed.offset != chunk.length {
@@ -3188,7 +3264,7 @@ fn build_public_value(request: PublicValueRequestV1) -> (result: PublicValueBuil
     };
     iterate i over request.node_tape carrying cursor: PublicValueTapeCursorV1 = initial {
         next cursor = public_value_tape_chunk_step(
-            cursor, request.node_tape[i], request.text, request.text.byte_length
+            cursor, request.node_tape[i], request.text
         );
     }
     let built: PublicValueBuildStateV1 = public_value_settle(cursor.build);
@@ -3210,12 +3286,20 @@ fn public_value_input_result(
     let built: JsonOrderChunkBuilderV1 = output_chunks(writer);
     let ready: bool = supported && writer.ok && writer.length > 0
         && writer.length <= 65536 && built.count > 0 && built.count <= 64;
+    let output_digest: [byte; up_to 64] = select(
+        ready,
+        encode_digest(sha256.finalize_standard(
+            digest_writer_seeded(writer, sha256.init())
+        )),
+        []
+    );
     return PublicValueInputResultV1 {
         schema_version: public_value_result_schema_v1(),
         supported: ready,
         node_count: select(ready, node_count, 0),
         document_length: select(ready, writer.length, 0),
         chunk_count: select(ready, built.count, 0),
+        output_sha256: output_digest,
         chunks: select(ready, built.chunks[0..built.count], built.chunks[0..0])
     };
 }

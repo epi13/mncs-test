@@ -128,7 +128,7 @@ def test_native_request_transports_one_compact_json_document() -> None:
     assert "edges" not in request
 
 
-def test_native_public_value_request_packs_strings_and_rejects_unsupported_values() -> None:
+def test_native_public_value_request_packs_strings_and_floats() -> None:
     value = {"κ": ["Lúna 東京", None, True, False, -(2**64 - 1), 2**64 - 1]}
     request = mncs_test._native_public_result_value_request(value)
 
@@ -155,7 +155,11 @@ def test_native_public_value_request_packs_strings_and_rejects_unsupported_value
 
     cycle: list[object] = []
     cycle.append(cycle)
-    assert mncs_test._native_public_result_value_request({"float": 1.5}) is None
+    float_request = mncs_test._native_public_result_value_request({"float": 1.5})
+    assert float_request is not None
+    float_rows = "".join(chunk["bytes"] for chunk in float_request["node_tape"]).split(";")[:-1]
+    assert [int(row[0], 16) for row in float_rows] == [6, 7]
+    assert "".join(chunk["bytes"] for chunk in float_request["text"]["chunks"]) == "float1.5"
     assert mncs_test._native_public_result_value_request({"large": 2**64}) is None
     assert mncs_test._native_public_result_value_request({1: "non-string key"}) is None
     assert mncs_test._native_public_result_value_request(cycle) is None
@@ -213,6 +217,70 @@ def test_native_public_value_encoding_replaces_python_compact_projection(
     assert observed[0][0] == "test-public-result-json-value-input.json"
     assert observed[0][1]["supported"] is True
     assert "test-public-result-json-key-order.json" not in [name for name, _ in observed]
+
+
+def test_native_public_value_encoding_emits_finite_floats_differentially(
+    tmp_path: Path,
+) -> None:
+    value = {
+        "whole": 1.0,
+        "negative_zero": -0.0,
+        "fractional": [12.375, -0.00012],
+        "exponents": {
+            "large": 1e20,
+            "small": 1e-7,
+            "subnormal": 5e-324,
+            "max_finite": 1.7976931348623157e308,
+        },
+    }
+    request = mncs_test._native_public_result_value_request(value)
+    assert request is not None
+    rows = "".join(chunk["bytes"] for chunk in request["node_tape"]).split(";")[:-1]
+    assert [int(row[0], 16) for row in rows] == [6, 7, 7, 5, 7, 7, 6, 7, 7, 7, 7]
+
+    expected = _python_result_bytes(value)
+    observed: list[tuple[str, dict[str, object]]] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str, native_request: dict[str, object], **kwargs: object
+    ) -> dict[str, object]:
+        result = original_run_native_app(name, native_request, **kwargs)
+        observed.append((name, result))
+        return result
+
+    with (
+        mock.patch.object(mncs_test, "run_native_app", side_effect=observe_native_app),
+        mock.patch.object(
+            mncs_test, "compact_json", side_effect=AssertionError("host JSON projection used")
+        ),
+        mock.patch.object(
+            mncs_test,
+            "_public_result_ordering_requirements",
+            side_effect=AssertionError("host value-tree scan used"),
+        ),
+    ):
+        actual, digest = mncs_test._native_public_result_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert observed[0][0] == "test-public-result-json-value-input.json"
+    assert observed[0][1]["supported"] is True
+    assert all(name != "test-public-result-json-key-order.json" for name, _ in observed)
+
+
+def test_native_public_value_encoder_rejects_non_json_float_tokens(tmp_path: Path) -> None:
+    assert mncs_test._native_public_result_value_payload(
+        float("nan"),
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    ) is None
 
 
 def test_native_raw_tokenizer_reuses_transport_source_digest(tmp_path: Path) -> None:

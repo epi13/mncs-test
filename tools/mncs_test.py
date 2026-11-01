@@ -57,7 +57,7 @@ PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/3
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
 PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA = "mncs.test.public-json-key-order/1"
 PUBLIC_RESULT_JSON_VALUE_INPUT_REQUEST_SCHEMA = "mncs.test.public-json-value-input-request/1"
-PUBLIC_RESULT_JSON_VALUE_INPUT_RESULT_SCHEMA = "mncs.test.public-json-value-input/2"
+PUBLIC_RESULT_JSON_VALUE_INPUT_RESULT_SCHEMA = "mncs.test.public-json-value-input/3"
 PUBLIC_RESULT_JSON_ASCII_REQUEST_SCHEMA = "mncs.test.public-json-ascii-escape-request/1"
 PUBLIC_RESULT_JSON_ASCII_RESULT_SCHEMA = "mncs.test.public-json-ascii-escape/1"
 PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA = "mncs.test.public-json-native-token-tape-start-request/1"
@@ -923,7 +923,7 @@ def _native_public_result_value_request(value: Any) -> dict[str, Any] | None:
             row += f"{key_start:x},{key_length:x},"
         if kind == 3:
             row += f"{magnitude:x};"
-        elif kind == 4:
+        elif kind == 4 or kind == 7:
             row += f"{text_start:x},{text_length:x};"
         elif kind == 5 or kind == 6:
             row += f"{child_count:x};"
@@ -976,6 +976,22 @@ def _native_public_result_value_request(value: Any) -> dict[str, Any] | None:
                 key_length=key_length, text_start=0, text_length=0,
                 magnitude=magnitude, negative=current < 0,
             )
+            continue
+        if type(current) is float:
+            encoded = repr(current).encode("ascii")
+            if (
+                not encoded
+                or len(encoded) > 64
+                or len(text) + len(encoded) > PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+            ):
+                return None
+            text_start = len(text)
+            append_node(
+                kind=7, has_key=key_bytes is not None, key_start=key_start,
+                key_length=key_length, text_start=text_start,
+                text_length=len(encoded),
+            )
+            text.extend(encoded)
             continue
         if type(current) is str:
             try:
@@ -1127,14 +1143,9 @@ def _native_public_result_value_payload(
         byte_length=byte_length,
         maximum_chunks=PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS,
     )
-    output_digest = _native_public_result_output_digest(
-        payload,
-        mncs=mncs,
-        cwd=cwd,
-        environment=environment,
-    )
+    output_digest = result.get("output_sha256")
     if not isinstance(output_digest, str) or not SHA256_HEX.fullmatch(output_digest):
-        return None
+        raise AdapterError("MNCS native value encoder returned malformed output digest")
     if hashlib.sha256(payload).hexdigest() != output_digest:
         raise AdapterError("MNCS native value encoder returned a mismatched output digest")
     return payload, output_digest
