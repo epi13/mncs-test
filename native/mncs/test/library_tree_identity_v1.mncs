@@ -9,15 +9,15 @@ module mncs.test.library_tree_identity_v1;
 use mncs.std.application.v1;
 use mncs.std.sha256.v1 as sha256;
 
-record LibraryTreeEntryV1 {
+record LibraryTreeEntryV2 {
     path: [byte; up_to 1024],
-    leaf_sha256: [byte; up_to 64]
+    leaf_sha256_words: [u64; up_to 4]
 }
 
-record LibraryTreeIdentityRequestV1 {
+record LibraryTreeIdentityRequestV2 {
     schema_version: [byte; up_to 64],
     entry_count: u64,
-    entries: [LibraryTreeEntryV1; up_to 128]
+    entries: [LibraryTreeEntryV2; up_to 192]
 }
 
 record LibraryTreeIdentityResultV1 {
@@ -34,8 +34,8 @@ record LibraryTreePathCompareStateV1 {
 }
 
 record LibraryTreeMergeStateV1 {
-    source: [LibraryTreeEntryV1; 128],
-    target: [LibraryTreeEntryV1; 128],
+    source: [LibraryTreeEntryV2; 192],
+    target: [LibraryTreeEntryV2; 192],
     count: u64,
     width: u64,
     middle: u64,
@@ -46,7 +46,7 @@ record LibraryTreeMergeStateV1 {
 }
 
 fn request_schema() -> (result: [byte; up_to 64]) {
-    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 108, 105, 98, 114, 97, 114, 121, 45, 116, 114, 101, 101, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 45, 108, 105, 98, 114, 97, 114, 121, 45, 116, 114, 101, 101, 45, 105, 100, 101, 110, 116, 105, 116, 121, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
 }
 
 fn result_schema() -> (result: [byte; up_to 64]) {
@@ -63,28 +63,18 @@ fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool)
     return same;
 }
 
-fn valid_leaf_digest(value: [byte; up_to 64]) -> (result: bool) {
-    if value.len != 64 {
-        return false;
-    }
-    iterate i over value carrying valid: bool = true {
-        let current: byte = value[i];
-        next valid = valid && (
-            (current >= 48 && current <= 57)
-            || (current >= 97 && current <= 102)
-        );
-    }
-    return valid;
+fn valid_leaf_digest_words(words: [u64; up_to 4]) -> (result: bool) {
+    return words.len == 4;
 }
 
-fn valid_entry(entry: LibraryTreeEntryV1) -> (result: bool) {
-    return entry.path.len > 0 && valid_leaf_digest(entry.leaf_sha256);
+fn valid_entry(entry: LibraryTreeEntryV2) -> (result: bool) {
+    return entry.path.len > 0 && valid_leaf_digest_words(entry.leaf_sha256_words);
 }
 
-fn valid_request(request: LibraryTreeIdentityRequestV1) -> (result: bool) {
+fn valid_request(request: LibraryTreeIdentityRequestV2) -> (result: bool) {
     if !same_bytes(request.schema_version, request_schema())
         || request.entry_count != request.entries.len
-        || request.entry_count > 128 {
+        || request.entry_count > 192 {
         return false;
     }
     iterate i over request.entries carrying valid: bool = true {
@@ -93,8 +83,30 @@ fn valid_request(request: LibraryTreeIdentityRequestV1) -> (result: bool) {
     return valid;
 }
 
-fn empty_tree_entry() -> (result: LibraryTreeEntryV1) {
-    return LibraryTreeEntryV1 { path: [], leaf_sha256: [] };
+fn empty_tree_entry() -> (result: LibraryTreeEntryV2) {
+    return LibraryTreeEntryV2 { path: [], leaf_sha256_words: [] };
+}
+
+fn digest_hex_digit(value: u64) -> (result: byte) {
+    if value < 10 { return (value +% 48) as byte; }
+    return (value -% 10 +% 97) as byte;
+}
+
+fn digest_byte(words: [u64; up_to 4], index: u64) -> (result: byte) {
+    let word_index: u64 = index / 8;
+    let shift: u64 = (index % 8) *% 8;
+    return ((words[word_index] >> shift) & 255) as byte;
+}
+
+fn leaf_digest_hex(words: [u64; up_to 4]) -> (result: [byte; 64]) {
+    iterate i up_to 32 carrying encoded: [byte; 64] = [0; 64] {
+        let value: byte = digest_byte(words, i);
+        let high: u64 = (value as u64) / 16;
+        let low: u64 = (value as u64) % 16;
+        let with_high: [byte; 64] = replace(encoded, i *% 2, digest_hex_digit(high));
+        next encoded = replace(with_high, i *% 2 +% 1, digest_hex_digit(low));
+    }
+    return encoded;
 }
 
 fn compare_path_segment_step(
@@ -173,7 +185,7 @@ fn compare_path_step(
     };
 }
 
-fn compare_path(left: LibraryTreeEntryV1, right: LibraryTreeEntryV1) -> (result: i64) {
+fn compare_path(left: LibraryTreeEntryV2, right: LibraryTreeEntryV2) -> (result: i64) {
     let initial: LibraryTreePathCompareStateV1 = LibraryTreePathCompareStateV1 {
         left_offset: 0,
         right_offset: 0,
@@ -190,21 +202,21 @@ fn merge_min(left: u64, right: u64) -> (result: u64) {
     return select(left < right, left, right);
 }
 
-fn pad_entries(entries: [LibraryTreeEntryV1; up_to 128]) -> (result: [LibraryTreeEntryV1; 128]) {
-    let empty: LibraryTreeEntryV1 = empty_tree_entry();
-    iterate i over entries carrying values: [LibraryTreeEntryV1; 128] = [empty; 128] {
+fn pad_entries(entries: [LibraryTreeEntryV2; up_to 192]) -> (result: [LibraryTreeEntryV2; 192]) {
+    let empty: LibraryTreeEntryV2 = empty_tree_entry();
+    iterate i over entries carrying values: [LibraryTreeEntryV2; 192] = [empty; 192] {
         next values = replace(values, i, entries[i]);
     }
     return values;
 }
 
-fn empty_tree_merge(entries: [LibraryTreeEntryV1; 128], count: u64) -> (result: LibraryTreeMergeStateV1) {
-    let empty: LibraryTreeEntryV1 = empty_tree_entry();
+fn empty_tree_merge(entries: [LibraryTreeEntryV2; 192], count: u64) -> (result: LibraryTreeMergeStateV1) {
+    let empty: LibraryTreeEntryV2 = empty_tree_entry();
     let middle: u64 = merge_min(1, count);
     let end: u64 = merge_min(2, count);
     return LibraryTreeMergeStateV1 {
         source: entries,
-        target: [empty; 128],
+        target: [empty; 192],
         count: count,
         width: 1,
         middle: middle,
@@ -260,10 +272,10 @@ fn tree_merge_output_step(state: LibraryTreeMergeStateV1, index: u64) -> (result
 
 fn tree_merge_pass(state: LibraryTreeMergeStateV1) -> (result: LibraryTreeMergeStateV1) {
     if state.width >= state.count { return state; }
-    iterate i up_to 128 carrying current: LibraryTreeMergeStateV1 = state {
+    iterate i up_to 192 carrying current: LibraryTreeMergeStateV1 = state {
         next current = tree_merge_output_step(current, i);
     }
-    let merged: [LibraryTreeEntryV1; 128] = current.target;
+    let merged: [LibraryTreeEntryV2; 192] = current.target;
     let width: u64 = state.width *% 2;
     let middle: u64 = merge_min(width, state.count);
     let end: u64 = merge_min(width *% 2, state.count);
@@ -280,9 +292,9 @@ fn tree_merge_pass(state: LibraryTreeMergeStateV1) -> (result: LibraryTreeMergeS
     };
 }
 
-fn sort_entries(entries: [LibraryTreeEntryV1; up_to 128], count: u64) -> (result: [LibraryTreeEntryV1; 128]) {
+fn sort_entries(entries: [LibraryTreeEntryV2; up_to 192], count: u64) -> (result: [LibraryTreeEntryV2; 192]) {
     let initial: LibraryTreeMergeStateV1 = empty_tree_merge(pad_entries(entries), count);
-    iterate pass up_to 7 carrying current: LibraryTreeMergeStateV1 = initial {
+    iterate pass up_to 8 carrying current: LibraryTreeMergeStateV1 = initial {
         next current = tree_merge_pass(current);
     }
     return current.source;
@@ -290,7 +302,7 @@ fn sort_entries(entries: [LibraryTreeEntryV1; up_to 128], count: u64) -> (result
 
 fn update_sorted_entry(
     state: sha256.DigestState,
-    entries: [LibraryTreeEntryV1; 128],
+    entries: [LibraryTreeEntryV2; 192],
     index: u64,
     count: u64
 ) -> (result: sha256.DigestState) {
@@ -328,21 +340,18 @@ fn update_path(
 
 fn update_entry(
     state: sha256.DigestState,
-    entry: LibraryTreeEntryV1
+    entry: LibraryTreeEntryV2
 ) -> (result: sha256.DigestState) {
     let with_path: sha256.DigestState = update_path(state, entry.path, entry.path.len);
     let with_separator: sha256.DigestState = sha256.update_standard(with_path, [0], 1);
-    let with_leaf: sha256.DigestState = sha256.update_standard(
-        with_separator,
-        entry.leaf_sha256,
-        entry.leaf_sha256.len
-    );
+    let leaf_hex: [byte; 64] = leaf_digest_hex(entry.leaf_sha256_words);
+    let with_leaf: sha256.DigestState = sha256.update_standard(with_separator, leaf_hex, 64);
     return sha256.update_standard(with_leaf, [10], 1);
 }
 
-fn tree_digest(request: LibraryTreeIdentityRequestV1) -> (result: [byte; 32]) {
-    let sorted: [LibraryTreeEntryV1; 128] = sort_entries(request.entries, request.entry_count);
-    iterate i up_to 128 carrying state: sha256.DigestState = sha256.init() {
+fn tree_digest(request: LibraryTreeIdentityRequestV2) -> (result: [byte; 32]) {
+    let sorted: [LibraryTreeEntryV2; 192] = sort_entries(request.entries, request.entry_count);
+    iterate i up_to 192 carrying state: sha256.DigestState = sha256.init() {
         next state = update_sorted_entry(state, sorted, i, request.entry_count);
     }
     return sha256.finalize_standard(state);
@@ -356,7 +365,7 @@ fn library_tree_identity_app_v1(context: ApplicationContext) -> (result: Applica
     if !context_is_bounded(context) || context.argv_count < 2 {
         return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 108, 105, 98, 114, 97, 114, 121, 32, 116, 114, 101, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 112, 97, 116, 104, 115], 2);
     }
-    let request: LibraryTreeIdentityRequestV1 = structured_read(context.argv[0], request_schema());
+    let request: LibraryTreeIdentityRequestV2 = structured_read(context.argv[0], request_schema());
     if !valid_request(request) {
         return failure([105, 110, 118, 97, 108, 105, 100, 32, 84, 101, 115, 116, 32, 108, 105, 98, 114, 97, 114, 121, 32, 116, 114, 101, 101, 32, 105, 100, 101, 110, 116, 105, 116, 121, 32, 114, 101, 113, 117, 101, 115, 116], 4);
     }

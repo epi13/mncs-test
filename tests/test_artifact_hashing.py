@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -529,7 +530,7 @@ def test_library_tree_identity_reports_host_fallback_above_entry_bound(
         "implementation": "host",
         "entries": mncs_test.LIBRARY_TREE_IDENTITY_MAX_ENTRIES + 1,
         "fallback_reason": "library_tree_entry_count",
-        "fallback_detail": "library tree exceeds the 128-entry native identity bound",
+        "fallback_detail": "library tree exceeds the 192-entry native identity bound",
         "leaf_hashing": {
             "algorithm": "sha256-file/1",
             "native_implementation": "mncs.test.result_identity_v1",
@@ -550,12 +551,12 @@ def test_library_tree_identity_sorts_exact_bound_unsorted_paths_in_mncs(
 ) -> None:
     library = tmp_path / "library"
     library.mkdir()
-    paths = [f"pkg-{index:03}.mncs" for index in range(
+    paths = [f"{index:03}" for index in range(
         mncs_test.LIBRARY_TREE_IDENTITY_MAX_ENTRIES
     )]
-    paths[0] = "a.mncs"
-    paths[1] = "a-child.mncs"
-    paths[64] = "inside-東京.mncs"
+    paths[0] = "a"
+    paths[1] = "a-child"
+    paths[64] = "inside-東京"
     paths.reverse()
     contents = {
         path: f"module leaf_{index};\n".encode("utf-8")
@@ -589,12 +590,41 @@ def test_library_tree_identity_sorts_exact_bound_unsorted_paths_in_mncs(
     assert hashing["implementation"] == "mncs.test.library_tree_identity_v1"
     assert hashing["entries"] == mncs_test.LIBRARY_TREE_IDENTITY_MAX_ENTRIES
     assert native_app.call_count == 1
+    request = native_app.call_args.args[1]
     submitted_paths = [
         bytes(entry["path"]).decode("utf-8")
-        for entry in native_app.call_args.args[1]["entries"]
+        for entry in request["entries"]
     ]
     assert submitted_paths == paths
     assert submitted_paths != sorted(submitted_paths)
+    submitted_digests = [
+        b"".join(
+            word.to_bytes(8, "little")
+            for word in entry["leaf_sha256_words"]
+        ).hex()
+        for entry in request["entries"]
+    ]
+    assert submitted_digests == [
+        hashlib.sha256(contents[path]).hexdigest() for path in paths
+    ]
+    legacy_request = {
+        **request,
+        "entries": [
+            {
+                "path": entry["path"],
+                "leaf_sha256": list(
+                    b"".join(
+                        word.to_bytes(8, "little")
+                        for word in entry["leaf_sha256_words"]
+                    ).hex().encode("ascii")
+                ),
+            }
+            for entry in request["entries"]
+        ],
+    }
+    assert len(json.dumps(request).encode("utf-8")) * 2 < len(
+        json.dumps(legacy_request).encode("utf-8")
+    )
 
 
 @pytest.mark.skipif(not MNCS.is_file(), reason="a built MNCS compiler is required")

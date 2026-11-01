@@ -143,9 +143,9 @@ TEST_RESULT_IDENTITY_REQUEST_SCHEMA = "mncs.test-result-identity-request/1"
 TEST_RESULT_IDENTITY_RESULT_SCHEMA = "mncs.test-result-identity/1"
 TEST_RESULT_IDENTITY_STREAM_REQUEST_SCHEMA = "mncs.test-result-identity-stream-request/1"
 TEST_RESULT_IDENTITY_STREAM_RESULT_SCHEMA = "mncs.test-result-identity-stream/1"
-LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA = "mncs.test-library-tree-identity-request/1"
+LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA = "mncs.test-library-tree-identity-request/2"
 LIBRARY_TREE_IDENTITY_RESULT_SCHEMA = "mncs.test-library-tree-identity/1"
-LIBRARY_TREE_IDENTITY_MAX_ENTRIES = 128
+LIBRARY_TREE_IDENTITY_MAX_ENTRIES = 192
 LIBRARY_TREE_IDENTITY_MAX_PATH_BYTES = 1024
 LIBRARY_TREE_IDENTITY_MAX_REQUEST_BYTES = 65_536
 LIBRARY_TREE_IDENTITY_MAX_NATIVE_LEAF_TOTAL_BYTES = 1024 * 1024
@@ -1442,7 +1442,7 @@ def library_tree_identity_sha256(
     """Hash bounded path/leaf records through the native Test sorter and fold."""
     if len(entries) > LIBRARY_TREE_IDENTITY_MAX_ENTRIES:
         raise NativeInputBoundError(
-            "library tree exceeds the 128-entry native identity bound",
+            "library tree exceeds the 192-entry native identity bound",
             reason="library_tree_entry_count",
         )
     wire_entries: list[dict[str, list[int]]] = []
@@ -1455,10 +1455,14 @@ def library_tree_identity_sha256(
             )
         if not SHA256_HEX.fullmatch(leaf_digest):
             raise AdapterError("library tree leaf digest is not lowercase SHA-256 hex")
+        digest_bytes = bytes.fromhex(leaf_digest)
         wire_entries.append(
             {
                 "path": list(path_bytes),
-                "leaf_sha256": list(leaf_digest.encode("ascii")),
+                "leaf_sha256_words": [
+                    int.from_bytes(digest_bytes[offset : offset + 8], "little")
+                    for offset in range(0, len(digest_bytes), 8)
+                ],
             }
         )
 
@@ -1519,13 +1523,13 @@ def _library_tree_native_leaf_fallback_reason(
     if total_bytes > LIBRARY_TREE_IDENTITY_MAX_NATIVE_LEAF_TOTAL_BYTES:
         return "library_tree_native_leaf_byte_bound"
 
-    # Each hexadecimal digest byte is at most 102, so this request is an
+    # Each packed u64 is at most 20 decimal digits, so this request is an
     # upper bound on the eventual JSON wire size before reading any leaf.
     request = {
         "schema_version": LIBRARY_TREE_IDENTITY_REQUEST_SCHEMA,
         "entry_count": len(entries),
         "entries": [
-            {"path": path_bytes, "leaf_sha256": [102] * 64}
+            {"path": path_bytes, "leaf_sha256_words": [2**64 - 1] * 4}
             for path_bytes in encoded_paths
         ],
     }

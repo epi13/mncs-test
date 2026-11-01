@@ -528,7 +528,7 @@ fall back to the host until warm-up. If embedding fails, bounded files use the
 existing native application through 65,536 bytes and larger files use host
 fallback.
 Library directory enumeration and per-file reads stay on the host. For a
-directory with at most 128 entries, a request within 65,536 bytes, and at most
+directory with at most 192 entries, a request within 65,536 bytes, and at most
 1 MiB of leaf bytes, `ArtifactStore` hashes eligible leaf files through
 `mncs.test.result_identity_v1`: files through 65,536 bytes use a native
 application or the retained session; files above 65,536 bytes through 1 MiB
@@ -538,7 +538,13 @@ report its fallback reason. `mncs.test.library_tree_identity_v1` bottom-up
 merge-sorts bounded path and leaf rows into the established sorted `os.walk`
 order: files in a directory precede its child-directory subtrees, and UTF-8
 component bytes determine sibling order. It then owns the `path NUL
-leaf-digest LF` fold. The adapter passes rows in filesystem traversal order
+leaf-digest LF` fold. Request schema v2 packs each 32-byte leaf digest into
+four little-endian u64 values; MNCS restores the same lowercase hexadecimal
+leaf text before folding, while the JSON request is more than twice as compact
+on the exact-bound fixture. The 192-entry bound stays within the existing
+8,000,000-step limit; a 256-entry shuffled fixture exceeded that execution
+budget, and 193 entries use the exact host compatibility path. The adapter
+passes rows in filesystem traversal order
 without sorting directory or file names. The host compatibility fold restores
 the same order only after a native bound or execution failure. Leaf and tree
 implementations remain reported separately.
