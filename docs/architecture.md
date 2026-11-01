@@ -148,40 +148,32 @@ compact count text reuses `mncs.std.json_emit.v1::put_u64`.
 `mncs.test.public_result_json_token_tape_v1` receives the compact JSON transport
 chunks and token spans produced by its MNCS cursor application. The Python
 boundary compact-encodes each supported value once into JSON transport bytes;
-it no longer builds a Python preorder typed-value tape. A narrow compatibility
-check preserves Python's key ordering for mappings with non-string keys. The
-Test-owned `json_token_cursor_v1` combines the shared `json.v1` validator with
-`json_cursor.v1` token spans and adds scalar spans. The first native request
-carries only the bounded document and its digest; continuation windows carry
-state returned by MNCS. Python does not initialize native parser state or
-estimate native token bounds. MNCS scans the bounded
-source in four 1 KiB chunks per window, carries cursor and JSON validation
-state between calls, validates the token spans, constructs a bounded native
-value, sorts object keys by decoded UTF-8, and writes the public indented JSON
-with a trailing newline. Flat scalar
-arrays retain token ranges instead of allocating linked native value nodes.
-This path accepts at most 512 tokens, 65,536 source bytes, depth 12, 64 object
-members, 256-byte decoded keys, 3,072-byte token spans, 65,536 output bytes,
-and the runner's 8,000,000-step budget. A separate native digest application
-verifies the compact source once in bounded sixteen-chunk windows after
-tokenization, so changes between tokenizer windows are rejected without
-rehashing the full document in every window or consuming the formatter's
-output budget. Raw scalar spellings, including the host's float
-representation, are validated and copied by MNCS. The token-tape formatter
-returns bounded chunks; a native SHA-256 continuation hashes those chunks in
-sixteen-chunk windows and returns the digest. Python validates the continuation
-state and carries the digest into the public result without hashing the output
-in the host. Differential tests compare both with the
-independent Python golden, including numeric forms, Unicode, escaping, nested
-containers, and 33 KB arrays and objects.
+it no longer builds a Python preorder typed-value tape or transfers a native
+token list back through Python. Built-in string-key objects first use
+`mncs.test.public_result_json_key_order_v1` to validate and sort the compact
+document in MNCS. When that bounded operation declines, the compatibility JSON
+serializer produces the same sorted source bytes. Both routes feed the
+document directly to `mncs.test.public_result_json_token_v1` and its window
+continuation. Non-string keys, custom containers, and cycles retain Python's
+established compatibility semantics.
 
-Values outside the raw-token contract and native input or step-budget outcomes
-retain the compatibility path. For those values Python may produce compact
-JSON; `mncs.test.public_result_json_key_order_v1` sorts bounded documents when
-needed, and `mncs.test.public_result_json_token_v1` plus its window continuation
-format the result. Their existing byte, depth, value, member, key, and scalar
-bounds remain in force. Native transport or runtime errors remain errors
-rather than being hidden by compatibility output.
+The Test-owned `json_token_cursor_v1` combines the shared `json.v1` validator
+with `json_cursor.v1` token spans and scalar spans. The first native request
+carries only the bounded document and its digest; continuation windows carry
+state returned by MNCS. Python does not initialize native parser state,
+project token records, or estimate native value bounds. MNCS scans the bounded
+source, carries cursor and JSON validation state between calls, validates
+scalar spellings, and writes the public indented JSON with a trailing newline.
+The formatter admits 1,024 values, depth 63, 65,536 source and output bytes,
+and the runner's 8,000,000-step budget. Native output windows include the
+SHA-256 continuation; the adapter validates continuation metadata and checks
+the returned digest against the exact output bytes. Differential tests compare
+bytes and SHA-256 with independent Python goldens, including numeric forms,
+Unicode, escaping, nested containers, large arrays, and bounded object sorting.
+
+Values outside native byte, depth, value, member, key, scalar, or step bounds
+retain exact compatibility serialization. Native transport or runtime errors
+remain errors rather than being hidden by compatibility output.
 
 The shared `mncs.std.json.v1` scanner validates scalar JSON spellings. The
 existing `mncs.std.json_emit.v1` writer is a compact, caller-ordered 64-byte

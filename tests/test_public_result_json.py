@@ -48,12 +48,21 @@ def _assert_native_raw_token_route(applications: list[str]) -> None:
             assert applications[-1] == "test-public-result-json-source-digest.json"
 
 
-def _assert_native_token_tape_attempt(
-    observed: list[tuple[str, dict[str, object]]],
+def _assert_native_document_route(
+    observed: list[tuple[str, dict[str, object]]] | list[str],
 ) -> None:
     assert observed
-    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
-    assert all(name != "test-public-result-json-value-input.json" for name, _ in observed)
+    applications = [
+        item if isinstance(item, str) else item[0]
+        for item in observed
+    ]
+    assert "test-public-result-json-token.json" in applications
+    assert not {
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-native-token-tape-window.json",
+        "test-public-result-json-token-tape.json",
+    }.intersection(applications)
+    assert "test-public-result-json-value-input.json" not in applications
 
 
 def _python_result_bytes(value: object) -> bytes:
@@ -134,9 +143,9 @@ def test_native_public_result_retires_python_typed_value_projection(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert observed[0][0] == "test-public-result-json-native-token-tape.json"
+    assert observed[0][0] == "test-public-result-json-key-order.json"
     assert observed[0][1]["supported"] is True
-    assert all(name != "test-public-result-json-value-input.json" for name, _ in observed)
+    _assert_native_document_route(observed)
     assert not hasattr(mncs_test, "_native_public_result_value_request")
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
@@ -183,8 +192,8 @@ def test_native_public_result_token_route_emits_finite_floats_differentially(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert observed[0] == "test-public-result-json-native-token-tape.json"
-    assert "test-public-result-json-value-input.json" not in observed
+    assert observed[0] == "test-public-result-json-key-order.json"
+    _assert_native_document_route(observed)
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
@@ -401,11 +410,7 @@ def test_write_output_uses_native_json_and_matches_python_golden(tmp_path: Path)
     assert path.read_bytes() == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     applications = [call.args[0] for call in native_app.call_args_list]
-    assert applications[-3:] == [
-        "test-public-result-json-source-digest.json",
-        "test-public-result-json-token-tape.json",
-        "test-public-result-json-source-digest.json",
-    ]
+    _assert_native_document_route(applications)
 
 
 def test_print_result_uses_preformatted_json_without_host_reserialization(
@@ -593,7 +598,7 @@ def test_ascii_json_mode_keeps_bounded_expansion_fallback(
     assert output.isascii()
     applications = [call.args[0] for call in native_app.call_args_list]
     assert "test-public-result-json-value-input.json" not in applications
-    assert "test-public-result-json-native-token-tape.json" in applications
+    assert "test-public-result-json-key-order.json" in applications
     assert applications[-1] == "test-public-result-json-ascii-escape.json"
 
 
@@ -741,7 +746,7 @@ def test_native_key_order_handles_values_past_the_legacy_token_bound(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
@@ -777,7 +782,7 @@ def test_native_key_order_sorts_object_descendants_in_large_arrays(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
@@ -813,7 +818,7 @@ def test_native_key_order_handles_exact_value_bound_with_object_in_array(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
 
 
@@ -844,7 +849,7 @@ def test_native_public_result_key_order_handles_128_object_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 
 
 def test_native_public_result_key_order_handles_129_members(
@@ -874,7 +879,7 @@ def test_native_public_result_key_order_handles_129_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 
 
 @pytest.mark.parametrize(
@@ -909,7 +914,7 @@ def test_native_public_result_key_order_handles_256_object_members(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 
 
 def test_native_public_result_key_order_handles_257_members(
@@ -945,7 +950,7 @@ def test_native_public_result_key_order_handles_257_members(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 @pytest.mark.parametrize(
     "indices",
     [tuple(range(512)), tuple(reversed(range(512)))],
@@ -984,7 +989,7 @@ def test_native_public_result_key_order_handles_512_scalar_members(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 
 
 @pytest.mark.parametrize(
@@ -1025,7 +1030,7 @@ def test_native_public_result_key_order_handles_640_scalar_members(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 
 
 def test_native_public_result_key_order_falls_back_at_641_members(
@@ -1122,7 +1127,7 @@ def test_native_public_result_key_order_handles_513_members(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     assert compact.call_args_list == [mock.call(value, sort_keys=False)]
-    _assert_native_token_tape_attempt(observed)
+    _assert_native_document_route(observed)
 
 
 def test_native_public_result_merge_sort_rejects_duplicate_keys_after_128_members(
@@ -1159,7 +1164,9 @@ def test_native_key_order_compacts_whitespace_around_scalar_array(
     assert actual == b'{"a":true,"z":[1,2,3]}'
 
 
-def test_native_token_tape_decides_support_from_the_encoded_document(tmp_path: Path) -> None:
+def test_native_document_route_handles_key_order_decline_from_encoded_document(
+    tmp_path: Path,
+) -> None:
     value = {"nested": {"z": [3, 2, 1], "a": {"Ω": 1, "A": 2}}, "float": 2.5}
     expected = _python_result_bytes(value)
     with (
@@ -1178,9 +1185,7 @@ def test_native_token_tape_decides_support_from_the_encoded_document(tmp_path: P
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_app.call_args_list[0].args[0] == (
-        "test-public-result-json-native-token-tape.json"
-    )
+    assert native_app.call_args_list[0].args[0] == "test-public-result-json-token.json"
 
 
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
@@ -1224,7 +1229,7 @@ def test_native_key_order_sorts_documents_larger_than_eight_kibibytes(tmp_path: 
     _assert_native_raw_token_route(calls)
 
 
-def test_native_key_order_sorts_a_33_kibibyte_object_with_one_host_transport_pass(
+def test_native_document_formatter_handles_a_33_kibibyte_object_after_key_order_declines(
     tmp_path: Path,
 ) -> None:
     value = {
@@ -1260,11 +1265,15 @@ def test_native_key_order_sorts_a_33_kibibyte_object_with_one_host_transport_pas
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert native_results[0][0] == "test-public-result-json-native-token-tape.json"
-    assert native_results[0][1]["supported"] is True
     calls = [call.args[0] for call in native_app.call_args_list]
+    assert calls[0] == "test-public-result-json-key-order.json"
+    assert native_results[0][0] == "test-public-result-json-token.json"
     _assert_native_raw_token_route(calls)
-    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    _assert_native_document_route(native_results)
+    assert compact.call_args_list == [
+        mock.call(value, sort_keys=False),
+        mock.call(value),
+    ]
 
 
 def test_non_string_mapping_keys_keep_python_sort_semantics(tmp_path: Path) -> None:
@@ -1579,10 +1588,7 @@ def test_results_through_expanded_native_window_use_native_json(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
-    assert calls == [
-        "test-public-result-json-native-token-tape.json",
-        "test-public-result-json-token.json",
-    ]
+    assert calls == ["test-public-result-json-token.json"]
 
 
 def test_large_array_uses_native_json_without_python_typed_token_projection(
@@ -1686,10 +1692,8 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
-        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-key-order.json",
         "test-public-result-json-token.json",
-        "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
     ]
 

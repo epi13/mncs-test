@@ -930,15 +930,6 @@ def _native_public_result_payload(
         return None
 
     if not requires_python_key_order:
-        native_tokens = _native_public_result_token_tape(
-            source,
-            mncs=mncs,
-            cwd=cwd,
-            environment=environment,
-        )
-        if native_tokens is not None:
-            return native_tokens
-
         if has_object:
             ordered = _native_public_result_key_order(
                 source,
