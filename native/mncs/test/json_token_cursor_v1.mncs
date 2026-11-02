@@ -182,10 +182,28 @@ fn cursor_scalar_start_kind_v1(value: byte) -> (result: byte) {
     return 0;
 }
 
+fn cursor_scan_syntax_byte_v1(
+    state: json.ScanState,
+    was_in_string: bool,
+    cursor: json_cursor.Cursor,
+    value: byte
+) -> (result: json.ScanState) {
+    if was_in_string {
+        if cursor.in_string { return state; }
+        if cursor.event != 2 && cursor.event != 4 { return state; }
+    }
+    return json.scan_step(state, value);
+}
+
 fn cursor_feed_byte_v1(state: CursorV1, value: byte) -> (result: CursorV1) {
     let before_scan: json.ScanState = state.scan_state;
-    let scanned: json.ScanState = json.scan_step(before_scan, value);
     let base: json_cursor.Cursor = json_cursor.feed_byte(cursor_base_v1(state), value);
+    // The token cursor independently validates string escapes, surrogate
+    // pairs, control bytes, and UTF-8. Keep the grammar scanner on string
+    // boundaries, but do not scan every byte inside a string a second time.
+    let scanned: json.ScanState = cursor_scan_syntax_byte_v1(
+        before_scan, state.in_string, base, value
+    );
     let start_kind: byte = cursor_scalar_start_kind_v1(value);
     let started: bool = !state.scalar_active && before_scan.mode == 0 && start_kind != 0;
     let scalar_active: bool = (state.scalar_active || started)
