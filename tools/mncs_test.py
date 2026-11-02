@@ -102,6 +102,7 @@ PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES = PUBLIC_RESULT_JSON_MAX_OUTPUT_BYT
 # support decisions to MNCS instead of projecting the input tree for preflight.
 PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES = 1024
 PUBLIC_RESULT_JSON_NATIVE_TAPE_CHUNKS_PER_WINDOW = 4
+PUBLIC_RESULT_JSON_NATIVE_TOKEN_STREAM_WINDOWED_MAX_BYTES = 7168
 PUBLIC_RESULT_JSON_SOURCE_DIGEST_CHUNKS_PER_WINDOW = 16
 MANIFEST_SCHEMA = "mncs.test-manifest/1"
 MANIFEST_TEST_VALIDATION_REQUEST_SCHEMA = "mncs.test.manifest-test-validation-request/2"
@@ -880,6 +881,43 @@ def _native_public_result_token_stream(
     return start_request, token_words
 
 
+def _native_public_result_token_tape_output(
+    streamed: dict[str, Any] | None,
+    *,
+    route: str,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[bytes, str] | None:
+    """Validate and digest bytes emitted by a fused native token route."""
+    if streamed is None:
+        return None
+    if streamed.get("schema_version") != PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA:
+        raise AdapterError(f"{route} returned an unsupported result schema")
+    if type(streamed.get("supported")) is not bool:
+        raise AdapterError(f"{route} returned malformed support metadata")
+    if not streamed["supported"]:
+        return None
+    for field in ("request_valid", "tape_shape_valid", "parse_valid", "writer_valid"):
+        if type(streamed.get(field)) is not bool or streamed[field] is not True:
+            raise AdapterError(f"{route} returned inconsistent verification metadata")
+    byte_length = streamed.get("document_length")
+    if type(byte_length) is not int or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
+        raise AdapterError(f"{route} returned malformed document metadata")
+    payload = _decode_public_result_token_tape_chunks(
+        streamed, byte_length=byte_length,
+    )
+    digest = _native_public_result_output_digest(
+        payload,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+    )
+    if digest is None:
+        return None
+    return payload, digest
+
+
 def _native_public_result_token_tape(
     document: bytes,
     *,
@@ -887,7 +925,7 @@ def _native_public_result_token_tape(
     cwd: Path,
     environment: dict[str, str],
 ) -> tuple[bytes, str] | None:
-    """Tokenize compact JSON in MNCS, then format the native token spans."""
+    """Prefer bounded fused native token streams before the windowed fallback."""
     if document and len(document) <= 4096:
         prepared = _native_public_result_document_request(document)
         if prepared is not None:
@@ -920,29 +958,57 @@ def _native_public_result_token_tape(
             except NativeTransportError as error:
                 raise AdapterError(f"MNCS native JSON token streaming failed: {error}") from error
 
-            if streamed is not None:
-                if streamed.get("schema_version") != PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA:
-                    raise AdapterError("MNCS native JSON token stream returned an unsupported result schema")
-                if type(streamed.get("supported")) is not bool:
-                    raise AdapterError("MNCS native JSON token stream returned malformed support metadata")
-                if streamed["supported"]:
-                    for field in ("request_valid", "tape_shape_valid", "parse_valid", "writer_valid"):
-                        if type(streamed.get(field)) is not bool or streamed[field] is not True:
-                            raise AdapterError("MNCS native JSON token stream returned inconsistent verification metadata")
-                    byte_length = streamed.get("document_length")
-                    if type(byte_length) is not int or not 0 < byte_length <= PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES:
-                        raise AdapterError("MNCS native JSON token stream returned malformed document metadata")
-                    payload = _decode_public_result_token_tape_chunks(
-                        streamed, byte_length=byte_length,
-                    )
-                    digest = _native_public_result_output_digest(
-                        payload,
-                        mncs=mncs,
-                        cwd=cwd,
-                        environment=environment,
-                    )
-                    if digest is not None:
-                        return payload, digest
+            output = _native_public_result_token_tape_output(
+                streamed,
+                route="MNCS native JSON token stream",
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            if output is not None:
+                return output
+
+    if 4096 < len(document) <= PUBLIC_RESULT_JSON_NATIVE_TOKEN_STREAM_WINDOWED_MAX_BYTES:
+        prepared = _native_public_result_document_request(document)
+        if prepared is not None:
+            start_request, source_length = prepared
+            input_hash = start_request["input_sha256"]
+            if (
+                source_length != len(document)
+                or not isinstance(input_hash, str)
+                or not SHA256_HEX.fullmatch(input_hash)
+            ):
+                raise AdapterError("MNCS native JSON token source changed during transport packing")
+            stream_request = {
+                "schema_version": PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
+                "document": start_request["document"],
+                "input_sha256": input_hash,
+            }
+            try:
+                streamed = run_native_app(
+                    "test-public-result-json-native-token-stream-windowed.json",
+                    stream_request,
+                    request_schema=PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
+                    result_schema=PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    step_budget=8_000_000,
+                )
+            except (NativeBudgetExhaustedError, NativeInputBoundError):
+                streamed = None
+            except NativeTransportError as error:
+                raise AdapterError(f"MNCS native windowed JSON token streaming failed: {error}") from error
+
+            output = _native_public_result_token_tape_output(
+                streamed,
+                route="MNCS native windowed JSON token stream",
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
+            if output is not None:
+                return output
 
     token_stream = _native_public_result_token_stream(
         document, mncs=mncs, cwd=cwd, environment=environment,

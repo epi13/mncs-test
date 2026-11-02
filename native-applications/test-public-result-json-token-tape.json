@@ -5,7 +5,7 @@
   "module": "mncs.test.public_result_json_token_tape_v1",
   "entry_function": "public_result_json_token_tape_app_v1",
   "profile": "0.18",
-  "interface_identity": "00f029283dd87bf5e3df269ea23216e4fb649b6365939e3fcb47fa0057402af3",
+  "interface_identity": "90a9bc2ec1dbf99ed65b6c256d2f774950857c7013ab6df8ee0ebbb7dad89558",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

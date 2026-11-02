@@ -1854,6 +1854,60 @@ fn public_result_json_native_token_stream_app_v1(context: ApplicationContext) ->
     return success([]);
 }
 
+fn public_result_json_native_token_stream_windowed_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 110, 97, 116, 105, 118, 101, 45, 74, 83, 79, 78, 45, 119, 105, 110, 100, 111, 119, 101, 100, 45, 116, 111, 107, 101, 110, 45, 115, 116, 114, 101, 97, 109, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: RawTapeStartRequestV1 = structured_read(
+        context.argv[0], raw_start_request_schema_v1()
+    );
+    let shape: RawDocumentShapeV1 = raw_document_shape(request.document);
+    let within_window_bound: bool = shape.valid
+        && request.document.byte_length <= 7168
+        && request.document.chunks.len <= 7;
+    if !within_window_bound {
+        return failure([110, 97, 116, 105, 118, 101, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 115, 116, 114, 101, 97, 109, 32, 101, 120, 99, 101, 101, 100, 115, 32, 105, 116, 115, 32, 119, 105, 110, 100, 111, 119, 32, 98, 111, 117, 110, 100], 4);
+    }
+    let input_digest: [byte; up_to 64] = source_digest_hex(
+        source_digest_window(
+            sha256.init(),
+            request.document,
+            0,
+            request.document.chunks.len
+        )
+    );
+    let request_valid: bool = shape.valid
+        && same_bytes(request.schema_version, raw_start_request_schema_v1())
+        && request.input_sha256.len == 64
+        && same_bytes(request.input_sha256, input_digest);
+    let tokenized: TokenizeStateV1 = raw_cursor_document(request.document);
+    let tape: TokenTapeV1 = raw_token_tape(request.document, tokenized);
+    let tape_shape_code: u64 = request_tape_shape_code(tape);
+    let tape_shape_valid: bool = tape_shape_code == 0;
+    let complete_tape: bool = request_valid && tokenized.valid
+        && tape_shape_valid;
+    let parsed: ParseStateV1 = checked_parse(tape, complete_tape);
+    let writer: WriterV1 = checked_writer(parsed, tape);
+    let builder: ChunkBuilderV1 = output_chunks(writer);
+    let supported: bool = complete_tape && parsed.valid && writer.ok
+        && builder.count > 0;
+    let result: TapeResultV1 = result_value(
+        supported, request_valid, tape_shape_valid, tape_shape_code,
+        parsed, writer, builder
+    );
+    let published: u64 = structured_write(
+        context.argv[1], result_schema_v1(), result
+    );
+    if published == 0 {
+        return failure([112, 117, 98, 108, 105, 99, 32, 74, 83, 79, 78, 32, 110, 97, 116, 105, 118, 101, 32, 119, 105, 110, 100, 111, 119, 101, 100, 32, 116, 111, 107, 101, 110, 32, 115, 116, 114, 101, 97, 109, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3);
+    }
+    return success([]);
+}
+
 fn public_result_json_native_tape_start_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
     capability test_artifact
     effect structured_read authorized_by test_artifact
