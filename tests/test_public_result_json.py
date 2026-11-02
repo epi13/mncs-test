@@ -1470,9 +1470,17 @@ def test_native_document_route_handles_key_order_decline_from_encoded_document(
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
     applications = [call.args[0] for call in native_app.call_args_list]
-    assert applications[0] == "test-public-result-json-native-token-tape.json"
-    assert "test-public-result-json-token-tape.json" in applications
-    assert "test-public-result-json-token.json" not in applications
+    assert applications[0] == "test-public-result-json-native-token-stream.json"
+    assert "test-public-result-json-source-digest.json" in applications
+    assert not {
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-native-token-tape-window.json",
+        "test-public-result-json-token-tape.json",
+        "test-public-result-json-token.json",
+    }.intersection(applications)
+    stream_request = native_app.call_args_list[0].args[1]
+    assert "token_words" not in stream_request
+    assert "tape" not in stream_request
 
 
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
@@ -2000,6 +2008,7 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
     ]
     expected_applications = [
         "test-public-result-json-key-order.json",
+        "test-public-result-json-native-token-stream.json",
         "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
         "test-public-result-json-token.json",
