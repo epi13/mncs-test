@@ -1169,6 +1169,55 @@ def test_native_check_result_projection_uses_native_execution_size_bound(
     assert native_responses == [{"supported": True}]
 
 
+def test_native_check_result_projection_falls_back_above_native_document_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "failure": {"message": "above-bound compatibility"},
+        "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        "tests": [],
+        "run_id": "run-above-native-document-bound",
+        "padding": "",
+    }
+    base_document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    target_bytes = mncs_test.CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES + 1
+    result["padding"] = "x" * (target_bytes - len(base_document))
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(document) == target_bytes
+
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    projected = mncs_test.check_result(
+        result,
+        "c" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=document,
+    )
+
+    assert native_responses == []
+    assert projected["unresolved"] == ["above-bound compatibility"]
+
+
 def test_native_check_result_projection_preserves_full_document_compatibility(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
