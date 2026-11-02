@@ -893,6 +893,7 @@ class RunnerTests(unittest.TestCase):
             native_applications: list[str] = []
             family_manifest_results: list[dict] = []
             native_json_requests: list[dict] = []
+            native_key_order_requests: list[dict] = []
             check_artifact_results: list[dict] = []
             family_metadata_results: list[dict] = []
             native_public_check_documents: list[bytes | None] = []
@@ -914,6 +915,8 @@ class RunnerTests(unittest.TestCase):
                 native_applications.append(name)
                 if name == "test-family-check-manifest-native.json":
                     family_manifest_results.append(response)
+                if name == "test-public-result-json-key-order.json":
+                    native_key_order_requests.append(native_request)
                 if name == "test-public-result-json-token.json":
                     native_formatter_requests.append(native_request)
                 if name == "test-check-result-json-native.json":
@@ -1051,6 +1054,17 @@ class RunnerTests(unittest.TestCase):
             expected_test_result_document[selection_start:selection_end],
             "the serializer should receive the exact native source span",
         )
+        key_order_sources = [
+            b"".join(
+                chunk["bytes"].encode("utf-8")
+                for chunk in request["document"]["chunks"]
+            )
+            for request in native_key_order_requests
+        ]
+        self.assertTrue(
+            any(raw_selection_inputs[0] in source for source in key_order_sources),
+            "MNCS key ordering should receive the raw-selection CheckResult document",
+        )
         formatter_sources = [
             b"".join(
                 chunk["bytes"].encode("utf-8")
@@ -1095,6 +1109,7 @@ class RunnerTests(unittest.TestCase):
             2,
             native_applications,
         )
+        self.assertIn("test-public-result-json-key-order.json", native_applications)
         self.assertIn("test-public-result-json-token.json", native_applications)
         self.assertEqual(
             len(raw_selection_inputs),

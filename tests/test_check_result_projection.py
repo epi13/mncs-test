@@ -562,8 +562,7 @@ def test_raw_native_public_document_fallback_materializes_only_after_native_reje
 
     assert len(native_order_sources) == 1
     assert selection_json in native_order_sources[0]
-    assert len(native_payload_sources) == 1
-    assert selection_json in native_payload_sources[0]
+    assert native_payload_sources == []
     assert payload == mncs_test.json_bytes(
         {
             "schema_version": "mncs.check-result/1",
@@ -646,6 +645,57 @@ def test_native_raw_public_document_key_order_does_not_scan_field_text(
     assert null_digest == mncs_test.sha256_bytes(null_payload)
 
 
+def test_raw_selection_mapping_falls_back_when_native_key_order_declines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value = {
+        "verdict": "PASS",
+        "schema_version": "mncs.check-result/1",
+        "id": "family:key-order-fallback",
+        "nested": {"z": 1, "a": 2},
+        "selection": {"ignored": True},
+    }
+    selection_json = b'{"future":{"z":1,"a":2}}'
+    order_sources: list[bytes] = []
+
+    def decline_key_order(document: bytes, **kwargs: object) -> None:
+        order_sources.append(document)
+        return None
+
+    def unexpected_formatter(*args: object, **kwargs: object) -> None:
+        raise AssertionError("formatter must not run after key-order decline")
+
+    monkeypatch.setattr(
+        mncs_test, "_native_public_result_key_order", decline_key_order
+    )
+    monkeypatch.setattr(
+        mncs_test,
+        "_native_public_result_document_payload",
+        unexpected_formatter,
+    )
+
+    payload, digest = mncs_test._public_result_json_payload_with_raw_selection(
+        value,
+        selection_json,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+    )
+
+    expected = {
+        **value,
+        "selection": mncs_test.json.loads(selection_json),
+    }
+    assert len(order_sources) == 1
+    assert order_sources[0].startswith(
+        b'{"verdict":"PASS","schema_version":"mncs.check-result/1"'
+    )
+    assert b'"nested":{"z":1,"a":2}' in order_sources[0]
+    assert order_sources[0].endswith(b',"selection":' + selection_json + b"}")
+    assert payload == mncs_test.json_bytes(expected)
+    assert digest == mncs_test.sha256_bytes(payload)
+
+
 def test_native_public_document_bound_keeps_full_multichunk_projection(
     tmp_path: Path,
 ) -> None:
@@ -704,6 +754,12 @@ def test_raw_selection_public_result_uses_compatible_host_fallback(
         },
     }
     native_sources: list[bytes] = []
+    order_sources: list[bytes] = []
+    original_order = mncs_test._native_public_result_key_order
+
+    def observe_order(source: bytes, **kwargs: object) -> bytes | None:
+        order_sources.append(source)
+        return original_order(source, **kwargs)
 
     def reject_native(source: bytes, **kwargs: object) -> None:
         native_sources.append(source)
@@ -712,6 +768,7 @@ def test_raw_selection_public_result_uses_compatible_host_fallback(
     monkeypatch.setattr(
         mncs_test, "_native_public_result_document_payload", reject_native
     )
+    monkeypatch.setattr(mncs_test, "_native_public_result_key_order", observe_order)
     payload, digest = mncs_test._public_result_json_payload_with_raw_selection(
         check_result,
         selection_json,
@@ -721,7 +778,9 @@ def test_raw_selection_public_result_uses_compatible_host_fallback(
     )
 
     assert len(native_sources) == 1
-    assert selection_json in native_sources[0]
+    assert len(order_sources) == 1
+    assert selection_json in order_sources[0]
+    assert mncs_test.json.loads(native_sources[0])["selection"] == expected["selection"]
     assert payload == mncs_test.json_bytes(expected)
     assert digest == mncs_test.sha256_bytes(payload)
 

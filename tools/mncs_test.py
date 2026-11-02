@@ -10077,25 +10077,35 @@ def _public_result_json_payload_with_raw_selection(
         members = [
             compact_json(key).encode("utf-8")
             + b":"
-            + compact_json(fields[key]).encode("utf-8")
-            for key in sorted(fields)
+            + compact_json(field, sort_keys=False).encode("utf-8")
+            for key, field in fields.items()
         ]
+        members.append(b'"selection":' + selection_json)
     except (RecursionError, TypeError, ValueError, UnicodeEncodeError):
         members = []
     if members or not fields:
-        selection_member = b'"selection":' + selection_json
-        insertion = sum(key < "selection" for key in fields)
-        members.insert(insertion, selection_member)
         source = b"{" + b",".join(members) + b"}"
-        if mncs is not None and cwd is not None and environment is not None:
-            native = _native_public_result_document_payload(
+        if (
+            native_document is None
+            and mncs is not None
+            and cwd is not None
+            and environment is not None
+        ):
+            ordered = _native_public_result_key_order(
                 source,
                 mncs=mncs,
                 cwd=cwd,
                 environment=environment,
             )
-            if native is not None:
-                return native
+            if ordered is not None:
+                native = _native_public_result_document_payload(
+                    ordered,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                )
+                if native is not None:
+                    return native
 
     # Compatibility serialization is the only path that needs to materialize
     # the opaque value. Native-supported documents never build this tree.
