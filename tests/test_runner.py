@@ -893,11 +893,11 @@ class RunnerTests(unittest.TestCase):
             native_applications: list[str] = []
             family_manifest_results: list[dict] = []
             native_json_requests: list[dict] = []
-            native_key_order_requests: list[dict] = []
             check_artifact_results: list[dict] = []
             family_metadata_results: list[dict] = []
             native_public_check_documents: list[bytes | None] = []
             native_check_document_support: list[bool] = []
+            native_formatter_requests: list[dict] = []
             auxiliary_result_names: list[tuple[str, ...]] = []
             original_run_native_app = mncs_test.run_native_app
             public_json_apps = {
@@ -914,9 +914,15 @@ class RunnerTests(unittest.TestCase):
                 native_applications.append(name)
                 if name == "test-family-check-manifest-native.json":
                     family_manifest_results.append(response)
-                if name == "test-public-result-json-key-order.json":
-                    native_key_order_requests.append(native_request)
+                if name == "test-public-result-json-token.json":
+                    native_formatter_requests.append(native_request)
                 if name == "test-check-result-json-native.json":
+                    # Exercise native policy success when the optional public
+                    # CheckResult document cannot be retained by the app.
+                    response["projection_document_supported"] = False
+                    response.get("_native_result_artifacts", {}).pop(
+                        "check-result-public.json", None
+                    )
                     native_json_requests.append(native_request)
                     family_metadata_results.append(response["family_metadata"])
                     check_artifact_results.append(response["check_artifact"])
@@ -996,11 +1002,15 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(check_artifact_results), 1)
         self.assertEqual(native_json_requests[0]["projection_document_only"], True)
         self.assertEqual(auxiliary_result_names, [("check-result-public.json",)])
-        self.assertEqual(native_check_document_support, [True])
+        self.assertEqual(native_check_document_support, [False])
         self.assertEqual(len(native_public_check_documents), 1)
-        self.assertIsInstance(native_public_check_documents[0], bytes)
-        self.assertEqual(raw_selection_values, [None])
+        self.assertIsNone(native_public_check_documents[0])
+        self.assertEqual(len(raw_selection_values), 1)
+        self.assertIsInstance(raw_selection_values[0], dict)
+        self.assertIsNone(raw_selection_values[0]["selection"])
         self.assertEqual(public_native_documents, native_public_check_documents)
+        self.assertEqual(response["test_result"]["selection"], result["selection"])
+        self.assertEqual(response["check_result"]["selection"], result["selection"])
         self.assertEqual(
             check_artifact_results[0],
             {
@@ -1032,11 +1042,6 @@ class RunnerTests(unittest.TestCase):
             decoded_json_documents,
             "family checks should validate the produced CheckResult with native tokens",
         )
-        self.assertNotIn(
-            native_public_check_documents[0],
-            decoded_json_documents,
-            "family checks should not materialize the native public CheckResult document",
-        )
         self.assertEqual(len(raw_selection_inputs), 1)
         family_metadata = family_metadata_results[0]
         selection_start = family_metadata["selection_start"]
@@ -1046,16 +1051,16 @@ class RunnerTests(unittest.TestCase):
             expected_test_result_document[selection_start:selection_end],
             "the serializer should receive the exact native source span",
         )
-        key_order_sources = [
+        formatter_sources = [
             b"".join(
                 chunk["bytes"].encode("utf-8")
                 for chunk in request["document"]["chunks"]
             )
-            for request in native_key_order_requests
+            for request in native_formatter_requests
         ]
         self.assertTrue(
-            any(raw_selection_inputs[0] in source for source in key_order_sources),
-            "MNCS key ordering should receive the retained selection bytes",
+            any(raw_selection_inputs[0] in source for source in formatter_sources),
+            "MNCS public formatting should receive the retained selection bytes",
         )
         expected_native_document, _ = mncs_test._native_public_result_document_request(
             expected_test_result_document
@@ -1090,7 +1095,7 @@ class RunnerTests(unittest.TestCase):
             2,
             native_applications,
         )
-        self.assertIn("test-public-result-json-key-order.json", native_applications)
+        self.assertIn("test-public-result-json-token.json", native_applications)
         self.assertEqual(
             len(raw_selection_inputs),
             1,

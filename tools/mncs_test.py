@@ -8993,7 +8993,7 @@ def _family_check_metadata_from_native(
 
 
 def check_result(
-    result: dict[str, Any],
+    result: dict[str, Any] | None,
     result_digest: str,
     *,
     mncs: str,
@@ -9004,9 +9004,10 @@ def check_result(
     test_result_document: bytes | None = None,
     native_json_response: dict[str, Any] | None = None,
     native_json_response_prepared: bool = False,
+    preserve_selection: bool = True,
 ) -> dict[str, Any]:
     """Project a detailed TestResult through the native CheckResult policy."""
-    if not isinstance(result, dict):
+    if result is not None and not isinstance(result, dict):
         raise AdapterError("Test result for CheckResult projection must be an object")
 
     def bounded_text(value: Any, field: str, maximum: int) -> str:
@@ -9037,7 +9038,14 @@ def check_result(
             projected = native_json_response.get("projection")
             if not isinstance(projected, dict):
                 raise AdapterError("MNCS CheckResult JSON projection returned no typed projection")
-            return _finish_check_result_projection(projected, result)
+            return _finish_check_result_projection(
+                projected, result, preserve_selection=preserve_selection
+            )
+
+    if result is None:
+        raise AdapterError(
+            "Native CheckResult projection declined; Python TestResult compatibility data is required"
+        )
 
     def summary_count(summary: dict[str, Any], field: str) -> int:
         value = summary.get(field, 0)
@@ -9161,11 +9169,16 @@ def check_result(
     # The application transports long unresolved text in UTF-8-safe bounded
     # chunks. Reassembly and the external CheckResult field names belong to
     # this adapter boundary; the native application chose the disposition.
-    return _finish_check_result_projection(projected, result)
+    return _finish_check_result_projection(
+        projected, result, preserve_selection=preserve_selection
+    )
 
 
 def _finish_check_result_projection(
-    projected: dict[str, Any], result: dict[str, Any]
+    projected: dict[str, Any],
+    result: dict[str, Any] | None,
+    *,
+    preserve_selection: bool = True,
 ) -> dict[str, Any]:
     if (
         projected.get("result_schema_version") != CHECK_SCHEMA
@@ -9182,7 +9195,11 @@ def _finish_check_result_projection(
 
     # Selection is an opaque, potentially forward-compatible result field.
     # The native policy does not interpret it; the adapter preserves it.
-    projected["selection"] = result.get("selection")
+    projected["selection"] = (
+        result.get("selection")
+        if preserve_selection and result is not None
+        else None
+    )
     return projected
 
 
@@ -9771,7 +9788,7 @@ def run_family_check(args: argparse.Namespace) -> int:
             None
             if native_check_result_document is not None
             else check_result(
-                result if result is not None else json.loads(result_document_bytes),
+                result,
                 result_digest,
                 mncs=args.mncs,
                 cwd=cwd,
@@ -9781,6 +9798,9 @@ def run_family_check(args: argparse.Namespace) -> int:
                 test_result_document=result_document_bytes,
                 native_json_response=native_json_response,
                 native_json_response_prepared=True,
+                # The family formatter inserts the opaque source span below.
+                # Do not rebuild the TestResult tree just to copy selection.
+                preserve_selection=family_metadata is None,
             )
         )
         if family_metadata is not None:
