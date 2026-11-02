@@ -1771,6 +1771,24 @@ fn consume_token_events(
     final_cursor: json_tokens.CursorV1
 ) -> (result: CheckResultTokenStateV1) {
     if captured.count == 0 { return CheckResultTokenStateV1 { ..state, cursor: final_cursor }; }
+    if captured.count <= 8 {
+        iterate i up_to 8 carrying processed: CheckResultTokenStateV1 = state {
+            next processed = consume_token_events_step(processed, captured, document, i);
+        }
+        return CheckResultTokenStateV1 { ..processed, cursor: final_cursor };
+    }
+    if captured.count <= 16 {
+        iterate i up_to 16 carrying processed: CheckResultTokenStateV1 = state {
+            next processed = consume_token_events_step(processed, captured, document, i);
+        }
+        return CheckResultTokenStateV1 { ..processed, cursor: final_cursor };
+    }
+    if captured.count <= 32 {
+        iterate i up_to 32 carrying processed: CheckResultTokenStateV1 = state {
+            next processed = consume_token_events_step(processed, captured, document, i);
+        }
+        return CheckResultTokenStateV1 { ..processed, cursor: final_cursor };
+    }
     iterate i up_to 64 carrying processed: CheckResultTokenStateV1 = state {
         next processed = consume_token_events_step(processed, captured, document, i);
     }
