@@ -60,6 +60,9 @@ CHECK_RESULT_PROJECTION_RESULT_SCHEMA = "mncs.test-check-result-projection/1"
 CHECK_RESULT_JSON_NATIVE_REQUEST_SCHEMA = "mncs.test-check-result-json-native-request/5"
 CHECK_RESULT_JSON_NATIVE_RESULT_SCHEMA = "mncs.test-check-result-json-native/5"
 PUBLIC_RESULT_JSON_REQUEST_SCHEMA = "mncs.test.public-json-token-start/3"
+PUBLIC_RESULT_TEXT_REQUEST_SCHEMA = "mncs.test.public-result-text-request/2"
+PUBLIC_RESULT_TEXT_WINDOW_REQUEST_SCHEMA = "mncs.test.public-result-text-window-request/1"
+PUBLIC_RESULT_TEXT_RESULT_SCHEMA = "mncs.test.public-result-text/2"
 PUBLIC_RESULT_JSON_RESULT_SCHEMA = "mncs.test.public-json-token/3"
 PUBLIC_RESULT_JSON_WINDOW_REQUEST_SCHEMA = "mncs.test.public-json-token-window/4"
 PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA = "mncs.test.public-json-key-order-request/1"
@@ -94,6 +97,9 @@ PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS = 64
 PUBLIC_RESULT_JSON_WINDOW_BYTES = 4096
 PUBLIC_RESULT_JSON_V1_MAX_OUTPUT_BYTES = 8192
 PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES = 65536
+PUBLIC_RESULT_TEXT_MAX_INPUT_BYTES = PUBLIC_RESULT_JSON_MAX_OUTPUT_BYTES
+PUBLIC_RESULT_TEXT_MAX_OUTPUT_BYTES = 2048
+PUBLIC_RESULT_TEXT_WINDOW_CHUNKS = 4
 PUBLIC_RESULT_JSON_MAX_VALUES = 1024
 PUBLIC_RESULT_JSON_FAMILY_WINDOW_BYTES = 4096
 CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES = 16896
@@ -339,6 +345,103 @@ def _decode_public_result_chunks(
     if len(document) != byte_length:
         raise AdapterError("MNCS public-result JSON app returned a short document window")
     return bytes(document)
+
+
+def _native_public_result_text_payload(
+    document: bytes,
+    *,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> bytes | None:
+    """Project a bounded serialized TestResult into CLI text in MNCS."""
+    if not document or len(document) > PUBLIC_RESULT_TEXT_MAX_INPUT_BYTES:
+        return None
+    prepared = _native_public_result_document_request(document)
+    if prepared is None:
+        return None
+    base_request, source_length = prepared
+    source_chunks = base_request["document"]["chunks"]
+    input_sha256 = base_request["input_sha256"]
+    if (
+        source_length != len(document)
+        or len(source_chunks) > PUBLIC_RESULT_JSON_INPUT_MAX_CHUNKS
+        or not isinstance(input_sha256, str)
+        or not SHA256_HEX.fullmatch(input_sha256)
+    ):
+        return None
+    continuation: dict[str, Any] | None = None
+    for start in range(0, len(source_chunks), PUBLIC_RESULT_TEXT_WINDOW_CHUNKS):
+        selected_chunks = source_chunks[start : start + PUBLIC_RESULT_TEXT_WINDOW_CHUNKS]
+        window_document = {
+            "chunks": selected_chunks,
+            "byte_length": sum(chunk["length"] for chunk in selected_chunks),
+        }
+        more = start + len(selected_chunks) < len(source_chunks)
+        if continuation is None:
+            app_name = "test-public-result-text.json"
+            request_schema = PUBLIC_RESULT_TEXT_REQUEST_SCHEMA
+            request = {
+                "schema_version": request_schema,
+                "document": window_document,
+                "input_sha256": input_sha256,
+                "more": more,
+            }
+        else:
+            app_name = "test-public-result-text-window.json"
+            request_schema = PUBLIC_RESULT_TEXT_WINDOW_REQUEST_SCHEMA
+            request = {
+                "schema_version": request_schema,
+                "document": window_document,
+                "input_sha256": input_sha256,
+                "state": continuation,
+                "more": more,
+            }
+        try:
+            result = run_native_app(
+                app_name,
+                request,
+                request_schema=request_schema,
+                result_schema=PUBLIC_RESULT_TEXT_RESULT_SCHEMA,
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+                step_budget=8_000_000,
+            )
+        except (NativeBudgetExhaustedError, NativeInputBoundError):
+            return None
+        except NativeTransportError as error:
+            raise AdapterError(f"MNCS native TestResult text projection failed: {error}") from error
+
+        if result.get("schema_version") != PUBLIC_RESULT_TEXT_RESULT_SCHEMA:
+            raise AdapterError("MNCS TestResult text projection returned an unsupported result schema")
+        if type(result.get("supported")) is not bool:
+            raise AdapterError("MNCS TestResult text projection returned malformed support metadata")
+        if not result["supported"]:
+            return None
+        if result.get("input_sha256") != input_sha256 or type(result.get("done")) is not bool:
+            raise AdapterError("MNCS TestResult text projection returned malformed continuation metadata")
+        if not result["done"]:
+            if not more or result.get("byte_length") != 0 or result.get("chunk_count") != 0:
+                raise AdapterError("MNCS TestResult text projection returned an invalid continuation window")
+            continuation = result.get("state")
+            if not isinstance(continuation, dict):
+                raise AdapterError("MNCS TestResult text projection returned malformed continuation state")
+            continue
+        if more:
+            raise AdapterError("MNCS TestResult text projection completed before the final input window")
+        byte_length = result.get("byte_length")
+        if (
+            type(byte_length) is not int
+            or not 0 < byte_length <= PUBLIC_RESULT_TEXT_MAX_OUTPUT_BYTES
+        ):
+            raise AdapterError("MNCS TestResult text projection returned malformed output metadata")
+        return _decode_public_result_chunks(
+            result,
+            byte_length=byte_length,
+            maximum_chunks=2,
+        )
+    return None
 
 
 def _decode_public_result_token_tape_chunks(
@@ -10194,8 +10297,12 @@ def print_result(
     output_format: str,
     *,
     serialized_json: bytes | None = None,
+    serialized_text: bytes | None = None,
 ) -> None:
     if output_format == "text":
+        if serialized_text is not None:
+            sys.stdout.write(serialized_text.decode("utf-8"))
+            return
         summary = result.get("summary", {})
         print(
             f"{result.get('id', 'mncs-test')}: {result.get('verdict')} "
@@ -11141,7 +11248,20 @@ def run_manifest(args: argparse.Namespace) -> int:
                 cwd=cwd,
                 environment=environment,
             )
-    print_result(result, args.format, serialized_json=result_payload)
+    native_text_payload = None
+    if args.format == "text":
+        native_text_payload = _native_public_result_text_payload(
+            result_payload,
+            mncs=mncs,
+            cwd=cwd,
+            environment=environment,
+        )
+    print_result(
+        result,
+        args.format,
+        serialized_json=result_payload,
+        serialized_text=native_text_payload,
+    )
     return int(result["exit_code"])
 
 

@@ -1,0 +1,621 @@
+mncs 0.18;
+
+// Native text projection for the canonical TestResult JSON transport.
+// Python supplies bounded serialized bytes and transports the returned text;
+// this module owns the TestResult-to-CLI-text projection without a host value tree.
+module mncs.test.public_result_text_v1;
+
+use mncs.std.application.v1;
+use mncs.std.json_emit.v1 as json_emit;
+use mncs.test.json_token_cursor_v1 as json_tokens;
+
+record JsonTextInputChunkV1 {
+    bytes: [byte; up_to 1024],
+    length: u64
+}
+
+record JsonTextDocumentV1 {
+    chunks: [JsonTextInputChunkV1; up_to 64],
+    byte_length: u64
+}
+
+record JsonTextRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: JsonTextDocumentV1,
+    input_sha256: [byte; up_to 64],
+    more: bool
+}
+
+record TextValueV1 {
+    bytes: [byte; 512],
+    length: u64,
+    present: bool
+}
+
+record TextBufferV1 {
+    chunks: [[byte; 1024]; 2],
+    length: u64,
+    valid: bool
+}
+
+record TextProjectionChunkV1 {
+    bytes: [byte; 1024],
+    length: u64
+}
+
+record TextProjectionChunkBuilderV1 {
+    chunks: [TextProjectionChunkV1; 2],
+    count: u64
+}
+
+record TextProjectionStateV1 {
+    cursor: json_tokens.CursorV1,
+    scopes: [byte; 64],
+    current_key: [byte; 32],
+    current_key_length: u64,
+    capture_kind: byte,
+    capture: TextValueV1,
+    valid: bool,
+    root_id: TextValueV1,
+    root_verdict: TextValueV1,
+    root_classification: TextValueV1,
+    passed: u64,
+    failed: u64,
+    skipped: u64,
+    unsupported: u64,
+    test_id: TextValueV1,
+    test_status: TextValueV1,
+    test_verdict: TextValueV1,
+    test_failure_message: TextValueV1,
+    test_failure_truthy: bool,
+    root_failure_message: TextValueV1,
+    root_failure_truthy: bool,
+    number_kind: byte,
+    number_value: u64,
+    number_valid: bool,
+    writer: TextBufferV1
+}
+
+record JsonTextWindowRequestV1 {
+    schema_version: [byte; up_to 64],
+    document: JsonTextDocumentV1,
+    input_sha256: [byte; up_to 64],
+    state: TextProjectionStateV1,
+    more: bool
+}
+
+record TextProjectionResultV1 {
+    schema_version: [byte; up_to 64],
+    supported: bool,
+    done: bool,
+    input_sha256: [byte; up_to 64],
+    byte_length: u64,
+    chunk_count: u64,
+    chunks: [TextProjectionChunkV1; up_to 2],
+    state: TextProjectionStateV1
+}
+
+fn request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 114, 101, 115, 117, 108, 116, 45, 116, 101, 120, 116, 45, 114, 101, 113, 117, 101, 115, 116, 47, 50];
+}
+
+fn window_request_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 114, 101, 115, 117, 108, 116, 45, 116, 101, 120, 116, 45, 119, 105, 110, 100, 111, 119, 45, 114, 101, 113, 117, 101, 115, 116, 47, 49];
+}
+
+fn result_schema() -> (result: [byte; up_to 64]) {
+    return [109, 110, 99, 115, 46, 116, 101, 115, 116, 46, 112, 117, 98, 108, 105, 99, 45, 114, 101, 115, 117, 108, 116, 45, 116, 101, 120, 116, 47, 50];
+}
+
+fn same_bytes(left: [byte; up_to 64], right: [byte; up_to 64]) -> (result: bool) {
+    if left.len != right.len { return false; }
+    iterate i over left carrying same: bool = true {
+        next same = same && left[i] == right[i];
+    }
+    return same;
+}
+
+fn empty_text_value() -> (result: TextValueV1) {
+    return TextValueV1 { bytes: [0; 512], length: 0, present: false };
+}
+
+fn empty_text_buffer() -> (result: TextBufferV1) {
+    return TextBufferV1 { chunks: [[0; 1024]; 2], length: 0, valid: true };
+}
+
+fn document_shape(document: JsonTextDocumentV1) -> (result: bool) {
+    let total: u64 = 0;
+    iterate i over document.chunks carrying count: u64 = total {
+        let chunk: JsonTextInputChunkV1 = document.chunks[i];
+        next count = count +% chunk.length;
+    }
+    let chunks_valid: bool = true;
+    iterate i over document.chunks carrying valid: bool = chunks_valid {
+        let chunk: JsonTextInputChunkV1 = document.chunks[i];
+        next valid = valid && chunk.length > 0 && chunk.length <= 1024
+            && chunk.length == chunk.bytes.len;
+    }
+    return document.chunks.len > 0 && document.chunks.len <= 4
+        && valid && count == document.byte_length && count <= 4096;
+}
+
+fn key_is(key: [byte; 32], length: u64, expected: [byte; up_to 32]) -> (result: bool) {
+    if length != expected.len { return false; }
+    iterate i over expected carrying same: bool = true {
+        next same = same && key[i] == expected[i];
+    }
+    return same;
+}
+
+fn scope_at(state: TextProjectionStateV1, depth: byte) -> (result: byte) {
+    if depth == 0 || depth > 64 { return 0; }
+    return state.scopes[(depth as u64) -% 1];
+}
+
+fn string_capture_kind(state: TextProjectionStateV1) -> (result: byte) {
+    let scope: byte = scope_at(state, state.cursor.depth);
+    let key: [byte; 32] = state.current_key;
+    let length: u64 = state.current_key_length;
+    if scope == 1 && key_is(key, length, [105, 100]) { return 1; }
+    if scope == 1 && key_is(key, length, [118, 101, 114, 100, 105, 99, 116]) { return 2; }
+    if scope == 1 && key_is(key, length, [99, 108, 97, 115, 115, 105, 102, 105, 99, 97, 116, 105, 111, 110]) { return 3; }
+    if scope == 4 && key_is(key, length, [105, 100]) { return 4; }
+    if scope == 4 && key_is(key, length, [115, 116, 97, 116, 117, 115]) { return 5; }
+    if scope == 4 && key_is(key, length, [118, 101, 114, 100, 105, 99, 116]) { return 6; }
+    if scope == 5 && key_is(key, length, [109, 101, 115, 115, 97, 103, 101]) { return 7; }
+    if scope == 6 && key_is(key, length, [109, 101, 115, 115, 97, 103, 101]) { return 8; }
+    return 0;
+}
+
+fn numeric_capture_kind(state: TextProjectionStateV1) -> (result: byte) {
+    let scope: byte = scope_at(state, state.cursor.depth);
+    let key: [byte; 32] = state.current_key;
+    let length: u64 = state.current_key_length;
+    if scope != 2 { return 0; }
+    if key_is(key, length, [112, 97, 115, 115, 101, 100]) { return 1; }
+    if key_is(key, length, [102, 97, 105, 108, 101, 100]) { return 2; }
+    if key_is(key, length, [115, 107, 105, 112, 112, 101, 100]) { return 3; }
+    if key_is(key, length, [117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100]) { return 4; }
+    return 0;
+}
+
+fn text_put(buffer: TextBufferV1, value: byte) -> (result: TextBufferV1) {
+    if !buffer.valid || buffer.length >= 2048 {
+        return TextBufferV1 { ..buffer, valid: false };
+    }
+    let chunk_index: u64 = buffer.length / 1024;
+    let chunk_offset: u64 = buffer.length % 1024;
+    let chunk: [byte; 1024] = buffer.chunks[chunk_index];
+    let updated_chunk: [byte; 1024] = replace(chunk, chunk_offset, value);
+    return TextBufferV1 {
+        ..buffer,
+        chunks: replace(buffer.chunks, chunk_index, updated_chunk),
+        length: buffer.length +% 1
+    };
+}
+
+fn text_put_live(buffer: TextBufferV1, live: bool, value: byte) -> (result: TextBufferV1) {
+    if live { return text_put(buffer, value); }
+    return buffer;
+}
+
+fn text_append<N: Nat>(buffer: TextBufferV1, value: [byte; up_to N]) -> (result: TextBufferV1) {
+    iterate i over value carrying output: TextBufferV1 = buffer {
+        next output = text_put_live(output, i < value.len, value[i]);
+    }
+    return output;
+}
+
+fn text_append_literal(buffer: TextBufferV1, value: [byte; up_to 64]) -> (result: TextBufferV1) {
+    iterate i over value carrying output: TextBufferV1 = buffer {
+        next output = text_put_live(output, i < value.len, value[i]);
+    }
+    return output;
+}
+
+fn text_append_value(buffer: TextBufferV1, value: TextValueV1, fallback: [byte; up_to 32]) -> (result: TextBufferV1) {
+    if value.present { return text_append(buffer, value.bytes[0..value.length]); }
+    return text_append(buffer, fallback);
+}
+
+fn text_append_optional(buffer: TextBufferV1, value: TextValueV1) -> (result: TextBufferV1) {
+    if value.present { return text_append(buffer, value.bytes[0..value.length]); }
+    return buffer;
+}
+
+fn text_append_count(buffer: TextBufferV1, value: u64) -> (result: TextBufferV1) {
+    let digits: json_emit.Writer = json_emit.put_u64(json_emit.open(), value);
+    return text_append(buffer, digits.buf[0..digits.len]);
+}
+
+fn text_capture_byte(capture: TextValueV1, enabled: bool, value: byte) -> (result: TextValueV1) {
+    if !enabled { return capture; }
+    if capture.length >= 512 { return capture; }
+    return TextValueV1 {
+        ..capture,
+        bytes: replace(capture.bytes, capture.length, value),
+        length: capture.length +% 1
+    };
+}
+
+fn capture_value(state: TextProjectionStateV1, kind: byte, value: TextValueV1) -> (result: TextProjectionStateV1) {
+    if kind == 1 { return TextProjectionStateV1 { ..state, root_id: value }; }
+    if kind == 2 { return TextProjectionStateV1 { ..state, root_verdict: value }; }
+    if kind == 3 { return TextProjectionStateV1 { ..state, root_classification: value }; }
+    if kind == 4 { return TextProjectionStateV1 { ..state, test_id: value }; }
+    if kind == 5 { return TextProjectionStateV1 { ..state, test_status: value }; }
+    if kind == 6 { return TextProjectionStateV1 { ..state, test_verdict: value }; }
+    if kind == 7 { return TextProjectionStateV1 { ..state, test_failure_message: value }; }
+    if kind == 8 { return TextProjectionStateV1 { ..state, root_failure_message: value }; }
+    return state;
+}
+
+fn append_test_row(writer: TextBufferV1, state: TextProjectionStateV1) -> (result: TextBufferV1) {
+    let start: TextBufferV1 = text_append_literal(writer, [32, 32]);
+    let with_id: TextBufferV1 = text_append_value(start, state.test_id, [78, 111, 110, 101]);
+    let with_colon: TextBufferV1 = text_append_literal(with_id, [58, 32]);
+    let with_status: TextBufferV1 = text_append_value(with_colon, state.test_status, [78, 111, 110, 101]);
+    let with_open: TextBufferV1 = text_append_literal(with_status, [32, 91]);
+    let with_verdict: TextBufferV1 = text_append_value(with_open, state.test_verdict, [78, 111, 110, 101]);
+    let with_close: TextBufferV1 = text_append_literal(with_verdict, [93]);
+    let with_failure: TextBufferV1 = select(
+        state.test_failure_truthy,
+        text_append_optional(text_append_literal(with_close, [58, 32]), state.test_failure_message),
+        with_close
+    );
+    return text_append_literal(with_failure, [10]);
+}
+
+fn writer_byte_at(buffer: TextBufferV1, index: u64) -> (result: byte) {
+    if index >= buffer.length || index >= 2048 { return 0; }
+    return buffer.chunks[index / 1024][index % 1024];
+}
+
+fn writer_store_at(buffer: TextBufferV1, index: u64, value: byte) -> (result: TextBufferV1) {
+    if index >= 2048 { return TextBufferV1 { ..buffer, valid: false }; }
+    let chunk_index: u64 = index / 1024;
+    let chunk_offset: u64 = index % 1024;
+    let chunk: [byte; 1024] = buffer.chunks[chunk_index];
+    let updated_chunk: [byte; 1024] = replace(chunk, chunk_offset, value);
+    return TextBufferV1 { ..buffer, chunks: replace(buffer.chunks, chunk_index, updated_chunk) };
+}
+
+fn writer_shift_step(output: TextBufferV1, source: TextBufferV1, prefix_length: u64, index: u64) -> (result: TextBufferV1) {
+    if index >= source.length { return output; }
+    let source_index: u64 = source.length -% 1 -% index;
+    let target_index: u64 = source_index +% prefix_length;
+    return writer_store_at(output, target_index, writer_byte_at(source, source_index));
+}
+
+fn writer_prefix_step(output: TextBufferV1, prefix: TextBufferV1, index: u64) -> (result: TextBufferV1) {
+    if index >= prefix.length { return output; }
+    return writer_store_at(output, index, writer_byte_at(prefix, index));
+}
+
+fn writer_prepend(buffer: TextBufferV1, prefix: TextBufferV1) -> (result: TextBufferV1) {
+    if !buffer.valid || !prefix.valid || buffer.length +% prefix.length > 2048 {
+        return TextBufferV1 { ..buffer, valid: false };
+    }
+    let shifted: TextBufferV1 = buffer;
+    iterate i over buffer.chunks carrying output: TextBufferV1 = shifted {
+        let current: TextBufferV1 = output;
+        iterate j up_to 1024 carrying inner: TextBufferV1 = current {
+            next inner = writer_shift_step(inner, buffer, prefix.length, i *% 1024 +% j);
+        }
+        next output = inner;
+    }
+    let with_prefix: TextBufferV1 = output;
+    iterate i over buffer.chunks carrying prefixed: TextBufferV1 = with_prefix {
+        let current: TextBufferV1 = prefixed;
+        iterate j up_to 1024 carrying inner: TextBufferV1 = current {
+            next inner = writer_prefix_step(inner, prefix, i *% 1024 +% j);
+        }
+        next prefixed = inner;
+    }
+    return TextBufferV1 { ..prefixed, length: buffer.length +% prefix.length };
+}
+
+fn output_chunk_step(builder: TextProjectionChunkBuilderV1, buffer: TextBufferV1, index: u64) -> (result: TextProjectionChunkBuilderV1) {
+    let start: u64 = index *% 1024;
+    if start >= buffer.length { return builder; }
+    let remaining: u64 = buffer.length -% start;
+    let size: u64 = select(remaining < 1024, remaining, 1024);
+    let chunk: TextProjectionChunkV1 = TextProjectionChunkV1 {
+        bytes: buffer.chunks[index], length: size
+    };
+    return TextProjectionChunkBuilderV1 {
+        chunks: replace(builder.chunks, builder.count, chunk),
+        count: builder.count +% 1
+    };
+}
+
+fn output_chunks(buffer: TextBufferV1) -> (result: TextProjectionChunkBuilderV1) {
+    let empty: TextProjectionChunkV1 = TextProjectionChunkV1 { bytes: [0; 1024], length: 0 };
+    let seed: TextProjectionChunkBuilderV1 = TextProjectionChunkBuilderV1 {
+        chunks: [empty; 2], count: 0
+    };
+    iterate i up_to 2 carrying builder: TextProjectionChunkBuilderV1 = seed {
+        next builder = output_chunk_step(builder, buffer, i);
+    }
+    return builder;
+}
+
+fn append_test_failure(state: TextProjectionStateV1, truthy: bool) -> (result: TextProjectionStateV1) {
+    let writer: TextBufferV1 = append_test_row(state.writer, TextProjectionStateV1 {
+        ..state, test_failure_truthy: truthy
+    });
+    return TextProjectionStateV1 {
+        ..state,
+        writer: writer,
+        test_id: empty_text_value(), test_status: empty_text_value(),
+        test_verdict: empty_text_value(), test_failure_message: empty_text_value(),
+        test_failure_truthy: false
+    };
+}
+
+fn set_scope(state: TextProjectionStateV1, before: json_tokens.CursorV1, after: json_tokens.CursorV1) -> (result: TextProjectionStateV1) {
+    let depth: u64 = after.token_depth as u64;
+    let parent_scope: byte = select(depth == 0, 0, state.scopes[select(depth > 0, depth -% 1, 0)]);
+    let key: [byte; 32] = state.current_key;
+    let key_length: u64 = state.current_key_length;
+    let kind: byte = select(after.token_kind == 7, 1, 2);
+    let root_object: bool = depth == 0 && after.token_kind == 7;
+    let summary_object: bool = parent_scope == 1 && kind == 1 && key_is(key, key_length, [115, 117, 109, 109, 97, 114, 121]);
+    let tests_array: bool = parent_scope == 1 && kind == 2 && key_is(key, key_length, [116, 101, 115, 116, 115]);
+    let test_object: bool = parent_scope == 3 && kind == 1;
+    let test_failure: bool = parent_scope == 4 && kind == 1 && key_is(key, key_length, [102, 97, 105, 108, 117, 114, 101]);
+    let root_failure: bool = parent_scope == 1 && kind == 1 && key_is(key, key_length, [102, 97, 105, 108, 117, 114, 101]);
+    let scope: byte = select(root_object, 1,
+        select(summary_object, 2,
+        select(tests_array, 3,
+        select(test_object, 4,
+        select(test_failure, 5,
+        select(root_failure, 6, 0))))));
+    let scopes: [byte; 64] = replace(state.scopes, depth, scope);
+    let base: TextProjectionStateV1 = TextProjectionStateV1 { ..state, scopes: scopes };
+    if test_object {
+        return TextProjectionStateV1 {
+            ..base, test_id: empty_text_value(), test_status: empty_text_value(),
+            test_verdict: empty_text_value(), test_failure_message: empty_text_value(),
+            test_failure_truthy: false
+        };
+    }
+    if test_failure { return TextProjectionStateV1 { ..base, test_failure_truthy: true, test_failure_message: empty_text_value() }; }
+    if root_failure { return TextProjectionStateV1 { ..base, root_failure_truthy: false, root_failure_message: empty_text_value() }; }
+    return base;
+}
+
+fn apply_token(state: TextProjectionStateV1, before: json_tokens.CursorV1, after: json_tokens.CursorV1, value: byte) -> (result: TextProjectionStateV1) {
+    if !after.token_event { return state; }
+    if after.token_kind == 1 {
+        let scope: byte = scope_at(state, after.token_depth);
+        let marked: TextProjectionStateV1 = select(
+            scope == 5, TextProjectionStateV1 { ..state, test_failure_truthy: true },
+            select(scope == 6, TextProjectionStateV1 { ..state, root_failure_truthy: true }, state)
+        );
+        return TextProjectionStateV1 {
+            ..marked,
+            current_key: after.key,
+            current_key_length: after.key_length
+        };
+    }
+    if after.token_kind == 7 || after.token_kind == 8 {
+        return set_scope(state, before, after);
+    }
+    if after.token_kind == 9 {
+        let scope: byte = state.scopes[after.token_depth as u64];
+        if scope == 4 {
+            let row: TextProjectionStateV1 = append_test_failure(state, state.test_failure_truthy);
+            return TextProjectionStateV1 {
+                ..row,
+                scopes: replace(row.scopes, after.token_depth as u64, 0)
+            };
+        }
+        return TextProjectionStateV1 { ..state, scopes: replace(state.scopes, after.token_depth as u64, 0) };
+    }
+    if after.token_kind == 10 {
+        return TextProjectionStateV1 { ..state, scopes: replace(state.scopes, after.token_depth as u64, 0) };
+    }
+    if after.token_kind == 2 {
+        let captured: TextValueV1 = TextValueV1 {
+            bytes: state.capture.bytes,
+            length: state.capture.length,
+            present: true
+        };
+        let output: TextProjectionStateV1 = capture_value(state, state.capture_kind, captured);
+        return TextProjectionStateV1 { ..output, capture_kind: 0, capture: empty_text_value() };
+    }
+    if after.token_kind == 3 && state.number_kind != 0 {
+        if !state.number_valid {
+            return TextProjectionStateV1 { ..state, valid: false, number_kind: 0 };
+        }
+        if state.number_kind == 1 { return TextProjectionStateV1 { ..state, passed: state.number_value, number_kind: 0 }; }
+        if state.number_kind == 2 { return TextProjectionStateV1 { ..state, failed: state.number_value, number_kind: 0 }; }
+        if state.number_kind == 3 { return TextProjectionStateV1 { ..state, skipped: state.number_value, number_kind: 0 }; }
+        if state.number_kind == 4 { return TextProjectionStateV1 { ..state, unsupported: state.number_value, number_kind: 0 }; }
+    }
+    return state;
+}
+
+fn scan_byte(state: TextProjectionStateV1, value: byte) -> (result: TextProjectionStateV1) {
+    let before: json_tokens.CursorV1 = state.cursor;
+    let after: json_tokens.CursorV1 = json_tokens.cursor_feed_byte_v1(before, value);
+    let started_string: bool = after.event == 3 && !before.in_string;
+    let start_kind: byte = select(started_string, string_capture_kind(state), state.capture_kind);
+    let capture: TextValueV1 = select(started_string, empty_text_value(), state.capture);
+    let in_capture: bool = state.capture_kind != 0 && before.in_string && after.in_string;
+    let capture_byte: bool = in_capture && value != 92;
+    let escaped_capture: bool = in_capture && value == 92;
+    let updated_capture: TextValueV1 = text_capture_byte(capture, capture_byte, value);
+    let number_started: bool = !before.atom_active && after.atom_active && after.atom_kind == 3;
+    let number_kind: byte = select(number_started, numeric_capture_kind(state), state.number_kind);
+    let number_value: u64 = select(number_started, 0, state.number_value);
+    let number_valid: bool = select(number_started, true, state.number_valid);
+    let is_digit: bool = value >= 48 && value <= 57;
+    let number_part: bool = number_kind != 0 && (before.atom_active || number_started) && is_digit;
+    let next_number: u64 = select(number_part, number_value *% 10 +% (value as u64 -% 48), number_value);
+    let invalid_number: bool = number_kind != 0 && (before.atom_active || number_started) && !is_digit && !after.token_event;
+    let base: TextProjectionStateV1 = TextProjectionStateV1 {
+        ..state,
+        cursor: after,
+        capture_kind: start_kind,
+        capture: updated_capture,
+        valid: state.valid && !escaped_capture && !(in_capture && capture.length >= 512),
+        number_kind: number_kind,
+        number_value: next_number,
+        number_valid: number_valid && !invalid_number && next_number <= 1000000000
+    };
+    let keyed: TextProjectionStateV1 = select(
+        after.token_event && after.token_kind == 1,
+        apply_token(base, before, after, value),
+        base
+    );
+    let tokened: TextProjectionStateV1 = select(
+        after.token_event && after.token_kind != 1,
+        apply_token(keyed, before, after, value),
+        keyed
+    );
+    return tokened;
+}
+
+fn initial_state() -> (result: TextProjectionStateV1) {
+    return TextProjectionStateV1 {
+        cursor: json_tokens.cursor_init_v1(), scopes: [0; 64],
+        current_key: [0; 32], current_key_length: 0,
+        capture_kind: 0, capture: empty_text_value(), valid: true,
+        root_id: empty_text_value(), root_verdict: empty_text_value(),
+        root_classification: empty_text_value(), passed: 0, failed: 0,
+        skipped: 0, unsupported: 0, test_id: empty_text_value(),
+        test_status: empty_text_value(), test_verdict: empty_text_value(),
+        test_failure_message: empty_text_value(), test_failure_truthy: false,
+        root_failure_message: empty_text_value(), root_failure_truthy: false,
+        number_kind: 0, number_value: 0, number_valid: true,
+        writer: empty_text_buffer()
+    };
+}
+
+fn scan_chunk_step(state: TextProjectionStateV1, chunk: JsonTextInputChunkV1, index: u64) -> (result: TextProjectionStateV1) {
+    if index >= chunk.length { return state; }
+    return scan_byte(state, chunk.bytes[index]);
+}
+
+fn text_projection(state: TextProjectionStateV1, input_sha256: [byte; up_to 64]) -> (result: TextProjectionResultV1) {
+    let id: TextBufferV1 = text_append_value(empty_text_buffer(), state.root_id, [109, 110, 99, 115, 45, 116, 101, 115, 116]);
+    let id_colon: TextBufferV1 = text_append_literal(id, [58, 32]);
+    let verdict: TextBufferV1 = text_append_value(id_colon, state.root_verdict, [78, 111, 110, 101]);
+    let classification_open: TextBufferV1 = text_append_literal(verdict, [32, 40]);
+    let classification: TextBufferV1 = text_append_value(classification_open, state.root_classification, [78, 111, 110, 101]);
+    let summary_open: TextBufferV1 = text_append_literal(classification, [41, 32, 226, 128, 148, 32]);
+    let passed: TextBufferV1 = text_append_count(summary_open, state.passed);
+    let passed_text: TextBufferV1 = text_append_literal(passed, [32, 112, 97, 115, 115, 101, 100, 44, 32]);
+    let failed: TextBufferV1 = text_append_count(passed_text, state.failed);
+    let failed_text: TextBufferV1 = text_append_literal(failed, [32, 102, 97, 105, 108, 101, 100, 44, 32]);
+    let skipped: TextBufferV1 = text_append_count(failed_text, state.skipped);
+    let skipped_text: TextBufferV1 = text_append_literal(skipped, [32, 115, 107, 105, 112, 112, 101, 100, 44, 32]);
+    let unsupported: TextBufferV1 = text_append_count(skipped_text, state.unsupported);
+    let complete_summary: TextBufferV1 = text_append_literal(unsupported, [32, 117, 110, 115, 117, 112, 112, 111, 114, 116, 101, 100, 10]);
+    let prefixed: TextBufferV1 = writer_prepend(state.writer, complete_summary);
+    let failure_prefix: TextBufferV1 = select(state.root_failure_truthy, text_append_literal(prefixed, [102, 97, 105, 108, 117, 114, 101, 58, 32]), prefixed);
+    let failure_text: TextBufferV1 = select(state.root_failure_truthy, text_append_optional(failure_prefix, state.root_failure_message), failure_prefix);
+    let complete: TextBufferV1 = select(state.root_failure_truthy, text_append_literal(failure_text, [10]), failure_text);
+    let cursor_finished: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(state.cursor);
+    let supported: bool = state.valid && complete.valid
+        && json_tokens.cursor_is_valid_v1(cursor_finished)
+        && input_sha256.len == 64;
+    let chunks: TextProjectionChunkBuilderV1 = output_chunks(complete);
+    return TextProjectionResultV1 {
+        schema_version: result_schema(),
+        supported: supported,
+        done: true,
+        input_sha256: input_sha256,
+        byte_length: select(supported, complete.length, 0),
+        chunk_count: select(supported, chunks.count, 0),
+        chunks: chunks.chunks[0..select(supported, chunks.count, 0)],
+        state: initial_state()
+    };
+}
+
+fn scan_document(state: TextProjectionStateV1, document: JsonTextDocumentV1) -> (result: TextProjectionStateV1) {
+    iterate i over document.chunks carrying output: TextProjectionStateV1 = state {
+        let chunk: JsonTextInputChunkV1 = document.chunks[i];
+        let after_chunk: TextProjectionStateV1 = output;
+        iterate j up_to 1024 carrying current: TextProjectionStateV1 = after_chunk {
+            next current = scan_chunk_step(current, chunk, j);
+        }
+        next output = current;
+    }
+    return output;
+}
+
+fn continuation_projection(state: TextProjectionStateV1, input_sha256: [byte; up_to 64]) -> (result: TextProjectionResultV1) {
+    let supported: bool = state.valid && state.writer.valid
+        && state.cursor.valid && state.cursor.scan_state.valid
+        && input_sha256.len == 64;
+    return TextProjectionResultV1 {
+        schema_version: result_schema(), supported: supported, done: false,
+        input_sha256: input_sha256, byte_length: 0, chunk_count: 0,
+        chunks: [], state: state
+    };
+}
+
+fn run_projection(request: JsonTextRequestV1) -> (result: TextProjectionResultV1) {
+    let valid_request: bool = same_bytes(request.schema_version, request_schema())
+        && document_shape(request.document) && request.input_sha256.len == 64;
+    if !valid_request {
+        return TextProjectionResultV1 {
+            schema_version: result_schema(), supported: false, done: true,
+            input_sha256: request.input_sha256, byte_length: 0,
+            chunk_count: 0, chunks: [], state: initial_state()
+        };
+    }
+    let output: TextProjectionStateV1 = scan_document(initial_state(), request.document);
+    if request.more { return continuation_projection(output, request.input_sha256); }
+    return text_projection(output, request.input_sha256);
+}
+
+fn run_window_projection(request: JsonTextWindowRequestV1) -> (result: TextProjectionResultV1) {
+    let valid_request: bool = same_bytes(request.schema_version, window_request_schema())
+        && document_shape(request.document) && request.input_sha256.len == 64
+        && request.state.valid && request.state.writer.valid
+        && request.state.cursor.valid && request.state.cursor.scan_state.valid;
+    if !valid_request {
+        return TextProjectionResultV1 {
+            schema_version: result_schema(), supported: false, done: true,
+            input_sha256: request.input_sha256, byte_length: 0,
+            chunk_count: 0, chunks: [], state: initial_state()
+        };
+    }
+    let output: TextProjectionStateV1 = scan_document(request.state, request.document);
+    if request.more { return continuation_projection(output, request.input_sha256); }
+    return text_projection(output, request.input_sha256);
+}
+
+fn public_result_text_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 112, 117, 98, 108, 105, 99, 32, 116, 101, 120, 116, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: JsonTextRequestV1 = structured_read(context.argv[0], request_schema());
+    let result: TextProjectionResultV1 = run_projection(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 { return failure([110, 97, 116, 105, 118, 101, 32, 84, 101, 115, 116, 82, 101, 115, 117, 108, 116, 32, 116, 101, 120, 116, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3); }
+    return success([]);
+}
+
+fn public_result_text_window_app_v1(context: ApplicationContext) -> (result: ApplicationExit)
+    capability test_artifact
+    effect structured_read authorized_by test_artifact
+    effect structured_write authorized_by test_artifact
+{
+    if !context_is_bounded(context) || context.argv_count < 2 {
+        return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 112, 117, 98, 108, 105, 99, 32, 116, 101, 120, 116, 32, 112, 114, 111, 106, 101, 99, 116, 105, 111, 110, 32, 112, 97, 116, 104, 115], 2);
+    }
+    let request: JsonTextWindowRequestV1 = structured_read(context.argv[0], window_request_schema());
+    let result: TextProjectionResultV1 = run_window_projection(request);
+    let published: u64 = structured_write(context.argv[1], result_schema(), result);
+    if published == 0 { return failure([110, 97, 116, 105, 118, 101, 32, 84, 101, 115, 116, 82, 101, 115, 117, 108, 116, 32, 116, 101, 120, 116, 32, 112, 117, 98, 108, 105, 115, 104, 32, 102, 97, 105, 108, 101, 100], 3); }
+    return success([]);
+}

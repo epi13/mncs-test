@@ -559,6 +559,18 @@ class RunnerTests(unittest.TestCase):
             document = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual(document["schema_version"], "mncs.test-result/1")
             self.assertEqual(document["verdict"], "PASS")
+            reference_text = io.StringIO()
+            with redirect_stdout(reference_text):
+                mncs_test.print_result(document, "text")
+            native_text = mncs_test._native_public_result_text_payload(
+                result.read_bytes(),
+                mncs=str(MNCS),
+                cwd=REPO,
+                environment=mncs_test.native_application_environment(REPO),
+            )
+            self.assertEqual(completed.stdout, reference_text.getvalue())
+            if native_text is not None:
+                self.assertEqual(native_text.decode("utf-8"), reference_text.getvalue())
             identity_material = {
                 "manifest": document["provenance"]["manifest"],
                 "source": document["provenance"]["source"],

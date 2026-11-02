@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -522,6 +524,107 @@ def test_print_result_uses_preformatted_json_without_host_reserialization(
         )
 
     assert capsys.readouterr().out.encode("utf-8") == payload
+
+
+def test_native_text_result_projection_matches_reference_and_declines_escapes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = {
+        "id": "mncs:test-native-text 🪐",
+        "verdict": "FAIL",
+        "classification": "test_failure",
+        "summary": {"passed": 1, "failed": 1, "skipped": 1, "unsupported": 1},
+        "tests": [
+            {
+                "id": "case-雪",
+                "status": "failed",
+                "verdict": "FAIL",
+                "failure": {"message": "Lúna 東京 — expected 4, observed 3"},
+            },
+            {"id": "case-ok", "status": "passed", "verdict": "PASS"},
+            {
+                "id": "case-empty-failure",
+                "status": "passed",
+                "verdict": "PASS",
+                "failure": {},
+            },
+        ],
+        "failure": {"message": "suite failure: independent golden"},
+    }
+    mncs_test.print_result(result, "text")
+    expected = capsys.readouterr().out.encode("utf-8")
+
+    payload = _python_result_bytes(result)
+    native_apps: list[str] = []
+    real_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(
+        name: str,
+        request: dict[str, object],
+        **kwargs: object,
+    ) -> dict[str, object]:
+        native_apps.append(name)
+        return real_run_native_app(name, request, **kwargs)
+
+    with mock.patch.object(mncs_test, "run_native_app", side_effect=observe_native_app):
+        actual = mncs_test._native_public_result_text_payload(
+            payload,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+    assert actual == expected
+    assert native_apps == ["test-public-result-text.json"]
+
+    wide_document = _python_result_bytes({**result, "unused_payload": "x" * 20000})
+    assert 8192 < len(wide_document) <= 65536
+    with mock.patch.object(mncs_test, "run_native_app", side_effect=observe_native_app):
+        wide_actual = mncs_test._native_public_result_text_payload(
+            wide_document,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+    assert wide_actual == expected
+    wide_window_count = (
+        len(mncs_test._public_result_input_chunks(wide_document))
+        + mncs_test.PUBLIC_RESULT_TEXT_WINDOW_CHUNKS
+        - 1
+    ) // mncs_test.PUBLIC_RESULT_TEXT_WINDOW_CHUNKS
+    assert native_apps == ["test-public-result-text.json"] * 2 + [
+        "test-public-result-text-window.json"
+    ] * (wide_window_count - 1)
+
+    mncs_test.print_result(result, "text", serialized_text=actual)
+    assert capsys.readouterr().out.encode("utf-8") == expected
+
+    empty_root_failure = {**result, "failure": {}}
+    mncs_test.print_result(empty_root_failure, "text")
+    empty_root_expected = capsys.readouterr().out.encode("utf-8")
+    empty_root_actual = mncs_test._native_public_result_text_payload(
+        _python_result_bytes(empty_root_failure),
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    )
+    assert empty_root_actual == empty_root_expected
+
+    escaped = {
+        **result,
+        "tests": [{
+            "id": "case",
+            "status": "failed",
+            "verdict": "FAIL",
+            "failure": {"message": "line one\nline two"},
+        }],
+    }
+    assert mncs_test._native_public_result_text_payload(
+        _python_result_bytes(escaped),
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+    ) is None
 
 
 def test_family_check_error_response_uses_native_json_serializer(
@@ -2258,6 +2361,8 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
             call["status"] = "failed"
             raise
         call["status"] = "success"
+        call["supported"] = result.get("supported")
+        call["done"] = result.get("done")
         return result
 
     def observe_compatibility_serializer(value: object) -> bytes:
@@ -2284,7 +2389,7 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
         "--artifacts",
         str(tmp_path / "artifacts"),
         "--format",
-        "json",
+        "text",
     ]
     embed_library = MNCS.parent / "libmncs_embed.so"
     if embed_library.is_file():
@@ -2309,7 +2414,10 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
     assert document["tests"][0]["status"] == "expected_failure"
     assert document["tests"][0]["diagnostics"]
     assert result_path.read_bytes() == _python_result_bytes(document)
-    assert captured.out.encode("utf-8") == result_path.read_bytes()
+    reference_text = io.StringIO()
+    with redirect_stdout(reference_text):
+        mncs_test.print_result(document, "text")
+    assert captured.out == reference_text.getvalue()
     assert public_calls
     assert all(call["status"] == "success" for call in public_calls)
     assert all(call.get("input_bytes", 0) > 0 for call in public_calls)
@@ -2318,5 +2426,17 @@ def test_compile_failure_runner_keeps_medium_public_result_native(
         for call in public_calls
     )
     assert all(not call.get("has_typed_tree") for call in public_calls)
+    text_calls = [
+        call
+        for call in app_calls
+        if call["application"] in {
+            "test-public-result-text.json",
+            "test-public-result-text-window.json",
+        }
+    ]
+    assert text_calls
+    assert all(call["status"] == "success" for call in text_calls)
+    assert text_calls[-1]["supported"] is True
+    assert text_calls[-1]["done"] is True
     assert compatibility_documents == []
 

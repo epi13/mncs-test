@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.public-result-text-window",
+  "source": "../native/mncs/test/public_result_text_v1.mncs",
+  "module": "mncs.test.public_result_text_v1",
+  "entry_function": "public_result_text_window_app_v1",
+  "profile": "0.18",
+  "interface_identity": "c762b95f172f4bb91f7f30a9e5a16785eb3349bb1ee91bdb5d3ca02f24ab890b",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": [
+    "test_artifact"
+  ]
+}
