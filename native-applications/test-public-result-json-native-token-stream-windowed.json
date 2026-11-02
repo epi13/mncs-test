@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.native-application/1",
+  "application_identity": "mncs-test.public-result-json-native-token-stream-windowed",
+  "source": "../native/mncs/test/public_result_json_token_tape_v1.mncs",
+  "module": "mncs.test.public_result_json_token_tape_v1",
+  "entry_function": "public_result_json_native_token_stream_windowed_app_v1",
+  "profile": "0.18",
+  "interface_identity": "90a9bc2ec1dbf99ed65b6c256d2f774950857c7013ab6df8ee0ebbb7dad89558",
+  "libraries": [
+    "../../mncs-stdlib/library",
+    "../native"
+  ],
+  "environment_keys": [],
+  "required_capabilities": [
+    "test_artifact"
+  ]
+}

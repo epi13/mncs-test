@@ -1483,6 +1483,84 @@ def test_native_document_route_handles_key_order_decline_from_encoded_document(
     assert "tape" not in stream_request
 
 
+def test_native_windowed_token_stream_handles_a_medium_document_without_host_tokens(
+    tmp_path: Path,
+) -> None:
+    value = {
+        f"field-{index:02d}": chr(65 + index) * 150
+        for index in reversed(range(40))
+    }
+    source = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+    assert 4096 < len(source) <= mncs_test.PUBLIC_RESULT_JSON_NATIVE_TOKEN_STREAM_WINDOWED_MAX_BYTES
+    expected = _python_result_bytes(value)
+
+    with (
+        mock.patch.object(mncs_test, "PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES", 1),
+        mock.patch.object(mncs_test, "PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES", 1),
+        mock.patch.object(
+            mncs_test, "run_native_app", wraps=mncs_test.run_native_app
+        ) as native_app,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert "test-public-result-json-native-token-stream-windowed.json" in applications
+    assert "test-public-result-json-source-digest.json" in applications
+    assert not {
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-native-token-tape-window.json",
+        "test-public-result-json-token-tape.json",
+        "test-public-result-json-token.json",
+    }.intersection(applications)
+    windowed_request = next(
+        call.args[1]
+        for call in native_app.call_args_list
+        if call.args[0] == "test-public-result-json-native-token-stream-windowed.json"
+    )
+    assert set(windowed_request) == {"schema_version", "document", "input_sha256"}
+    assert "token_words" not in windowed_request
+    assert "tape" not in windowed_request
+
+
+def test_native_windowed_token_stream_rejects_a_tampered_source_digest(
+    tmp_path: Path,
+) -> None:
+    value = {
+        f"field-{index:02d}": chr(65 + index) * 150
+        for index in reversed(range(40))
+    }
+    source = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+    prepared = mncs_test._native_public_result_document_request(source)
+    assert prepared is not None
+    start_request, _source_length = prepared
+    request = {
+        "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
+        "document": start_request["document"],
+        "input_sha256": "0" * 64,
+    }
+
+    result = mncs_test.run_native_app(
+        "test-public-result-json-native-token-stream-windowed.json",
+        request,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+
+    assert result["supported"] is False
+    assert result["request_valid"] is False
+
+
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:
     value = {f"key-{index:02d}": chr(65 + index) * 600 for index in reversed(range(10))}
     expected = _python_result_bytes(value)
@@ -1562,6 +1640,7 @@ def test_native_packed_token_route_handles_a_33_kibibyte_object_after_key_order_
     assert digest == hashlib.sha256(expected).hexdigest()
     calls = [call.args[0] for call in native_app.call_args_list]
     assert calls[0] == "test-public-result-json-key-order.json"
+    assert "test-public-result-json-native-token-stream-windowed.json" not in calls
     assert native_results[0][0] == "test-public-result-json-native-token-tape.json"
     _assert_native_raw_token_route(calls)
     assert "test-public-result-json-token-tape.json" in [
@@ -2004,11 +2083,19 @@ def test_budget_exhaustion_preserves_compatibility_json_for_single_and_window_pa
 ) -> None:
     values = [
         {"small": [True, False, None]},
+        {
+            f"field-{index:02d}": chr(65 + index) * 150
+            for index in reversed(range(40))
+        },
         _large_result_splitting_utf8_at_native_chunk(),
     ]
     expected_applications = [
         "test-public-result-json-key-order.json",
         "test-public-result-json-native-token-stream.json",
+        "test-public-result-json-native-token-tape.json",
+        "test-public-result-json-token.json",
+        "test-public-result-json-key-order.json",
+        "test-public-result-json-native-token-stream-windowed.json",
         "test-public-result-json-native-token-tape.json",
         "test-public-result-json-token.json",
         "test-public-result-json-token.json",
