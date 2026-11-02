@@ -699,7 +699,7 @@ def test_raw_selection_mapping_falls_back_when_native_key_order_declines(
 def test_native_public_document_bound_keeps_full_multichunk_projection(
     tmp_path: Path,
 ) -> None:
-    message = "x" * 1025
+    message = "x🛰️" * 512
     result = {
         "schema_version": mncs_test.RESULT_SCHEMA,
         "id": "source-multichunk",
@@ -716,9 +716,11 @@ def test_native_public_document_bound_keeps_full_multichunk_projection(
         "test_inventory": {"inventory_identity": "b" * 64},
         "experiment": {"run_identity": "run-multichunk-public-document"},
     }
+    result_document = mncs_test.json_bytes(result)
+    result_digest = "e" * 64
     response = mncs_test._native_check_result_json_response(
-        mncs_test.json_bytes(result),
-        result_digest="e" * 64,
+        result_document,
+        result_digest=result_digest,
         mncs=str(MNCS),
         cwd=tmp_path,
         environment=_environment(),
@@ -729,9 +731,83 @@ def test_native_public_document_bound_keeps_full_multichunk_projection(
 
     assert response is not None
     assert response["supported"] is True
-    assert response["projection_document_supported"] is False
-    assert response["_public_check_result_document"] is None
-    assert "".join(response["projection"]["unresolved_chunks"]) == message
+    assert response["projection_document_supported"] is True
+    public_document = response["_public_check_result_document"]
+    assert isinstance(public_document, bytes)
+    assert response["projection"]["unresolved_chunks"] == []
+    assert mncs_test.json.loads(public_document)["unresolved"] == [message]
+
+    family = mncs_test._family_check_metadata_from_native(
+        response, result_document
+    )
+    assert family is not None
+    family_metadata = response["family_metadata"]
+    assert family["selection_json"] == result_document[
+        family_metadata["selection_start"] :
+        family_metadata["selection_start"] + family_metadata["selection_length"]
+    ]
+    payload, digest = mncs_test._public_result_json_payload_with_raw_selection(
+        None,
+        family["selection_json"],
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        native_document=public_document,
+    )
+    compatibility = mncs_test.check_result(
+        result,
+        result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:multichunk-public-document",
+        claim="Exercise the bounded native public CheckResult document",
+    )
+    assert payload == mncs_test.json_bytes(compatibility)
+    assert digest == mncs_test.sha256_bytes(payload)
+
+    overflow_message = "x🛰️" * 513
+    overflow_result = dict(result, failure={"message": overflow_message})
+    overflow_document = mncs_test.json_bytes(overflow_result)
+    overflow_response = mncs_test._native_check_result_json_response(
+        overflow_document,
+        result_digest=result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:multichunk-public-document",
+        claim="Exercise the bounded native public CheckResult document",
+        preserve_public_projection_document=True,
+    )
+    assert overflow_response is not None
+    assert overflow_response["supported"] is True
+    assert overflow_response["projection_document_supported"] is False
+    assert overflow_response["_public_check_result_document"] is None
+    overflow_native = mncs_test.check_result(
+        None,
+        result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:multichunk-public-document",
+        claim="Exercise the bounded native public CheckResult document",
+        test_result_document=overflow_document,
+        native_json_response=overflow_response,
+        native_json_response_prepared=True,
+        preserve_selection=False,
+    )
+    overflow_compatibility = mncs_test.check_result(
+        overflow_result,
+        result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        check_id="family:multichunk-public-document",
+        claim="Exercise the bounded native public CheckResult document",
+        preserve_selection=False,
+    )
+    assert overflow_native == overflow_compatibility
+    assert overflow_native["unresolved"] == [overflow_message]
 
 
 def test_raw_selection_public_result_uses_compatible_host_fallback(

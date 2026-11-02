@@ -4,8 +4,8 @@
   "source": "../native/mncs/test/check_result_json_native_v1.mncs",
   "module": "mncs.test.check_result_json_native_v1",
   "entry_function": "check_result_json_native_app_v1",
-  "profile": "0.18",
-  "interface_identity": "d964f205d534dd4994b02f125767806a9c013f742648e9615e04ec8a732714c4",
+  "profile": "0.19",
+  "interface_identity": "4bf285a296cfce9bd4147a390b5079d85886a7cafe65533dce9bf414f1516bd0",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

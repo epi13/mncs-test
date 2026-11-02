@@ -1,4 +1,4 @@
-mncs 0.18;
+mncs 0.19;
 
 // Validate the retained TestResult and produced CheckResult with bounded
 // native cursor scans. Project CheckResult and family policy fields without
@@ -82,11 +82,17 @@ record CheckResultPublicDocumentV1 {
     contract_revision: [byte; up_to 64],
     producer_revision: [byte; up_to 1024],
     digest: [byte; up_to 1024],
-    unresolved: [[byte; up_to 1024]; up_to 1],
+    unresolved: [[byte; up_to 4096]; up_to 1],
     references: [check_result.CheckReferenceV1; up_to 1],
     result_ref: check_result.CheckResultReferenceV1,
     classification: [byte; up_to 128],
     failure_class: [byte; up_to 128]
+}
+
+record PublicUnresolvedJoinV1 {
+    bytes: [byte; 4096],
+    length: u64,
+    supported: bool
 }
 
 record TokenValueSpanV1 { found: bool, kind: byte, start: u64, length: u64 }
@@ -2240,24 +2246,81 @@ fn inspect_check_artifact(
     };
 }
 
-fn first_public_unresolved(
-    projection: check_result.CheckResultProjectionV1
-) -> (result: [byte; up_to 1024]) {
-    if projection.unresolved_chunks.len > 0 {
-        return projection.unresolved_chunks[0];
+fn empty_public_unresolved_join() -> (result: PublicUnresolvedJoinV1) {
+    return PublicUnresolvedJoinV1 { bytes: [0; 4096], length: 0, supported: true };
+}
+
+fn append_public_unresolved_byte(
+    state: PublicUnresolvedJoinV1,
+    chunk: [byte; up_to 1024],
+    offset: u64
+) -> (result: PublicUnresolvedJoinV1) {
+    if !state.supported || offset >= chunk.len { return state; }
+    if state.length >= 4096 {
+        return PublicUnresolvedJoinV1 {
+            bytes: state.bytes, length: state.length, supported: false
+        };
     }
-    return [];
+    return PublicUnresolvedJoinV1 {
+        bytes: replace(state.bytes, state.length, chunk[offset]),
+        length: state.length +% 1,
+        supported: true
+    };
+}
+
+fn append_public_unresolved_chunk(
+    state: PublicUnresolvedJoinV1,
+    chunk: [byte; up_to 1024]
+) -> (result: PublicUnresolvedJoinV1) {
+    if !state.supported || chunk.len > 4096 -% state.length {
+        return PublicUnresolvedJoinV1 {
+            bytes: state.bytes, length: state.length, supported: false
+        };
+    }
+    iterate i up_to 1024 carrying joined: PublicUnresolvedJoinV1 = state {
+        next joined = append_public_unresolved_byte(joined, chunk, i);
+    }
+    return joined;
+}
+
+fn public_unresolved_chunk_at(
+    projection: check_result.CheckResultProjectionV1,
+    index: u64
+) -> (result: [byte; up_to 1024]) {
+    if index >= projection.unresolved_chunks.len { return []; }
+    return projection.unresolved_chunks[index];
+}
+
+fn join_public_unresolved_chunks(
+    projection: check_result.CheckResultProjectionV1
+) -> (result: PublicUnresolvedJoinV1) {
+    if projection.unresolved_chunks.len > 5 {
+        let empty: PublicUnresolvedJoinV1 = empty_public_unresolved_join();
+        return PublicUnresolvedJoinV1 { bytes: empty.bytes, length: empty.length, supported: false };
+    }
+    iterate i up_to 5 carrying joined: PublicUnresolvedJoinV1 = empty_public_unresolved_join() {
+        let chunk: [byte; up_to 1024] = public_unresolved_chunk_at(projection, i);
+        next joined = append_public_unresolved_chunk(joined, chunk);
+    }
+    return joined;
+}
+
+fn public_unresolved_for_document(
+    projection: check_result.CheckResultProjectionV1,
+    requested: bool
+) -> (result: PublicUnresolvedJoinV1) {
+    if requested { return join_public_unresolved_chunks(projection); }
+    return empty_public_unresolved_join();
 }
 
 fn public_check_result_document(
-    projection: check_result.CheckResultProjectionV1
+    projection: check_result.CheckResultProjectionV1,
+    unresolved_join: PublicUnresolvedJoinV1
 ) -> (result: CheckResultPublicDocumentV1) {
-    let empty_unresolved: [[byte; up_to 1024]; up_to 1] = [];
-    let first_unresolved: [byte; up_to 1024] = first_public_unresolved(projection);
-    let one_unresolved: [[byte; up_to 1024]; up_to 1] = select(
-        projection.unresolved_present && projection.unresolved_chunks.len == 1,
-        [first_unresolved],
-        empty_unresolved
+    let unresolved: [[byte; up_to 4096]; up_to 1] = select(
+        projection.unresolved_present && unresolved_join.supported,
+        [unresolved_join.bytes[0..unresolved_join.length]],
+        []
     );
     return CheckResultPublicDocumentV1 {
         schema_version: projection.result_schema_version,
@@ -2270,7 +2333,7 @@ fn public_check_result_document(
         contract_revision: projection.contract_revision,
         producer_revision: projection.producer_revision,
         digest: projection.digest,
-        unresolved: one_unresolved,
+        unresolved: unresolved,
         references: projection.references,
         result_ref: projection.result_ref,
         classification: projection.classification,
@@ -2340,12 +2403,15 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
     let projection: check_result.CheckResultProjectionV1 = check_result.build_result(
         selected_request
     );
+    let public_unresolved: PublicUnresolvedJoinV1 = public_unresolved_for_document(
+        projection, request.projection_document_only
+    );
     let public_projection: CheckResultPublicDocumentV1 = public_check_result_document(
-        projection
+        projection, public_unresolved
     );
     let projection_document_eligible: bool = request.projection_document_only
         && context.argv_count >= 3 && supported && family_metadata.supported
-        && (!projection.unresolved_present || projection.unresolved_chunks.len == 1);
+        && public_unresolved.supported;
     let public_projection_published: u64 = publish_public_check_result_document(
         context, public_projection, projection_document_eligible
     );
