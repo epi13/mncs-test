@@ -235,6 +235,11 @@ record CheckResultTokenStateV1 {
     row_seen_verdict: bool
 }
 
+record TokenDocumentScanStateV1 {
+    token_state: CheckResultTokenStateV1,
+    digest_state: sha256.DigestState
+}
+
 record TokenKeyHistoryScanV1 {
     remaining: TokenKeyListV1,
     duplicate: bool
@@ -1772,33 +1777,46 @@ fn consume_token_events(
 }
 
 fn token_scan_block(
-    state: CheckResultTokenStateV1,
+    state: TokenDocumentScanStateV1,
     document: json_order.JsonTokenDocumentV1,
     chunk: json_order.JsonTokenInputChunkV1,
     chunk_base: u64,
     block_start: u64
-) -> (result: CheckResultTokenStateV1) {
+) -> (result: TokenDocumentScanStateV1) {
     let captured: TokenCaptureStateV1 = capture_token_block(
-        state.cursor, state.scanner_string_has_escape, chunk, chunk_base, block_start
+        state.token_state.cursor, state.token_state.scanner_string_has_escape,
+        chunk, chunk_base, block_start
     );
     let scanned: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
-        ..state,
+        ..state.token_state,
         cursor: captured.cursor,
         scanner_string_has_escape: captured.string_had_escape,
-        valid: state.valid && captured.cursor.valid
+        valid: state.token_state.valid && captured.cursor.valid
     };
-    return consume_token_events(
+    let tokenized: CheckResultTokenStateV1 = consume_token_events(
         scanned, captured, document, captured.cursor
     );
+    if block_start >= chunk.length {
+        return TokenDocumentScanStateV1 {
+            token_state: tokenized, digest_state: state.digest_state
+        };
+    }
+    let remaining: u64 = chunk.length -% block_start;
+    let block_length: u64 = select(remaining < 64, remaining, 64);
+    let part: [byte; up_to 64] = chunk.bytes[block_start..block_start +% block_length];
+    return TokenDocumentScanStateV1 {
+        token_state: tokenized,
+        digest_state: sha256.update_standard(state.digest_state, part, block_length)
+    };
 }
 
 fn token_scan_chunk(
-    state: CheckResultTokenStateV1,
+    state: TokenDocumentScanStateV1,
     document: json_order.JsonTokenDocumentV1,
     chunk: json_order.JsonTokenInputChunkV1
-) -> (result: CheckResultTokenStateV1) {
-    let chunk_base: u64 = state.cursor.position;
-    iterate block up_to 16 carrying current: CheckResultTokenStateV1 = state {
+) -> (result: TokenDocumentScanStateV1) {
+    let chunk_base: u64 = state.token_state.cursor.position;
+    iterate block up_to 16 carrying current: TokenDocumentScanStateV1 = state {
         next current = token_scan_block(
             current, document, chunk, chunk_base, block *% 64
         );
@@ -1809,25 +1827,58 @@ fn token_scan_chunk(
 fn token_scan_document(
     document: json_order.JsonTokenDocumentV1,
     selection_digest_mode: bool
-) -> (result: CheckResultTokenStateV1) {
-    iterate i over document.chunks carrying state: CheckResultTokenStateV1 = empty_token_state(selection_digest_mode) {
+) -> (result: TokenDocumentScanStateV1) {
+    let initial: TokenDocumentScanStateV1 = TokenDocumentScanStateV1 {
+        token_state: empty_token_state(selection_digest_mode),
+        digest_state: sha256.init()
+    };
+    iterate i over document.chunks carrying state: TokenDocumentScanStateV1 = initial {
         next state = token_scan_chunk(state, document, document.chunks[i]);
     }
-    let finished: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(state.cursor);
+    let finished: json_tokens.CursorV1 = json_tokens.cursor_finish_v1(
+        state.token_state.cursor
+    );
     let with_finish: CheckResultTokenStateV1 = CheckResultTokenStateV1 {
-        ..state, cursor: finished,
-        valid: state.valid && json_tokens.cursor_is_valid_v1(finished)
+        ..state.token_state, cursor: finished,
+        valid: state.token_state.valid && json_tokens.cursor_is_valid_v1(finished)
     };
-    if finished.token_event { return token_cursor_event(with_finish, document, false); }
-    return with_finish;
+    if finished.token_event {
+        let completed: CheckResultTokenStateV1 = token_cursor_event(
+            with_finish, document, false
+        );
+        return TokenDocumentScanStateV1 { ..state, token_state: completed };
+    }
+    return TokenDocumentScanStateV1 { ..state, token_state: with_finish };
+}
+
+fn valid_order_header(
+    document: json_order.JsonTokenDocumentV1,
+    input_sha256: [byte; up_to 64],
+    shape: json_order.DocumentShapeV1
+) -> (result: bool) {
+    return shape.valid && document.byte_length <= 65536
+        && input_sha256.len == 64;
 }
 
 fn checked_token_scan(
     document: json_order.JsonTokenDocumentV1,
     request_valid: bool,
-    selection_digest_mode: bool
+    selection_digest_mode: bool,
+    expected_input_sha256: [byte; up_to 64]
 ) -> (result: CheckResultTokenStateV1) {
-    if request_valid { return token_scan_document(document, selection_digest_mode); }
+    if request_valid {
+        let scanned: TokenDocumentScanStateV1 = token_scan_document(
+            document, selection_digest_mode
+        );
+        let input_sha256: [byte; up_to 64] = json_order.encode_digest(
+            sha256.finalize_standard(scanned.digest_state)
+        );
+        return CheckResultTokenStateV1 {
+            ..scanned.token_state,
+            valid: scanned.token_state.valid
+                && json_order.same_bytes(input_sha256, expected_input_sha256)
+        };
+    }
     return CheckResultTokenStateV1 { ..empty_token_state(selection_digest_mode), valid: false };
 }
 
@@ -2165,15 +2216,12 @@ fn inspect_check_artifact(
     family_metadata: FamilyResultMetadataV1
 ) -> (result: CheckArtifactMetadataV1) {
     if !request.check_document_present { return empty_check_artifact_metadata(); }
-    let order_request: json_order.JsonOrderRequestV1 = json_order.JsonOrderRequestV1 {
-        schema_version: json_order.request_schema_v1(),
-        document: request.check_document,
-        input_sha256: request.check_input_sha256
-    };
     let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.check_document);
-    let transport_valid: bool = json_order.valid_order_request(order_request, shape);
+    let transport_valid: bool = valid_order_header(
+        request.check_document, request.check_input_sha256, shape
+    );
     let tokenized: CheckResultTokenStateV1 = checked_token_scan(
-        request.check_document, transport_valid, false
+        request.check_document, transport_valid, false, request.check_input_sha256
     );
     let supported: bool = transport_valid && tokenized.valid
         && json_tokens.cursor_is_valid_v1(tokenized.cursor);
@@ -2280,15 +2328,13 @@ fn check_result_json_native_app_v1(context: ApplicationContext) -> (result: Appl
         return failure([97, 114, 103, 118, 32, 114, 101, 113, 117, 105, 114, 101, 115, 32, 50, 32, 67, 104, 101, 99, 107, 82, 101, 115, 117, 108, 116, 32, 74, 83, 79, 78, 32, 112, 97, 116, 104, 115], 2);
     }
     let request: CheckResultJsonNativeRequestV1 = structured_read(context.argv[0], request_schema());
-    let order_request: json_order.JsonOrderRequestV1 = json_order.JsonOrderRequestV1 {
-        schema_version: json_order.request_schema_v1(),
-        document: request.document,
-        input_sha256: request.input_sha256
-    };
     let shape: json_order.DocumentShapeV1 = json_order.document_shape(request.document);
-    let transport_valid: bool = json_order.valid_order_request(order_request, shape);
+    let transport_valid: bool = valid_order_header(
+        request.document, request.input_sha256, shape
+    );
     let tokenized: CheckResultTokenStateV1 = checked_token_scan(
-        request.document, transport_valid, request.selection_digest_expectation_present
+        request.document, transport_valid,
+        request.selection_digest_expectation_present, request.input_sha256
     );
     let extracted: ExtractedTestResultV1 = extract_token_result(
         request.document, tokenized, request

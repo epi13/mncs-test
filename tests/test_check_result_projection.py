@@ -1232,3 +1232,47 @@ def test_native_check_result_projection_uses_string_scope_for_minimal_result(
     )
 
     assert projected["scope"] == "mncs-test"
+
+
+def test_native_check_result_projection_rejects_a_tampered_source_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "UNKNOWN",
+        "classification": "unsupported",
+        "failure_class": "unsupported_capability",
+        "failure": {"message": "digest mismatch fallback"},
+        "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        "tests": [],
+        "run_id": "run-tampered-source-digest",
+    }
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def tamper_source_digest(name: str, request: dict, **kwargs: object) -> dict:
+        if name != "test-check-result-json-native.json":
+            return original_run_native_app(name, request, **kwargs)
+        changed_request = {**request, "input_sha256": "0" * 64}
+        response = original_run_native_app(name, changed_request, **kwargs)
+        native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", tamper_source_digest)
+    projected = mncs_test.check_result(
+        result,
+        "c" * 64,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=document,
+    )
+
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is False
+    assert projected["unresolved"] == ["digest mismatch fallback"]
