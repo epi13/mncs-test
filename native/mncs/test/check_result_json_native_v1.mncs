@@ -1004,13 +1004,14 @@ fn key_history_has_duplicate(
     history: TokenKeyListV1,
     key: json_order.KeyV1
 ) -> (result: bool) {
-    let initial: TokenKeyHistoryScanV1 = TokenKeyHistoryScanV1 {
-        remaining: history, duplicate: false
+    return match history {
+        TokenKeyListV1.Nil => false,
+        TokenKeyListV1.Cons { head: head, tail: tail } => match json_order.compare_key(key, head) {
+            json_order.KeyOrderV1.Equal => true,
+            json_order.KeyOrderV1.Before => key_history_has_duplicate(tail, key),
+            json_order.KeyOrderV1.After => key_history_has_duplicate(tail, key)
+        }
     };
-    iterate i up_to 64 carrying scanned: TokenKeyHistoryScanV1 = initial {
-        next scanned = key_history_scan_step(scanned, key);
-    }
-    return scanned.duplicate;
 }
 
 fn mark_token_key(
