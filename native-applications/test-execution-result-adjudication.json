@@ -5,7 +5,7 @@
   "module": "mncs.test.execution_result_adjudication_v1",
   "entry_function": "execution_result_adjudication_app_v1",
   "profile": "0.18",
-  "interface_identity": "818f2088f2bf5a838a885cddb0e9d11b45ddc3a1f7dc61efaa5d341f8cebdf67",
+  "interface_identity": "6081e36d03746f9fc56e3b8f1f67f8ed4bf012f4ed192b2c970803e29e4a5abe",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"

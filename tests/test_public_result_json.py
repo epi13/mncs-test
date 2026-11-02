@@ -275,6 +275,39 @@ def test_native_key_order_reuses_transport_source_digest(tmp_path: Path) -> None
     assert digest.call_count == 1
 
 
+@pytest.mark.parametrize(
+    ("source", "digest_matches"),
+    [(b'{"a":1}', False), (b'{"a":', True)],
+    ids=["wrong-digest", "malformed-json"],
+)
+def test_native_key_order_rejects_unverified_documents(
+    source: bytes, digest_matches: bool, tmp_path: Path,
+) -> None:
+    packed = mncs_test._native_public_result_document_request(source)
+    assert packed is not None
+    start_request, _source_length = packed
+    request = {
+        "schema_version": mncs_test.PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA,
+        "document": start_request["document"],
+        "input_sha256": start_request["input_sha256"] if digest_matches else "0" * 64,
+    }
+
+    result = mncs_test.run_native_app(
+        "test-public-result-json-key-order.json",
+        request,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_KEY_ORDER_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_KEY_ORDER_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+
+    assert result["supported"] is False
+    assert result["document_length"] == 0
+    assert result["chunk_count"] == 0
+
+
 def test_native_document_serializer_reuses_transport_source_digest(
     tmp_path: Path,
 ) -> None:
@@ -1201,7 +1234,7 @@ def test_native_public_result_key_order_handles_641_and_642_scalar_members(
 @pytest.mark.parametrize(
     "count", [642], ids=["maximum-bound"]
 )
-def test_native_public_result_key_order_falls_back_for_unsorted_merge_budget(
+def test_native_public_result_key_order_handles_unsorted_members_at_maximum_bound(
     count: int, tmp_path: Path,
 ) -> None:
     indices = tuple((index * 73) % count for index in range(count))
@@ -1239,12 +1272,14 @@ def test_native_public_result_key_order_falls_back_for_unsorted_merge_budget(
 
     assert actual == expected
     assert digest == hashlib.sha256(expected).hexdigest()
-    assert budget_exhaustions == ["test-public-result-json-key-order.json"]
-    assert compact.call_args_list == [
-        mock.call(value, sort_keys=False),
-        mock.call(value),
-    ]
-    _assert_native_raw_token_route([name for name, _result in observed])
+    assert budget_exhaustions == []
+    assert compact.call_args_list == [mock.call(value, sort_keys=False)]
+    key_order = next(
+        result for name, result in observed
+        if name == "test-public-result-json-key-order.json"
+    )
+    assert key_order["supported"] is True
+    _assert_native_document_route(observed)
 
 
 @pytest.mark.parametrize(
