@@ -705,7 +705,19 @@ class RunnerTests(unittest.TestCase):
                     for item in document["tests"]
                 )
             )
-            self.assertEqual(json.loads(check.read_text(encoding="utf-8"))["verdict"], "PASS")
+            check_document = json.loads(check.read_text(encoding="utf-8"))
+            self.assertEqual(check_document["verdict"], "PASS")
+            expected_environment = mncs_test.command_environment(
+                [STDLIB_LIBRARY, REPO / "native"], dict(os.environ)
+            )
+            expected_check_document = mncs_test.check_result(
+                document,
+                mncs_test.sha256_bytes(result.read_bytes()),
+                mncs=str(MNCS),
+                cwd=REPO,
+                environment=expected_environment,
+            )
+            self.assertEqual(check_document, expected_check_document)
             self.assertTrue(list((artifacts / "requests").glob("*.json")))
             self.assertTrue(list((artifacts / "stdout").glob("*.out")))
 

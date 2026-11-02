@@ -8992,6 +8992,45 @@ def _family_check_metadata_from_native(
     }
 
 
+def _native_check_result_public_payload(
+    test_result_document: bytes,
+    *,
+    result_digest: str,
+    mncs: str,
+    cwd: Path,
+    environment: dict[str, str],
+) -> tuple[dict[str, Any] | None, tuple[bytes, str] | None]:
+    """Serialize a public CheckResult from native tokens without a Python value tree."""
+    response = _native_check_result_json_response(
+        test_result_document,
+        result_digest=result_digest,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        check_id=None,
+        claim=None,
+        preserve_public_projection_document=True,
+    )
+    family = _family_check_metadata_from_native(response, test_result_document)
+    if family is None:
+        return response, None
+    native_document = response.get("_public_check_result_document")
+    if not isinstance(native_document, bytes):
+        return response, None
+    selection_json = (
+        family["selection_json"] if family["selection_present"] else b"null"
+    )
+    payload = _public_result_json_payload_with_raw_selection(
+        None,
+        selection_json,
+        mncs=mncs,
+        cwd=cwd,
+        environment=environment,
+        native_document=native_document,
+    )
+    return response, payload
+
+
 def check_result(
     result: dict[str, Any] | None,
     result_digest: str,
@@ -11073,20 +11112,35 @@ def run_manifest(args: argparse.Namespace) -> int:
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_bytes(result_payload)
     if check_path:
-        write_output(
-            check_path,
-            check_result(
-                result,
-                result_digest or sha256_bytes(json_bytes(result)),
-                mncs=mncs,
-                cwd=cwd,
-                environment=environment,
-                test_result_document=result_payload,
-            ),
+        effective_result_digest = result_digest or sha256_bytes(json_bytes(result))
+        native_check_response, native_check_payload = _native_check_result_public_payload(
+            result_payload,
+            result_digest=effective_result_digest,
             mncs=mncs,
             cwd=cwd,
             environment=environment,
         )
+        if native_check_payload is not None:
+            check_path = check_path.resolve()
+            check_path.parent.mkdir(parents=True, exist_ok=True)
+            check_path.write_bytes(native_check_payload[0])
+        else:
+            write_output(
+                check_path,
+                check_result(
+                    result,
+                    effective_result_digest,
+                    mncs=mncs,
+                    cwd=cwd,
+                    environment=environment,
+                    test_result_document=result_payload,
+                    native_json_response=native_check_response,
+                    native_json_response_prepared=True,
+                ),
+                mncs=mncs,
+                cwd=cwd,
+                environment=environment,
+            )
     print_result(result, args.format, serialized_json=result_payload)
     return int(result["exit_code"])
 

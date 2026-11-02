@@ -521,6 +521,82 @@ def test_native_check_result_public_document_matches_independent_golden(
     }
 
 
+def test_native_run_check_result_payload_skips_python_result_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = {
+        "schema_version": mncs_test.RESULT_SCHEMA,
+        "id": "run-native-check-result",
+        "provider": "mncs-test",
+        "verdict": "PASS",
+        "scope": {"manifest": "mncs-test.toml"},
+        "classification": "success",
+        "failure_class": "none",
+        "summary": {"passed": 1, "failed": 0, "skipped": 0},
+        "tests": [{"id": "mncs:test-case:run-result", "verdict": "PASS"}],
+        "run_id": "run-native-check-result",
+        "selection": {
+            "selected_test_identities": ["mncs:test-case:run-result"],
+            "future": {"label": "opaque 🛰️", "flags": [True, None]},
+        },
+    }
+    document = mncs_test.json_bytes(result)
+    result_digest = mncs_test.sha256_bytes(document)
+    forbidden_documents = {document}
+    original_response = mncs_test._native_check_result_json_response
+
+    def observe_native_response(*args: object, **kwargs: object) -> dict | None:
+        response = original_response(*args, **kwargs)
+        if isinstance(response, dict):
+            native_document = response.get("_public_check_result_document")
+            if isinstance(native_document, bytes):
+                forbidden_documents.add(native_document)
+        return response
+
+    original_loads = mncs_test.json.loads
+
+    def reject_native_documents(value: object, *args: object, **kwargs: object) -> object:
+        encoded = value if isinstance(value, bytes) else (
+            value.encode("utf-8") if isinstance(value, str) else None
+        )
+        if encoded in forbidden_documents:
+            raise AssertionError("native TestResult and CheckResult documents must stay tokenized")
+        return original_loads(value, *args, **kwargs)
+
+    with monkeypatch.context() as local_patch:
+        local_patch.setattr(
+            mncs_test, "_native_check_result_json_response", observe_native_response
+        )
+        local_patch.setattr(mncs_test.json, "loads", reject_native_documents)
+        response, payload = mncs_test._native_check_result_public_payload(
+            document,
+            result_digest=result_digest,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_environment(),
+        )
+
+    assert response is not None
+    assert response["supported"] is True
+    assert response["projection_document_supported"] is True
+    assert payload is not None
+    compatibility = mncs_test.check_result(
+        result,
+        result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+    )
+    expected_payload = mncs_test._public_result_json_payload(
+        compatibility,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+    )
+    assert payload == expected_payload
+    assert original_loads(payload[0])["selection"] == result["selection"]
+
+
 def test_raw_native_public_document_fallback_materializes_only_after_native_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
