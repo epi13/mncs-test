@@ -204,7 +204,6 @@ record ObjectFieldArrayBuildStateV1 {
     valid: bool
 }
 record ObjectFieldIndexPassStateV1 {
-    keys: [KeyV1; 642],
     source: [u64; 642],
     target: [u64; 642],
     count: u64,
@@ -218,7 +217,6 @@ record ObjectFieldIndexPassStateV1 {
 }
 record ObjectFieldIndexPassResultV1 { order: [u64; 642], valid: bool }
 record ObjectFieldIndexSortStateV1 {
-    keys: [KeyV1; 642],
     order: [u64; 642],
     count: u64,
     width: u64,
@@ -261,6 +259,8 @@ record JsonOrderRequestV1 {
     document: JsonTokenDocumentV1,
     input_sha256: [byte; up_to 64]
 }
+record JsonDocumentCheckStateV1 { scanned: json.ScanState, hashed: sha256.DigestState }
+record JsonDocumentCheckV1 { valid: bool, input_sha256: [byte; up_to 64] }
 
 record JsonOrderChunkV1 { bytes: [byte; 1024], length: u64 }
 
@@ -406,6 +406,20 @@ fn hex_value(value: byte) -> (result: u64) {
     return number -% 87;
 }
 
+fn decode_hex4_in_chunk(
+    document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
+    start: u64,
+    index: u64
+) -> (result: u64) {
+    let a: u64 = hex_value(located_key_byte(document, chunk, base, start +% index));
+    let b: u64 = hex_value(located_key_byte(document, chunk, base, start +% index +% 1));
+    let c: u64 = hex_value(located_key_byte(document, chunk, base, start +% index +% 2));
+    let d: u64 = hex_value(located_key_byte(document, chunk, base, start +% index +% 3));
+    return a *% 4096 +% b *% 256 +% c *% 16 +% d;
+}
+
 fn decode_hex4(document: JsonTokenDocumentV1, start: u64, index: u64) -> (result: u64) {
     let a: u64 = hex_value(located_byte(document, start +% index));
     let b: u64 = hex_value(located_byte(document, start +% index +% 1));
@@ -445,15 +459,17 @@ fn decoded_codepoint(state: DecodeStateV1, value: u64) -> (result: DecodeStateV1
     return DecodeStateV1 { ..state, valid: false };
 }
 
-fn decode_key_step(
+fn decode_key_step_in_chunk(
     state: DecodeStateV1,
     document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
     start: u64,
     length: u64,
     index: u64
 ) -> (result: DecodeStateV1) {
     if index >= length { return state; }
-    let value: byte = located_byte(document, start +% index);
+    let value: byte = located_key_byte(document, chunk, base, start +% index);
     if state.skip > 0 {
         return DecodeStateV1 { ..state, skip: state.skip -% 1 };
     }
@@ -462,14 +478,14 @@ fn decode_key_step(
             if index +% 4 >= length {
                 return DecodeStateV1 { ..state, valid: false, escaped: false };
             }
-            let code: u64 = decode_hex4(document, start, index +% 1);
+            let code: u64 = decode_hex4_in_chunk(document, chunk, base, start, index +% 1);
             if code >= 55296 && code <= 56319 {
                 if index +% 10 >= length
-                    || located_byte(document, start +% index +% 5) != 92
-                    || located_byte(document, start +% index +% 6) != 117 {
+                    || located_key_byte(document, chunk, base, start +% index +% 5) != 92
+                    || located_key_byte(document, chunk, base, start +% index +% 6) != 117 {
                     return DecodeStateV1 { ..state, valid: false, escaped: false };
                 }
-                let low: u64 = decode_hex4(document, start, index +% 7);
+                let low: u64 = decode_hex4_in_chunk(document, chunk, base, start, index +% 7);
                 if low < 56320 || low > 57343 {
                     return DecodeStateV1 { ..state, valid: false, escaped: false };
                 }
@@ -503,6 +519,22 @@ fn decode_key_step(
     return decoded_byte(state, value);
 }
 
+fn empty_json_token_input_chunk() -> (result: JsonTokenInputChunkV1) {
+    return JsonTokenInputChunkV1 { bytes: [0; 1024], length: 0 };
+}
+
+fn decode_key_step(
+    state: DecodeStateV1,
+    document: JsonTokenDocumentV1,
+    start: u64,
+    length: u64,
+    index: u64
+) -> (result: DecodeStateV1) {
+    return decode_key_step_in_chunk(
+        state, document, empty_json_token_input_chunk(), 0, start, length, index
+    );
+}
+
 fn copy_decoded_key_byte(state: KeyCopyV1, decoded: DecodeStateV1, index: u64) -> (result: KeyCopyV1) {
     if index >= 256 { return state; }
     let prefix_byte: byte = select(index < decoded.length, decoded.bytes[index], 0);
@@ -522,16 +554,28 @@ fn copy_decoded_key_byte(state: KeyCopyV1, decoded: DecodeStateV1, index: u64) -
     };
 }
 
-fn decode_short_key(
-    document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64
+fn decode_short_key_in_chunk(
+    document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
+    raw_start: u64,
+    raw_length: u64
 ) -> (result: DecodeStateV1) {
     let initial: DecodeStateV1 = DecodeStateV1 {
         bytes: [0; 512], length: 0, escaped: false, skip: 0, valid: true
     };
     iterate i up_to 16 carrying decoded: DecodeStateV1 = initial {
-        next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
+        next decoded = decode_key_step_in_chunk(decoded, document, chunk, base, raw_start, raw_length, i);
     }
     return decoded;
+}
+
+fn decode_short_key(
+    document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64
+) -> (result: DecodeStateV1) {
+    return decode_short_key_in_chunk(
+        document, empty_json_token_input_chunk(), 0, raw_start, raw_length
+    );
 }
 
 fn copy_short_decoded_key(decoded: DecodeStateV1) -> (result: KeyCopyV1) {
@@ -551,9 +595,15 @@ fn compare_key_step(order: i64, left: KeyV1, right: KeyV1, index: u64, common: u
     return order;
 }
 
-fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: KeyV1) {
+fn decode_key_in_chunk(
+    document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
+    raw_start: u64,
+    raw_length: u64
+) -> (result: KeyV1) {
     if raw_length <= 16 {
-        let decoded_short: DecodeStateV1 = decode_short_key(document, raw_start, raw_length);
+        let decoded_short: DecodeStateV1 = decode_short_key_in_chunk(document, chunk, base, raw_start, raw_length);
         let key_bytes_short: KeyCopyV1 = copy_short_decoded_key(decoded_short);
         return KeyV1 {
             raw_start: raw_start,
@@ -570,7 +620,7 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
         bytes: [0; 512], length: 0, escaped: false, skip: 0, valid: true
     };
     iterate i up_to 256 carrying decoded: DecodeStateV1 = initial {
-        next decoded = decode_key_step(decoded, document, raw_start, raw_length, i);
+        next decoded = decode_key_step_in_chunk(decoded, document, chunk, base, raw_start, raw_length, i);
     }
     let key_initial: KeyCopyV1 = KeyCopyV1 {
         bytes: [0; 256], length: 0, ordered_prefix: 0
@@ -588,6 +638,12 @@ fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) ->
         valid: raw_length <= 256 && decoded.valid && !decoded.escaped
             && decoded.skip == 0 && key_bytes.length == decoded.length
     };
+}
+
+fn decode_key(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: KeyV1) {
+    return decode_key_in_chunk(
+        document, empty_json_token_input_chunk(), 0, raw_start, raw_length
+    );
 }
 
 fn decode_string(document: JsonTokenDocumentV1, raw_start: u64, raw_length: u64) -> (result: JsonDecodedStringV1) {
@@ -608,7 +664,11 @@ fn compare_key(left: KeyV1, right: KeyV1) -> (result: KeyOrderV1) {
     if left.ordered_prefix < right.ordered_prefix { return KeyOrderV1.Before; }
     if left.ordered_prefix > right.ordered_prefix { return KeyOrderV1.After; }
     let common: u64 = select(left.ordered_length < right.ordered_length, left.ordered_length, right.ordered_length);
-    let tail_start: u64 = select(common < 8, common, 8);
+    if common > 8 {
+        if left.ordered[8] < right.ordered[8] { return KeyOrderV1.Before; }
+        if left.ordered[8] > right.ordered[8] { return KeyOrderV1.After; }
+    }
+    let tail_start: u64 = select(common < 9, common, 9);
     let shared: [byte; up_to 256] = left.ordered[tail_start..common];
     iterate i over shared carrying order: i64 = 0 {
         next order = compare_key_step(order, left, right, tail_start +% i, common);
@@ -1102,14 +1162,14 @@ fn object_field_index_emit_right(
 }
 
 fn object_field_index_merge_step(
-    state: ObjectFieldIndexPassStateV1
+    state: ObjectFieldIndexPassStateV1, keys: [KeyV1; 642]
 ) -> (result: ObjectFieldIndexPassStateV1) {
     if !state.valid || state.output_index >= state.count { return state; }
     if state.left_index >= state.left_end { return object_field_index_emit_right(state); }
     if state.right_index >= state.right_end { return object_field_index_emit_left(state); }
     let left_index: u64 = state.source[state.left_index];
     let right_index: u64 = state.source[state.right_index];
-    return match compare_key(state.keys[left_index], state.keys[right_index]) {
+    return match compare_key(keys[left_index], keys[right_index]) {
         Before => object_field_index_emit_left(state),
         Equal => ObjectFieldIndexPassStateV1 { ..state, valid: false },
         After => object_field_index_emit_right(state)
@@ -1121,7 +1181,6 @@ fn merge_object_field_indices_pass(
 ) -> (result: ObjectFieldIndexPassResultV1) {
     let left_end: u64 = min_object_sort_index(width, count);
     let initial: ObjectFieldIndexPassStateV1 = ObjectFieldIndexPassStateV1 {
-        keys: keys,
         source: source,
         target: [0; 642],
         count: count,
@@ -1133,8 +1192,8 @@ fn merge_object_field_indices_pass(
         right_end: min_object_sort_index(width *% 2, count),
         valid: count <= 642 && width > 0
     };
-    iterate i up_to 642 carrying merged: ObjectFieldIndexPassStateV1 = initial {
-        next merged = object_field_index_merge_step(merged);
+    iterate i over source[0..count] carrying merged: ObjectFieldIndexPassStateV1 = initial {
+        next merged = object_field_index_merge_step(merged, keys);
     }
     return ObjectFieldIndexPassResultV1 {
         order: merged.target,
@@ -1143,14 +1202,13 @@ fn merge_object_field_indices_pass(
 }
 
 fn object_field_index_sort_step(
-    sorted: ObjectFieldIndexSortStateV1
+    sorted: ObjectFieldIndexSortStateV1, keys: [KeyV1; 642]
 ) -> (result: ObjectFieldIndexSortStateV1) {
     if !sorted.valid || sorted.width >= sorted.count { return sorted; }
     let merged: ObjectFieldIndexPassResultV1 = merge_object_field_indices_pass(
-        sorted.keys, sorted.order, sorted.count, sorted.width
+        keys, sorted.order, sorted.count, sorted.width
     );
     return ObjectFieldIndexSortStateV1 {
-        keys: sorted.keys,
         order: merged.order,
         count: sorted.count,
         width: sorted.width *% 2,
@@ -1196,25 +1254,24 @@ fn sort_object_fields_merge_indexed(
         return ObjectSortResultV1 { fields: JsonValueV1.Empty, valid: false };
     }
     let initial_order: [u64; 642] = [0; 642];
-    iterate i up_to 642 carrying order: [u64; 642] = initial_order {
-        next order = select(i < count, replace(order, i, i), order);
+    iterate i over initial_order[0..count] carrying order: [u64; 642] = initial_order {
+        next order = replace(order, i, i);
     }
     let sort_initial: ObjectFieldIndexSortStateV1 = ObjectFieldIndexSortStateV1 {
-        keys: built.keys,
         order: order,
         count: count,
         width: 1,
         valid: true
     };
     iterate pass up_to 10 carrying sorted: ObjectFieldIndexSortStateV1 = sort_initial {
-        next sorted = object_field_index_sort_step(sorted);
+        next sorted = object_field_index_sort_step(sorted, built.keys);
     }
     if !sorted.valid || sorted.width < count {
         return ObjectSortResultV1 { fields: JsonValueV1.Empty, valid: false };
     }
-    iterate i up_to 642 carrying ordered: JsonValueV1 = JsonValueV1.ObjectNil {
+    iterate i over sorted.order[0..count] carrying ordered: JsonValueV1 = JsonValueV1.ObjectNil {
         next ordered = object_field_index_sorted_cons(
-            sorted.keys, built.values, sorted.order, count, i, ordered
+            built.keys, built.values, sorted.order, count, i, ordered
         );
     }
     return ObjectSortResultV1 { fields: ordered, valid: true };
@@ -1378,6 +1435,19 @@ fn located_byte(document: JsonTokenDocumentV1, position: u64) -> (result: byte) 
     return found.value;
 }
 
+fn located_key_byte(
+    document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
+    position: u64
+) -> (result: byte) {
+    if position >= base {
+        let local: u64 = position -% base;
+        if local < chunk.length { return chunk.bytes[local]; }
+    }
+    return located_byte(document, position);
+}
+
 fn append_value(
     state: ParseStateV1,
     value: JsonValueV1,
@@ -1491,7 +1561,7 @@ fn container_value(
 
 fn parse_chunk_step(parsed: ParseStateV1, document: JsonTokenDocumentV1, base: u64, chunk: JsonTokenInputChunkV1, index: u64) -> (result: ParseStateV1) {
     if index < chunk.length {
-        return parse_step(parsed, document, base +% index, chunk.bytes[index]);
+        return parse_step(parsed, document, chunk, base, base +% index, chunk.bytes[index]);
     }
     return parsed;
 }
@@ -1539,6 +1609,8 @@ fn next_object_source_order(frame: FrameV1, key: KeyV1) -> (result: byte) {
 fn parse_string_step(
     state: ParseStateV1,
     document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
     position: u64,
     value: byte
 ) -> (result: ParseStateV1) {
@@ -1556,7 +1628,7 @@ fn parse_string_step(
         }
         let frame_index: u64 = closed.depth -% 1;
         let frame: FrameV1 = closed.frames[frame_index];
-        let key: KeyV1 = decode_key(document, raw_start, raw_length);
+        let key: KeyV1 = decode_key_in_chunk(document, chunk, base, raw_start, raw_length);
         if frame.kind != 1 || frame.expect != 1 || frame.has_pending_key || !key.valid {
             return ParseStateV1 { ..closed, valid: false };
         }
@@ -1674,8 +1746,15 @@ fn parse_colon(state: ParseStateV1) -> (result: ParseStateV1) {
     return ParseStateV1 { ..state, valid: false };
 }
 
-fn parse_step(state: ParseStateV1, document: JsonTokenDocumentV1, position: u64, value: byte) -> (result: ParseStateV1) {
-    if state.in_string { return parse_string_step(state, document, position, value); }
+fn parse_step(
+    state: ParseStateV1,
+    document: JsonTokenDocumentV1,
+    chunk: JsonTokenInputChunkV1,
+    base: u64,
+    position: u64,
+    value: byte
+) -> (result: ParseStateV1) {
+    if state.in_string { return parse_string_step(state, document, chunk, base, position, value); }
     let boundary: bool = scalar_boundary(value);
     let advanced: ParseStateV1 = maybe_finalize_scalar(state, position, boundary);
     if !advanced.valid { return advanced; }
@@ -1774,6 +1853,48 @@ fn scan_document(document: JsonTokenDocumentV1) -> (result: json.ScanState) {
         next scanned = scan_document_chunk(scanned, document.chunks[i]);
     }
     return json.scan_finish_end(scanned);
+}
+
+fn scan_digest_part(
+    state: JsonDocumentCheckStateV1, chunk: JsonTokenInputChunkV1, index: u64
+) -> (result: JsonDocumentCheckStateV1) {
+    let start: u64 = index *% 64;
+    if start >= chunk.length { return state; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    let part: [byte; up_to 64] = chunk.bytes[start..start +% size];
+    iterate i over part carrying scanned: json.ScanState = state.scanned {
+        next scanned = json.scan_step(scanned, part[i]);
+    }
+    return JsonDocumentCheckStateV1 {
+        scanned: scanned,
+        hashed: sha256.update_standard(state.hashed, part, size)
+    };
+}
+
+fn scan_digest_chunk(
+    state: JsonDocumentCheckStateV1, chunk: JsonTokenInputChunkV1
+) -> (result: JsonDocumentCheckStateV1) {
+    iterate i up_to 16 carrying checked: JsonDocumentCheckStateV1 = state {
+        next checked = scan_digest_part(checked, chunk, i);
+    }
+    return checked;
+}
+
+fn scan_digest_document(document: JsonTokenDocumentV1) -> (result: JsonDocumentCheckV1) {
+    let initial: JsonDocumentCheckStateV1 = JsonDocumentCheckStateV1 {
+        scanned: json.init(),
+        hashed: sha256.init()
+    };
+    iterate i over document.chunks carrying checked: JsonDocumentCheckStateV1 = initial {
+        next checked = scan_digest_chunk(checked, document.chunks[i]);
+    }
+    let scanned: json.ScanState = json.scan_finish_end(checked.scanned);
+    let digest: [byte; 32] = sha256.finalize_standard(checked.hashed);
+    return JsonDocumentCheckV1 {
+        valid: json_scan_is_valid(scanned),
+        input_sha256: encode_digest(digest)
+    };
 }
 
 fn json_scan_is_valid(scanned: json.ScanState) -> (result: bool) {
@@ -2895,31 +3016,6 @@ fn order_result(supported: bool, input_sha256: [byte; up_to 64], writer: JsonOrd
     };
 }
 
-fn document_digest(document: JsonTokenDocumentV1) -> (result: [byte; up_to 64]) {
-    let initial: sha256.DigestState = sha256.init();
-    iterate i over document.chunks carrying hashed: sha256.DigestState = initial {
-        next hashed = document_digest_chunk(hashed, document.chunks[i]);
-    }
-    let digest: [byte; 32] = sha256.finalize_standard(hashed);
-    return encode_digest(digest);
-}
-
-fn document_digest_part(hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1, index: u64) -> (result: sha256.DigestState) {
-    let start: u64 = index *% 64;
-    if start >= chunk.length { return hashed; }
-    let remaining: u64 = chunk.length -% start;
-    let size: u64 = select(remaining < 64, remaining, 64);
-    let part: [byte; up_to 64] = chunk.bytes[start..start +% size];
-    return sha256.update_standard(hashed, part, size);
-}
-
-fn document_digest_chunk(hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1) -> (result: sha256.DigestState) {
-    iterate i up_to 16 carrying current: sha256.DigestState = hashed {
-        next current = document_digest_part(current, chunk, i);
-    }
-    return current;
-}
-
 fn hex_digit(value: u64) -> (result: byte) {
     if value < 10 { return (value +% 48) as byte; }
     return (value -% 10 +% 97) as byte;
@@ -2935,6 +3031,35 @@ fn encode_digest(raw: [byte; 32]) -> (result: [byte; up_to 64]) {
     return encoded;
 }
 
+fn document_digest(document: JsonTokenDocumentV1) -> (result: [byte; up_to 64]) {
+    let initial: sha256.DigestState = sha256.init();
+    iterate i over document.chunks carrying hashed: sha256.DigestState = initial {
+        next hashed = document_digest_chunk(hashed, document.chunks[i]);
+    }
+    let digest: [byte; 32] = sha256.finalize_standard(hashed);
+    return encode_digest(digest);
+}
+
+fn document_digest_part(
+    hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1, index: u64
+) -> (result: sha256.DigestState) {
+    let start: u64 = index *% 64;
+    if start >= chunk.length { return hashed; }
+    let remaining: u64 = chunk.length -% start;
+    let size: u64 = select(remaining < 64, remaining, 64);
+    let part: [byte; up_to 64] = chunk.bytes[start..start +% size];
+    return sha256.update_standard(hashed, part, size);
+}
+
+fn document_digest_chunk(
+    hashed: sha256.DigestState, chunk: JsonTokenInputChunkV1
+) -> (result: sha256.DigestState) {
+    iterate i up_to 16 carrying current: sha256.DigestState = hashed {
+        next current = document_digest_part(current, chunk, i);
+    }
+    return current;
+}
+
 fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result: ParseStateV1) {
     if request_valid {
         let scanned: json.ScanState = scan_document(document);
@@ -2944,10 +3069,7 @@ fn parse_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result:
 }
 
 fn parse_key_order_checked(document: JsonTokenDocumentV1, request_valid: bool) -> (result: ParseStateV1) {
-    if request_valid {
-        let scanned: json.ScanState = scan_document(document);
-        if json_scan_is_valid(scanned) { return parse_key_order_document(document); }
-    }
+    if request_valid { return parse_key_order_document(document); }
     return ParseStateV1 { ..empty_parse_state(true), valid: false };
 }
 
@@ -3663,7 +3785,8 @@ fn valid_order_request(request: JsonOrderRequestV1, shape: DocumentShapeV1) -> (
         || request.document.byte_length > 65536 || request.input_sha256.len != 64 {
         return false;
     }
-    return same_bytes(request.input_sha256, document_digest(request.document));
+    let checked: JsonDocumentCheckV1 = scan_digest_document(request.document);
+    return checked.valid && same_bytes(request.input_sha256, checked.input_sha256);
 }
 
 fn public_result_json_key_order_app_v1(context: ApplicationContext) -> (result: ApplicationExit)

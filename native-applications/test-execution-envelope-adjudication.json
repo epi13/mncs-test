@@ -5,7 +5,7 @@
   "module": "mncs.test.execution_envelope_adjudication_v1",
   "entry_function": "execution_envelope_adjudication_app_v1",
   "profile": "0.18",
-  "interface_identity": "ea32093218078ce6adc3da650e2b9565cc6b0c7fed4c0f59de50523c6cb0f4ce",
+  "interface_identity": "ca3f29b4a44ca383286ccae7afb3c7dd5a9002ae6e9443be21ce56121650c1e9",
   "libraries": [
     "../../mncs-stdlib/library",
     "../native"
