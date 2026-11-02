@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -1529,6 +1530,52 @@ def test_native_windowed_token_stream_handles_a_medium_document_without_host_tok
     assert "tape" not in windowed_request
 
 
+def test_native_windowed_token_stream_handles_extended_bound_without_host_tokens(
+    tmp_path: Path,
+) -> None:
+    value = {
+        f"field-{index:02d}": chr(65 + index % 26) * 154
+        for index in reversed(range(46))
+    }
+    value["field-00"] = "x" * 145 + '"\\' + "東京🦆"
+    source = mncs_test.compact_json(value, sort_keys=False).encode("utf-8")
+    assert 7168 < len(source) <= 7800
+    assert len(mncs_test._public_result_input_chunks(source)) == 8
+    expected = _python_result_bytes(value)
+    original_run_native_app = mncs_test.run_native_app
+    windowed_result: dict[str, Any] = {}
+
+    def record_windowed_result(application: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_run_native_app(application, *args, **kwargs)
+        if application == "test-public-result-json-native-token-stream-windowed.json":
+            windowed_result.update(result)
+        return result
+
+    with (
+        mock.patch.object(mncs_test, "PUBLIC_RESULT_JSON_KEY_ORDER_MAX_INPUT_BYTES", 1),
+        mock.patch.object(mncs_test, "PUBLIC_RESULT_JSON_KEY_ORDER_MAX_VALUES", 1),
+        mock.patch.object(
+            mncs_test, "run_native_app", side_effect=record_windowed_result
+        ) as native_app,
+    ):
+        actual, digest = mncs_test._public_result_json_payload(
+            value,
+            mncs=str(MNCS),
+            cwd=tmp_path,
+            environment=_native_environment(),
+        )
+
+    assert actual == expected
+    assert digest == hashlib.sha256(expected).hexdigest()
+    assert windowed_result["supported"] is True
+    applications = [call.args[0] for call in native_app.call_args_list]
+    assert applications[0] == "test-public-result-json-native-token-stream-windowed.json"
+    windowed_request = native_app.call_args_list[0].args[1]
+    assert set(windowed_request) == {"schema_version", "document", "input_sha256"}
+    assert "token_words" not in windowed_request
+    assert "tape" not in windowed_request
+
+
 def test_native_windowed_token_stream_rejects_a_tampered_source_digest(
     tmp_path: Path,
 ) -> None:
@@ -1559,6 +1606,36 @@ def test_native_windowed_token_stream_rejects_a_tampered_source_digest(
 
     assert result["supported"] is False
     assert result["request_valid"] is False
+
+
+@pytest.mark.parametrize("bad_escape", [b"\\q", b"\\uD800x"])
+def test_native_windowed_token_stream_rejects_malformed_string_contents(
+    bad_escape: bytes, tmp_path: Path,
+) -> None:
+    source = b'{"payload":"' + b"x" * 4_100 + bad_escape + b'"}'
+    assert len(source) <= mncs_test.PUBLIC_RESULT_JSON_NATIVE_TOKEN_STREAM_WINDOWED_MAX_BYTES
+    prepared = mncs_test._native_public_result_document_request(source)
+    assert prepared is not None
+    start_request, _source_length = prepared
+    request = {
+        "schema_version": mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
+        "document": start_request["document"],
+        "input_sha256": start_request["input_sha256"],
+    }
+
+    result = mncs_test.run_native_app(
+        "test-public-result-json-native-token-stream-windowed.json",
+        request,
+        request_schema=mncs_test.PUBLIC_RESULT_JSON_NATIVE_TAPE_START_REQUEST_SCHEMA,
+        result_schema=mncs_test.PUBLIC_RESULT_JSON_TOKEN_TAPE_RESULT_SCHEMA,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_native_environment(),
+        step_budget=8_000_000,
+    )
+
+    assert result["request_valid"] is True
+    assert result["supported"] is False
 
 
 def test_native_key_order_sorts_documents_larger_than_legacy_bound(tmp_path: Path) -> None:

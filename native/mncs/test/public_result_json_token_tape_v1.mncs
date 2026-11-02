@@ -1867,8 +1867,8 @@ fn public_result_json_native_token_stream_windowed_app_v1(context: ApplicationCo
     );
     let shape: RawDocumentShapeV1 = raw_document_shape(request.document);
     let within_window_bound: bool = shape.valid
-        && request.document.byte_length <= 7168
-        && request.document.chunks.len <= 7;
+        && request.document.byte_length <= 7800
+        && request.document.chunks.len <= 8;
     if !within_window_bound {
         return failure([110, 97, 116, 105, 118, 101, 32, 74, 83, 79, 78, 32, 116, 111, 107, 101, 110, 32, 115, 116, 114, 101, 97, 109, 32, 101, 120, 99, 101, 101, 100, 115, 32, 105, 116, 115, 32, 119, 105, 110, 100, 111, 119, 32, 98, 111, 117, 110, 100], 4);
     }
