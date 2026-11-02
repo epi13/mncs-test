@@ -1314,6 +1314,70 @@ def test_native_check_result_projection_scans_128_test_rows_within_step_budget(
     assert family["verdict"] == "PASS"
 
 
+def test_native_check_result_projection_keeps_first_failure_for_128_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed_rows = {17, 99}
+    result = {
+        "schema_version": "mncs.test-result/1",
+        "id": "runner-check",
+        "provider": "mncs-test",
+        "verdict": "FAIL",
+        "classification": "fail",
+        "failure_class": "assertion_failure",
+        "summary": {"passed": 126, "failed": 2, "skipped": 0},
+        "tests": [
+            {
+                "id": f"row-{index:03d}",
+                "verdict": "FAIL" if index in failed_rows else "PASS",
+            }
+            for index in range(128)
+        ],
+        "run_id": "run-native-128-first-failure",
+    }
+    document = mncs_test.json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert len(document) <= mncs_test.CHECK_RESULT_JSON_NATIVE_MAX_DOCUMENT_BYTES
+    result_digest = "c" * 64
+
+    compatibility = mncs_test.check_result(
+        result,
+        result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+    )
+    native_responses: list[dict] = []
+    original_run_native_app = mncs_test.run_native_app
+
+    def observe_native_app(name: str, request: dict, **kwargs: object) -> dict:
+        response = original_run_native_app(name, request, **kwargs)
+        if name == "test-check-result-json-native.json":
+            native_responses.append(response)
+        return response
+
+    monkeypatch.setattr(mncs_test, "run_native_app", observe_native_app)
+    native = mncs_test.check_result(
+        result,
+        result_digest,
+        mncs=str(MNCS),
+        cwd=tmp_path,
+        environment=_environment(),
+        test_result_document=document,
+    )
+
+    assert native == compatibility
+    assert native["unresolved"] == []
+    assert "failing_identity=row-017" in native["summary"]
+    assert len(native_responses) == 1
+    assert native_responses[0]["supported"] is True
+    family = native_responses[0]["family_metadata"]
+    assert family["supported"] is True
+    assert family["test_result_schema_valid"] is True
+    assert family["verdict"] == "FAIL"
+
+
 def test_native_check_result_projection_falls_back_above_native_document_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

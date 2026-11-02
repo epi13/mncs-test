@@ -133,17 +133,6 @@ record RawMessageBuildStateV1 {
 record NumberValueV1 { valid: bool, value: u64 }
 record NumberParseV1 { valid: bool, value: u64 }
 
-record TestRowsV1 {
-    valid: bool,
-    rows: [check_result.CheckTestV1; 256],
-    count: u64
-}
-
-enum TokenTestRowsListV1 {
-    Nil,
-    Cons { head: check_result.CheckTestV1, tail: TokenTestRowsListV1 }
-}
-
 enum TokenIdentityRowsListV1 {
     Nil,
     Cons { head: [byte; up_to 512], tail: TokenIdentityRowsListV1 }
@@ -151,13 +140,9 @@ enum TokenIdentityRowsListV1 {
 
 record TokenTestRowsV1 {
     valid: bool,
-    rows: TokenTestRowsListV1,
+    first_failure_found: bool,
+    first_failure: check_result.CheckTestV1,
     count: u64
-}
-
-record TokenRowsBuildStateV1 {
-    rows: [check_result.CheckTestV1; 256],
-    source: TokenTestRowsListV1
 }
 
 record TokenIdentityRowsBuildStateV1 {
@@ -1066,41 +1051,19 @@ fn mark_token_key(
 }
 
 fn empty_token_rows() -> (result: TokenTestRowsV1) {
+    let empty: check_result.CheckTestV1 = check_result.CheckTestV1 { id: [], verdict: [] };
     return TokenTestRowsV1 {
         valid: true,
-        rows: TokenTestRowsListV1.Nil,
+        first_failure_found: false,
+        first_failure: empty,
         count: 0
     };
 }
 
-fn token_rows_materialize_step(
-    state: TokenRowsBuildStateV1,
-    count: u64,
-    index: u64
-) -> (result: TokenRowsBuildStateV1) {
-    return match state.source {
-        TokenTestRowsListV1.Nil => state,
-        TokenTestRowsListV1.Cons { head: head, tail: tail } =>
-            TokenRowsBuildStateV1 {
-                rows: replace(state.rows, count -% 1 -% index, head),
-                source: tail
-            }
-    };
-}
-
-fn materialize_token_rows(source: TokenTestRowsV1) -> (result: TestRowsV1) {
-    let empty: check_result.CheckTestV1 = check_result.CheckTestV1 { id: [], verdict: [] };
-    let initial: TokenRowsBuildStateV1 = TokenRowsBuildStateV1 {
-        rows: [empty; 256], source: source.rows
-    };
-    iterate i up_to 256 carrying built: TokenRowsBuildStateV1 = initial {
-        next built = token_rows_materialize_step(built, source.count, i);
-    }
-    return TestRowsV1 {
-        valid: source.valid,
-        rows: built.rows,
-        count: source.count
-    };
+fn token_row_is_failure(verdict: [byte; up_to 16]) -> (result: bool) {
+    if verdict.len != 4 { return false; }
+    return verdict[0] == 70 && verdict[1] == 65
+        && verdict[2] == 73 && verdict[3] == 76;
 }
 
 fn token_row_start(state: CheckResultTokenStateV1) -> (result: CheckResultTokenStateV1) {
@@ -1140,12 +1103,16 @@ fn token_row_finish(
         id: widen_text_512(id.bytes, id.length),
         verdict: widen_text_16(verdict.bytes, verdict.length)
     };
-    let rows: TokenTestRowsListV1 = TokenTestRowsListV1.Cons {
-        head: row, tail: state.tests.rows
-    };
+    let row_failed: bool = token_row_is_failure(row.verdict);
+    let first_failure: bool = row_failed && !state.tests.first_failure_found;
     return CheckResultTokenStateV1 {
         ..state,
-        tests: TokenTestRowsV1 { ..state.tests, rows: rows, count: state.tests.count +% 1 }
+        tests: TokenTestRowsV1 {
+            ..state.tests,
+            first_failure_found: state.tests.first_failure_found || row_failed,
+            first_failure: select(first_failure, row, state.tests.first_failure),
+            count: state.tests.count +% 1
+        }
     };
 }
 
@@ -1935,7 +1902,9 @@ fn extract_token_result(
         FieldLookupV1 { found: state.failure_message.found, value: state.failure_message },
         state.failure_message_has_escape
     );
-    let tests: TestRowsV1 = materialize_token_rows(state.tests);
+    let tests: [check_result.CheckTestV1; up_to 256] = select(
+        state.tests.first_failure_found, [state.tests.first_failure], []
+    );
     let source_id: [byte; up_to 1024] = widen_text_1024(id_text.bytes, id_text.length);
     let check_id: [byte; up_to 1024] = select(metadata.check_id.len > 0, metadata.check_id, source_id);
     let message_chunks: [[byte; up_to 1024]; up_to 256] =
@@ -1957,8 +1926,8 @@ fn extract_token_result(
         failure_message_count: failure_message.count,
         failure_message_chunks: message_chunks,
         run_id: widen_text_512(run_id.bytes, run_id.length),
-        test_count: tests.count,
-        tests: tests.rows[0..tests.count]
+        test_count: tests.len,
+        tests: tests
     };
     let supported: bool = state.valid && json_tokens.cursor_is_valid_v1(state.cursor) && state.root_is_object
         && (metadata.check_id.len > 0 || (state.id_seen && id_text.valid && id_text.length <= 1024))
