@@ -10556,6 +10556,7 @@ def run_manifest(args: argparse.Namespace) -> int:
     environment = native_application_environment(cwd)
     mncs: str | None = args.mncs
     artifacts: ArtifactStore | None = None
+    raw_result_fragments: list[tuple[str, bytes]] = []
     try:
         manifest_environment = environment
         manifest_mncs = args.mncs
@@ -10681,7 +10682,6 @@ def run_manifest(args: argparse.Namespace) -> int:
         suite_result: dict[str, Any] | None = None
         suite_summary: dict[str, Any] | None = None
         test_results: list[dict[str, Any]] = []
-        raw_result_fragments: list[tuple[str, bytes]] = []
         test_inventory: dict[str, Any] | None = None
         execution: dict[str, Any] | None = None
         native_selection_summary: dict[str, Any] | None = None

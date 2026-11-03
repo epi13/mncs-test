@@ -251,14 +251,53 @@
           "argv": [
             "python3",
             "-m",
-            "unittest",
-            "discover",
-            "-s",
+            "pytest",
             "tests",
-            "-p",
-            "test_*.py"
+            "-q"
           ],
-          "timeout_seconds": 1800
+          "timeout_seconds": 1800,
+          "toolchains": {
+            "MNCS_LANGUAGE_REPO": {
+              "repository": "mncs-language",
+              "path": "."
+            },
+            "MNCS_BINARY": {
+              "repository": "mncs-language",
+              "path": "target/release/mncs"
+            },
+            "MNCS_STDLIB_ROOT": {
+              "repository": "mncs-stdlib",
+              "path": "."
+            },
+            "MNCS_COMMONS_ROOT": {
+              "repository": "mncs-commons",
+              "path": "."
+            },
+            "MNCS_COMMONS_REPO": {
+              "repository": "mncs-commons",
+              "path": "."
+            },
+            "MNCS": {
+              "repository": "mncs-language",
+              "path": "target/release/mncs"
+            },
+            "MNCS_COMPILER_CHECKOUT": {
+              "repository": "mncs-compiler",
+              "path": "."
+            },
+            "MNCS_COMPILER_PROBE": {
+              "repository": "mncs-compiler",
+              "path": ".bootstrap/target/release/mncs-compiler-stage0-probe"
+            },
+            "MNCS_VM_CHECKOUT": {
+              "repository": "mncs-vm",
+              "path": "."
+            },
+            "MNCS_VM_BIN": {
+              "repository": "mncs-vm",
+              "path": "target/debug/mncs-vm"
+            }
+          }
         }
       }
     ]
