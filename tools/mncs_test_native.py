@@ -57,7 +57,10 @@ def toolchain_cache_dir(mncs: str) -> Path:
     identities but produce mutually unvalidating artifacts; sharing one
     descriptor-local cache turns routine mixed-toolchain use into a hard
     admission refusal (pressure MNCS-TEST-P-012). Each toolchain binary
-    path gets its own cache namespace. An explicit
+    path gets its own cache namespace. Linked worktrees share the Git common
+    directory's disposable cache when it is writable, rather than retaining
+    another artifact history in every checkout. A restricted sandbox or an
+    exported source tree keeps its cache inside the selected checkout. An explicit
     MNCS_NATIVE_APPLICATION_CACHE_DIR still wins when set.
     """
     located = shutil.which(mncs) or mncs
@@ -66,7 +69,20 @@ def toolchain_cache_dir(mncs: str) -> Path:
     except OSError:
         canonical = str(located)
     scope = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-    return repo_root() / "native-applications" / ".mncs" / "toolchains" / scope
+    repository = repo_root()
+    try:
+        common = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+        common_directory = Path(common)
+        if common_directory.is_absolute() and common_directory.is_dir() and os.access(common_directory, os.W_OK):
+            return common_directory / "mncs-native-application-cache" / scope
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return repository / "native-applications" / ".mncs" / "toolchains" / scope
 
 
 def _ordered_path_suffix(path_parts: tuple[str, ...], suffix: tuple[str, ...]) -> bool:
@@ -238,7 +254,12 @@ def run_native_app(
             relative_result = result_path.relative_to(cwd).as_posix()
             command = [mncs, "run-app", str(invocation_descriptor)]
             if "MNCS_NATIVE_APPLICATION_CACHE_DIR" not in environment:
-                command.extend(("--cache-dir", str(toolchain_cache_dir(mncs))))
+                cache_directory = toolchain_cache_dir(mncs)
+                command.extend(("--cache-dir", str(cache_directory)))
+                environment = {
+                    **environment,
+                    "MNCS_NATIVE_APPLICATION_CACHE_STORAGE_ROOT": str(cache_directory.parent),
+                }
             command.extend(
                 [
                     "--grant-structured",

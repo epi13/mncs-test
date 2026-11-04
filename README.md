@@ -1,5 +1,15 @@
 # mncs-test
 
+Native application caches are disposable. Local linked worktrees share the
+Git common directory's `mncs-native-application-cache` storage, separated by
+toolchain executable path, so completing another branch does not leave a
+separate artifact history in its checkout. An explicitly selected
+`MNCS_NATIVE_APPLICATION_CACHE_DIR` takes precedence. Exported source and
+restricted sandboxes with a read-only Git common directory retain a local
+cache. The Language cache owner enforces its byte, entry, and idle-age limits;
+see `mncs-language/docs/native-application-cache.md`. Cache contents are not
+durable test evidence and may be regenerated.
+
 <!-- MNCS:generated:begin -->
 ## Project entry
 
