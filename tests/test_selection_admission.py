@@ -162,3 +162,48 @@ def test_verifier_consumer_uses_native_selection_application() -> None:
     assert admission["provable"] is True
     assert admission["required_test_identities"] == ["suite.one"]
     assert admission["head_matches"] is False
+
+
+def test_run_native_app_does_not_inherit_live_consumer_stdin(tmp_path: Path) -> None:
+    """Shared run_native_app transport must not hang on an open parent stdin pipe."""
+    import json
+    import subprocess
+
+    if not MNCS.is_file():
+        pytest.skip("selected mncs binary unavailable")
+    script = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
+from mncs_test_native import run_native_app
+from mncs_test_verify import SELECTION_REQUEST_SCHEMA, SELECTION_RESULT_SCHEMA
+root = Path(sys.argv[1])
+env = json.loads(sys.argv[3])
+result = run_native_app(
+    "test-verification-selection.json",
+    {"schema_version": SELECTION_REQUEST_SCHEMA, "scan_count": 0, "scans": []},
+    request_schema=SELECTION_REQUEST_SCHEMA,
+    result_schema=SELECTION_RESULT_SCHEMA,
+    mncs=sys.argv[2],
+    cwd=root,
+    environment=env,
+    timeout_seconds=10.0,
+)
+assert result["schema_version"] == SELECTION_RESULT_SCHEMA
+"""
+    env = _environment()
+    env["MNCS_NATIVE_APPLICATION_CACHE_DIR"] = str(tmp_path / "cache")
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(ROOT), str(MNCS), json.dumps(env)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        process.wait(timeout=15)
+        assert process.returncode == 0, process.stderr.read().decode()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()

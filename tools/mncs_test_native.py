@@ -279,6 +279,7 @@ def run_native_app(
                 command,
                 cwd=str(cwd),
                 env=environment,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 check=False,
